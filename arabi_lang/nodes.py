@@ -94,11 +94,12 @@ class Pass(Node):
 
 
 class Try(Node):
-    def __init__(self, body, except_body, finally_body, line=None):
+    def __init__(self, body, except_body, finally_body, except_binding=None, line=None):
         super().__init__(line)
         self.body = body
         self.except_body = except_body    # [stmt] أو None
         self.finally_body = finally_body  # [stmt] أو None
+        self.except_binding = except_binding  # اسم ربط الخطأ أو None
 
 
 class Raise(Node):
@@ -144,6 +145,49 @@ class Switch(Node):
         self.subject = subject
         self.cases = cases
         self.default_body = default_body  # [stmt] أو None
+
+
+class EnumDef(Node):
+    """تعريف تعداد: أعضاء [(الاسم، تعبير القيمة أو None) للقراءة التلقائية]."""
+
+    def __init__(self, name, members, line=None):
+        super().__init__(line)
+        self.name = name
+        self.members = members
+
+
+class PropertyDef(Node):
+    """خاصية محسوبة داخل صنف: خاصية الاسم: ... جسم ..."""
+
+    def __init__(self, name, body, line=None):
+        super().__init__(line)
+        self.name = name
+        self.body = body
+
+
+class Global(Node):
+    """جملة عالمي — تعيينات الأسماء التالية تذهب للنطاق العام."""
+
+    def __init__(self, names, line=None):
+        super().__init__(line)
+        self.names = names
+
+
+class Assert(Node):
+    """جملة تحقق شرط مع رسالة اختيارية تظهر عند الفشل."""
+
+    def __init__(self, test, message, line=None):
+        super().__init__(line)
+        self.test = test
+        self.message = message      # تعبير أو None
+
+
+class Delete(Node):
+    """جملة احذف — الهدف: اسم أو فهرسة أو خاصية."""
+
+    def __init__(self, target, line=None):
+        super().__init__(line)
+        self.target = target
 
 
 # ================== تعبيرات (Expressions) ==================
@@ -263,6 +307,16 @@ class This(Node):
 
 class Super(Node):
     """الكلمة المفتاحية 'الأصل' — الصنف الأب داخل جسم الصنف."""
+
+
+class Ternary(Node):
+    """التعبير الثلاثي: لو شرط: قيمة1 وإلا قيمة2"""
+
+    def __init__(self, test, if_true, if_false, line=None):
+        super().__init__(line)
+        self.test = test
+        self.if_true = if_true
+        self.if_false = if_false
 
 
 class Lambda(Node):

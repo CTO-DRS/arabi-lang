@@ -1374,5 +1374,756 @@ class TestStringMethodsV14(unittest.TestCase):
             'موجود\n')
 
 
+# ============================================================
+#              اختبارات الإصدار 1.5.0 — الميزات الجديدة
+# ============================================================
+
+class TestTernary(unittest.TestCase):
+    """التعبير الثلاثي: لو شرط: قيمة وإلا قيمة"""
+
+    def test_basic_true(self):
+        self.assertEqual(
+            run_arabi('اطبع(لو صح: "نعم" وإلا "لا")'), 'نعم\n')
+
+    def test_basic_false(self):
+        self.assertEqual(
+            run_arabi('اطبع(لو خطأ: "نعم" وإلا "لا")'), 'لا\n')
+
+    def test_with_condition(self):
+        self.assertEqual(
+            run_arabi('العمر = ٢٠\nاطبع(لو العمر >= ١٨: "بالغ" وإلا "طفل")'),
+            'بالغ\n')
+
+    def test_in_assignment(self):
+        self.assertEqual(
+            run_arabi('س = ٥\nالنتيجة = لو س > ٠: "موجب" وإلا "سالب"\n'
+                      'اطبع(النتيجة)'), 'موجب\n')
+
+    def test_in_function_arg(self):
+        self.assertEqual(
+            run_arabi('اطبع(لو ١ > ٢: "أ" وإلا "ب")'), 'ب\n')
+
+    def test_nested_ternary(self):
+        self.assertEqual(
+            run_arabi('س = ٠\nاطبع(لو س > ٠: "موجب" وإلا لو س < ٠: "سالب" وإلا "صفر")'),
+            'صفر\n')
+
+    def test_with_complex_condition(self):
+        self.assertEqual(
+            run_arabi('اطبع(لو ٢ + ٢ == ٤ و ٥ > ٣: "صحيح" وإلا "خطأ")'),
+            'صحيح\n')
+
+    def test_lazy_evaluation(self):
+        # الفرع غير المختار لا يُنفذ (لا يسبب خطأ)
+        self.assertEqual(
+            run_arabi('اطبع(لو صح: "سليم" وإلا ١ / ٠)'), 'سليم\n')
+
+    def test_missing_else(self):
+        expect_error('س = لو صح: ١', ParseError, 'وإلا')
+
+    def test_missing_colon(self):
+        expect_error('س = لو صح ١ وإلا ٢', ParseError, "':'")
+
+
+class TestEnums(unittest.TestCase):
+    """جملة تعداد"""
+
+    ENUM_SRC = (
+        'تعداد يوم:\n'
+        '    السبت\n'
+        '    الأحد\n'
+        '    الاثنين\n'
+    )
+
+    def test_auto_values_start_from_one(self):
+        out = run_arabi(self.ENUM_SRC
+                        + 'اطبع(يوم.السبت.القيمة)\nاطبع(يوم.الأحد.القيمة)')
+        self.assertEqual(out, '1\n2\n')
+
+    def test_explicit_value_continues(self):
+        out = run_arabi('تعداد يوم:\n    السبت\n    الأحد = ٧\n    الاثنين\n'
+                        'اطبع(يوم.الأحد.القيمة)\nاطبع(يوم.الاثنين.القيمة)')
+        self.assertEqual(out, '7\n8\n')
+
+    def test_member_display(self):
+        self.assertEqual(run_arabi(self.ENUM_SRC + 'اطبع(يوم.السبت)'),
+                         'يوم.السبت\n')
+
+    def test_member_name_attribute(self):
+        self.assertEqual(run_arabi(self.ENUM_SRC + 'اطبع(يوم.السبت.الاسم)'),
+                         'السبت\n')
+
+    def test_members_equal(self):
+        out = run_arabi(self.ENUM_SRC
+                        + 'اطبع(يوم.السبت == يوم.السبت)\n'
+                          'اطبع(يوم.السبت == يوم.الأحد)')
+        self.assertEqual(out, 'صح\nخطأ\n')
+
+    def test_member_in_switch(self):
+        out = run_arabi(self.ENUM_SRC
+                        + 'بدّل يوم.الأحد\n'
+                          'حالة يوم.السبت:\n    اطبع("أول أيام الراحة")\n'
+                          'حالة يوم.الأحد:\n    اطبع("بداية الأسبوع")\n')
+        self.assertEqual(out, 'بداية الأسبوع\n')
+
+    def test_unknown_member(self):
+        expect_error(self.ENUM_SRC + 'اطبع(يوم.الجمعة)',
+                     ArabiRuntimeError, 'لا يحتوي')
+
+    def test_member_attributes(self):
+        expect_error(self.ENUM_SRC + 'اطبع(يوم.السبت.مجهول)',
+                     ArabiRuntimeError, 'الاسم، القيمة')
+
+    def test_empty_enum(self):
+        expect_error('تعداد فارغ:\n    تجاهل\n', ParseError, 'تعداد')
+
+    def test_duplicate_member(self):
+        expect_error('تعداد ت:\n    أ\n    أ\n', ArabiRuntimeError, 'تكرار')
+
+    def test_non_int_value(self):
+        expect_error('تعداد ت:\n    أ = "نص"\n', ArabiRuntimeError, 'عددًا صحيحًا')
+
+    def test_enum_typename(self):
+        self.assertEqual(run_arabi(self.ENUM_SRC + 'اطبع(نوع(يوم))'), 'تعداد\n')
+
+
+class TestProperties(unittest.TestCase):
+    """خاصية محسوبة داخل صنف"""
+
+    RECT_SRC = (
+        'صنف مستطيل:\n'
+        '    دالة إنشاء(العرض، الارتفاع):\n'
+        '        هذا.العرض = العرض\n'
+        '        هذا.الارتفاع = الارتفاع\n'
+        '    خاصية المساحة:\n'
+        '        أعد هذا.العرض * هذا.الارتفاع\n'
+        '    خاصية المحيط:\n'
+        '        أعد (هذا.العرض + هذا.الارتفاع) * ٢\n'
+    )
+
+    def test_property_evaluation(self):
+        self.assertEqual(
+            run_arabi(self.RECT_SRC + 'اطبع(مستطيل(٤، ٥).المساحة)'), '20\n')
+
+    def test_property_updates_dynamically(self):
+        out = run_arabi(self.RECT_SRC
+                        + 'م = مستطيل(٤، ٥)\n'
+                          'م.العرض = ١٠\n'
+                          'اطبع(م.المساحة)')
+        self.assertEqual(out, '50\n')
+
+    def test_property_in_expression(self):
+        self.assertEqual(
+            run_arabi(self.RECT_SRC
+                      + 'اطبع(مستطيل(٢، ٣).المساحة + مستطيل(١، ١).المحيط)'),
+            '10\n')
+
+    def test_property_not_callable(self):
+        expect_error(self.RECT_SRC + 'م = مستطيل(٢، ٣)\nم.المساحة()',
+                     ArabiRuntimeError, 'خاصية محسوبة')
+
+    def test_property_inherited(self):
+        src = (self.RECT_SRC
+               + 'صنف مربع من مستطيل:\n'
+                 '    دالة إنشاء(طول):\n'
+                 '        الأصل.إنشاء(هذا، طول، طول)\n')
+        self.assertEqual(run_arabi(src + 'اطبع(مربع(٦).المساحة)'), '36\n')
+
+    def test_property_with_condition(self):
+        src = ('صنف شخص:\n'
+               '    دالة إنشاء(العمر):\n'
+               '        هذا.العمر = العمر\n'
+               '    خاصية مرحلة:\n'
+               '        أعد لو هذا.العمر < ١٨: "طفل" وإلا "بالغ"\n')
+        out = run_arabi(src + 'اطبع(شخص(١٠).مرحلة)\nاطبع(شخص(٣٠).مرحلة)')
+        self.assertEqual(out, 'طفل\nبالغ\n')
+
+    def test_property_can_read_fields(self):
+        self.assertEqual(
+            run_arabi(self.RECT_SRC + 'م = مستطيل(٣، ٤)\nاطبع(م.المحيط)'), '14\n')
+
+    def test_duplicate_member_name(self):
+        src = ('صنف ص:\n'
+               '    دالة ط():\n'
+               '        أعد ١\n'
+               '    خاصية ط:\n'
+               '        أعد ٢\n')
+        expect_error(src, ArabiRuntimeError, 'تكرار')
+
+
+class TestOperatorOverload(unittest.TestCase):
+    """تحميل العوامل عبر الطرق الخاصة"""
+
+    VEC_SRC = (
+        'صنف متجه:\n'
+        '    دالة إنشاء(س، ص):\n'
+        '        هذا.س = س\n'
+        '        هذا.ص = ص\n'
+        '    دالة اجمع(آخر):\n'
+        '        أعد متجه(هذا.س + آخر.س، هذا.ص + آخر.ص)\n'
+        '    دالة اطرح(آخر):\n'
+        '        أعد متجه(هذا.س - آخر.س، هذا.ص - آخر.ص)\n'
+        '    دالة اضرب(معامل):\n'
+        '        لو نوع(معامل) == "عدد صحيح":\n'
+        '            أعد متجه(هذا.س * معامل، هذا.ص * معامل)\n'
+        '        أعد متجه(هذا.س * معامل.س، هذا.ص * معامل.ص)\n'
+        '    دالة نص():\n'
+        '        أعد ق"({هذا.س}، {هذا.ص})"\n'
+        '    دالة يساوي(آخر):\n'
+        '        أعد هذا.س == آخر.س و هذا.ص == آخر.ص\n'
+    )
+
+    def test_add(self):
+        out = run_arabi(self.VEC_SRC + 'اطبع(متجه(١، ٢) + متجه(٣، ٤))')
+        self.assertEqual(out, '(4، 6)\n')
+
+    def test_subtract(self):
+        out = run_arabi(self.VEC_SRC + 'اطبع(متجه(٥، ٧) - متجه(١، ٢))')
+        self.assertEqual(out, '(4، 5)\n')
+
+    def test_multiply_by_object(self):
+        out = run_arabi(self.VEC_SRC + 'اطبع(متجه(٢، ٣) * متجه(٤، ٥))')
+        self.assertEqual(out, '(8، 15)\n')
+
+    def test_multiply_by_number(self):
+        out = run_arabi(self.VEC_SRC + 'اطبع(متجه(٢، ٣) * ٣)')
+        self.assertEqual(out, '(6، 9)\n')
+
+    def test_reflected_number_first(self):
+        # العدد على اليسار والكائن على اليمين — عكس العملية يعمل أيضًا
+        out = run_arabi(self.VEC_SRC + 'اطبع(٣ * متجه(٢، ٣))')
+        self.assertEqual(out, '(6، 9)\n')
+
+    def test_display_uses_special_text(self):
+        self.assertEqual(run_arabi(self.VEC_SRC + 'اطبع(نص(متجه(١، ٢)))'),
+                         '(1، 2)\n')
+
+    def test_equality_operator(self):
+        out = run_arabi(self.VEC_SRC + 'أ = متجه(١، ٢)\n'
+                       'اطبع(أ == متجه(١، ٢))\nاطبع(أ == متجه(٩، ٩))')
+        self.assertEqual(out, 'صح\nخطأ\n')
+
+    def test_not_equal(self):
+        out = run_arabi(self.VEC_SRC + 'اطبع(متجه(١، ٢) != متجه(٣، ٤))')
+        self.assertEqual(out, 'صح\n')
+
+    def test_custom_text_in_fstring(self):
+        out = run_arabi(self.VEC_SRC + 'أ = متجه(١، ٢)\nاطبع(ق"المتجه {أ}")')
+        self.assertEqual(out, 'المتجه (1، 2)\n')
+
+    def test_custom_len(self):
+        src = ('صنف كيس:\n'
+               '    دالة إنشاء(عناصر):\n'
+               '        هذا.عناصر = عناصر\n'
+               '    دالة طول():\n'
+               '        أعد طول(هذا.عناصر)\n')
+        self.assertEqual(run_arabi(src + 'اطبع(طول(كيس([١، ٢، ٣])))'), '3\n')
+
+    def test_custom_len_must_return_int(self):
+        src = ('صنف ص:\n'
+               '    دالة طول():\n'
+               '        أعد "نص"\n')
+        expect_error(src + 'طول(ص())', ArabiRuntimeError, 'عددًا صحيحًا')
+
+    def test_index_get(self):
+        src = ('صنف ص:\n'
+               '    دالة إنشاء(عناصر):\n'
+               '        هذا.عناصر = عناصر\n'
+               '    دالة فهرس(م):\n'
+               '        أعد هذا.عناصر[م]\n'
+               '    دالة عيّن_فهرس(م، قيمة):\n'
+               '        هذا.عناصر[م] = قيمة\n')
+        out = run_arabi(src + 'ك = ص([١، ٢])\nاطبع(ك[٠])\nك[٠] = ٩\nاطبع(ك[٠])')
+        self.assertEqual(out, '1\n9\n')
+
+    def test_index_without_method(self):
+        expect_error('صنف ص:\n    تجاهل\nاطبع(ص()[٠])',
+                     ArabiRuntimeError, 'فهرس')
+
+    def test_contains(self):
+        src = ('صنف ص:\n'
+               '    دالة إنشاء(عناصر):\n'
+               '        هذا.عناصر = عناصر\n'
+               '    دالة يحتوي(قيمة):\n'
+               '        أعد قيمة في هذا.عناصر\n')
+        out = run_arabi(src + 'لو ٢ في ص([١، ٢، ٣]):\n    اطبع("موجود")')
+        self.assertEqual(out, 'موجود\n')
+
+    def test_comparison_operators(self):
+        src = ('صنف صندوق:\n'
+               '    دالة إنشاء(حجم):\n'
+               '        هذا.حجم = حجم\n'
+               '    دالة أصغر_من(آخر):\n'
+               '        أعد هذا.حجم < آخر.حجم\n'
+               '    دالة أكبر_من(آخر):\n'
+               '        أعد هذا.حجم > آخر.حجم\n')
+        out = run_arabi(src + 'اطبع(صندوق(٣) < صندوق(٥))\n'
+                        'اطبع(صندوق(١٠) > صندوق(٥))')
+        self.assertEqual(out, 'صح\nصح\n')
+
+    def test_unary_minus(self):
+        src = ('صنف ص:\n'
+               '    دالة إنشاء(قيمة):\n'
+               '        هذا.قيمة = قيمة\n'
+               '    دالة سالب():\n'
+               '        أعد ص(-هذا.قيمة)\n'
+               '    دالة نص():\n'
+               '        أعد نص(هذا.قيمة)\n')
+        self.assertEqual(run_arabi(src + 'اطبع(-ص(٥))'), '-5\n')
+
+    def test_no_overload_falls_back_to_error(self):
+        expect_error('صنف ص:\n    تجاهل\nاطبع(ص() + ١)',
+                     ArabiRuntimeError, 'لا يمكن جمع')
+
+
+class TestGlobalStmt(unittest.TestCase):
+    """جملة عالمي"""
+
+    def test_modify_existing_global(self):
+        out = run_arabi('العداد = ٠\n'
+                        'دالة زيّن():\n'
+                        '    عالمي العداد\n'
+                        '    العداد += ١\n'
+                        'زيّن()\n'
+                        'زيّن()\n'
+                        'اطبع(العداد)')
+        self.assertEqual(out, '2\n')
+
+    def test_create_global_from_function(self):
+        out = run_arabi('دالة عرّف():\n'
+                        '    عالمي جديد\n'
+                        '    جديد = ٤٢\n'
+                        'عرّف()\n'
+                        'اطبع(جديد)')
+        self.assertEqual(out, '42\n')
+
+    def test_multiple_names(self):
+        out = run_arabi('أ = ١\nب = ١\n'
+                        'دالة صفر():\n'
+                        '    عالمي أ، ب\n'
+                        '    أ = ٠\n'
+                        '    ب = ٠\n'
+                        'صفر()\n'
+                        'اطبع(أ + ب)')
+        self.assertEqual(out, '0\n')
+
+    def test_without_global_new_var_stays_local(self):
+        # بدون 'عالمي' المتغير الجديد يبقى محليًا في الدالة
+        expect_error('دالة ص():\n    محلي = ٥\nص()\nاطبع(محلي)',
+                     ArabiRuntimeError, 'غير معرّف')
+
+    def test_existing_global_modified_either_way(self):
+        # لغة عربي تعدل المتغير الموجود في أي نطاق — 'عالمي' للتوثيق والإنشاء
+        out = run_arabi('العداد = ٠\n'
+                        'دالة زيّن():\n'
+                        '    العداد = ٩٩\n'
+                        'زيّن()\n'
+                        'اطبع(العداد)')
+        self.assertEqual(out, '99\n')
+
+
+class TestAssertStmt(unittest.TestCase):
+    """جملة تحقق"""
+
+    def test_passes_when_true(self):
+        self.assertEqual(run_arabi('تحقق ١ + ١ == ٢\nاطبع("تم")'), 'تم\n')
+
+    def test_fails_with_message(self):
+        exc = expect_error('تحقق ١ > ٢، "الأرقام معكوسة"',
+                           ArabiRuntimeError, 'فشل التحقق: الأرقام معكوسة')
+        self.assertIsNotNone(exc)
+
+    def test_fails_without_message(self):
+        expect_error('تحقق خطأ', ArabiRuntimeError, 'فشل التحقق')
+
+    def test_catchable_in_try(self):
+        out = run_arabi('جرب:\n    تحقق ١ > ٢\nباستثناء:\n    اطبع("أُمسك")')
+        self.assertEqual(out, 'أُمسك\n')
+
+
+class TestDeleteStmt(unittest.TestCase):
+    """جملة احذف"""
+
+    def test_delete_variable(self):
+        self.assertEqual(
+            run_arabi('أ = ١\nاحذف أ\nأ = ٢\nاطبع(أ)'), '2\n')
+
+    def test_delete_undefined_variable(self):
+        expect_error('احذف مجهول', ArabiRuntimeError, 'غير معرّف')
+
+    def test_delete_list_element(self):
+        out = run_arabi('ل = [١، ٢، ٣]\nاحذف ل[٠]\nاطبع(ل)')
+        self.assertEqual(out, '[2، 3]\n')
+
+    def test_delete_list_index_out_of_range(self):
+        expect_error('ل = [١]\nاحذف ل[٥]', ArabiRuntimeError, 'خارج النطاق')
+
+    def test_delete_dict_key(self):
+        out = run_arabi('ق = {"أ": ١، "ب": ٢}\nاحذف ق["أ"]\nاطبع(ق)')
+        self.assertEqual(out, '{ب: 2}\n')
+
+    def test_delete_missing_dict_key(self):
+        expect_error('ق = {"أ": ١}\nاحذف ق["مفقود"]',
+                     ArabiRuntimeError, 'غير موجود')
+
+    def test_delete_object_attribute(self):
+        out = run_arabi('صنف ص:\n    دالة إنشاء():\n        هذا.سمة = ١\n'
+                        'ك = ص()\nاحذف ك.سمة\nاطبع(نوع(ك))')
+        self.assertEqual(out, 'كائن\n')
+
+    def test_delete_attribute_then_read_fails(self):
+        expect_error('صنف ص:\n    دالة إنشاء():\n        هذا.سمة = ١\n'
+                     'ك = ص()\nاحذف ك.سمة\nاطبع(ك.سمة)',
+                     ArabiRuntimeError, 'لا يحتوي')
+
+    def test_deleted_variable_read_fails(self):
+        expect_error('أ = ١\nاحذف أ\nاطبع(أ)', ArabiRuntimeError, 'غير معرّف')
+
+
+class TestCustomExceptions(unittest.TestCase):
+    """الصنف المدمج استثناء والأخطاء المخصصة"""
+
+    ERR_SRC = (
+        'صنف خطأ_دفع من استثناء:\n'
+        '    دالة تفاصيل():\n'
+        '        أعد ق"سبب الفشل: {هذا.رسالة}"\n'
+    )
+
+    def test_raise_and_bind(self):
+        out = run_arabi(self.ERR_SRC
+                        + 'جرب:\n'
+                          '    ارفع خطأ_دفع("الرصيد غير كافٍ")\n'
+                          'باستثناء هـ:\n'
+                          '    اطبع(هـ.رسالة)')
+        self.assertEqual(out, 'الرصيد غير كافٍ\n')
+
+    def test_custom_methods_on_error(self):
+        self.assertEqual(
+            run_arabi(self.ERR_SRC
+                      + 'جرب:\n'
+                        '    ارفع خطأ_دفع("بطاقة منتهية")\n'
+                        'باستثناء هـ:\n'
+                        '    اطبع(هـ.تفاصيل())'),
+            'سبب الفشل: بطاقة منتهية\n')
+
+    def test_display_shows_message(self):
+        out = run_arabi(self.ERR_SRC
+                        + 'جرب:\n    ارفع خطأ_دفع("مرفوض")\nباستثناء هـ:\n'
+                          '    اطبع(هـ)')
+        self.assertEqual(out, 'خطأ_دفع: مرفوض\n')
+
+    def test_builtin_error_class(self):
+        out = run_arabi('جرب:\n    ارفع استثناء("مشكلة عامة")\n'
+                        'باستثناء هـ:\n    اطبع(هـ.رسالة)')
+        self.assertEqual(out, 'مشكلة عامة\n')
+
+    def test_error_propagates_out_of_try(self):
+        exc = expect_error(self.ERR_SRC + 'ارفع خطأ_دفع("انفجار")',
+                           ArabiError, 'خطأ_دفع: انفجار')
+        self.assertIsNotNone(exc)
+
+    def test_error_class_chain(self):
+        out = run_arabi('صنف خطأ_أ من استثناء:\n    تجاهل\n'
+                        'صنف خطأ_ب من خطأ_أ:\n    تجاهل\n'
+                        'جرب:\n    ارفع خطأ_ب("عميق")\n'
+                        'باستثناء هـ:\n    اطبع(هـ.رسالة)')
+        self.assertEqual(out, 'عميق\n')
+
+    def test_error_with_non_string_message(self):
+        out = run_arabi('جرب:\n    ارفع استثناء(٤٠٤)\n'
+                        'باستثناء هـ:\n    اطبع(هـ.رسالة)')
+        self.assertEqual(out, '404\n')
+
+    def test_binding_takes_runtime_message(self):
+        out = run_arabi('جرب:\n    اطبع(١ / ٠)\nباستثناء هـ:\n'
+                        '    اطبع(نوع(هـ) == "نص")')
+        self.assertEqual(out, 'صح\n')
+
+    def test_raise_plain_string_unchanged(self):
+        expect_error('ارفع "رسالة عادية"', ArabiRuntimeError, 'رسالة عادية')
+
+    def test_exception_available_in_module(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as td:
+            mod = os.path.join(td, 'وحدة_أخطاء.عربي')
+            with open(mod, 'w', encoding='utf-8') as f:
+                f.write('صنف خطأ_وحدة من استثناء:\n    تجاهل\n')
+            main = os.path.join(td, 'رئيسي.عربي')
+            with open(main, 'w', encoding='utf-8') as f:
+                f.write('استورد وحدة_أخطاء\n'
+                        'جرب:\n'
+                        '    ارفع وحدة_أخطاء.خطأ_وحدة("من وحدة")\n'
+                        'باستثناء هـ:\n'
+                        '    اطبع(هـ.رسالة)\n')
+            with open(main, encoding='utf-8') as f:
+                out = run_code(f.read(), script_dir=td)
+        self.assertEqual(out, 'من وحدة\n')
+
+
+class TestRandomModule(unittest.TestCase):
+    """وحدة عشوائية"""
+
+    def test_seed_makes_deterministic(self):
+        out = run_arabi('عشوائية.بذرة(٧)\nأ = عشوائية.صحيح(١، ١٠٠)\n'
+                        'عشوائية.بذرة(٧)\nب = عشوائية.صحيح(١، ١٠٠)\n'
+                        'اطبع(أ == ب)')
+        self.assertEqual(out, 'صح\n')
+
+    def test_int_in_range(self):
+        out = run_arabi('عشوائية.بذرة(١)\nق = عشوائية.صحيح(٥، ٥)\nاطبع(ق)')
+        self.assertEqual(out, '5\n')
+
+    def test_choice(self):
+        out = run_arabi('عشوائية.بذرة(٣)\nق = عشوائية.اختيار(["أ"، "ب"، "ج"])\n'
+                        'اطبع(ق == "أ" أو ق == "ب" أو ق == "ج")')
+        self.assertEqual(out, 'صح\n')
+
+    def test_choice_empty(self):
+        expect_error('عشوائية.اختيار([])', ArabiRuntimeError, 'فارغ')
+
+    def test_shuffle_returns_new_list(self):
+        out = run_arabi('عشوائية.بذرة(١)\nأصل = [١، ٢، ٣، ٤، ٥]\n'
+                        'مخلوق = عشوائية.خلط(أصل)\n'
+                        'اطبع(طول(مخلوق) == ٥ و طول(أصل) == ٥)')
+        self.assertEqual(out, 'صح\n')
+
+    def test_sample_size(self):
+        out = run_arabi('عشوائية.بذرة(٢)\nع = عشوائية.عينة(مدى(١٠)، ٣)\n'
+                        'اطبع(طول(ع))')
+        self.assertEqual(out, '3\n')
+
+    def test_sample_too_big(self):
+        expect_error('عشوائية.عينة([١، ٢]، ٥)', ArabiRuntimeError, 'العينة')
+
+    def test_float_between_zero_and_one(self):
+        out = run_arabi('عشوائية.بذرة(١)\nق = عشوائية.عشري()\n'
+                        'اطبع(ق >= ٠ و ق < ١)')
+        self.assertEqual(out, 'صح\n')
+
+
+class TestSystemModule(unittest.TestCase):
+    """وحدة نظام"""
+
+    def test_cwd_is_string(self):
+        self.assertEqual(run_arabi('اطبع(نوع(نظام.مجلد_العمل()))'), 'نص\n')
+
+    def test_env_var(self):
+        import os
+        os.environ['ARABI_TEST_VAR'] = '١٢٣'
+        self.assertEqual(run_arabi('اطبع(نظام.متغير("ARABI_TEST_VAR"))'),
+                         '١٢٣\n')
+
+    def test_env_var_default(self):
+        self.assertEqual(
+            run_arabi('اطبع(نظام.متغير("ARABI_MISSING_XYZ"، "افتراضي"))'),
+            'افتراضي\n')
+
+    def test_platform_string(self):
+        out = run_arabi('اطبع(نظام.النظام() != "")')
+        self.assertEqual(out, 'صح\n')
+
+    def test_join_paths(self):
+        self.assertEqual(run_arabi('اطبع(نظام.فصل("مجلد"، "ملف.عربي"))').strip(),
+                          os.path.join('مجلد', 'ملف.عربي'))
+
+    def test_basename_dirname(self):
+        out = run_arabi('اطبع(نظام.اسم_الملف("أ/ب/ج.عربي"))\n'
+                        'اطبع(نظام.المجلد("أ/ب/ج.عربي"))')
+        self.assertEqual(out.splitlines()[0], 'ج.عربي')
+
+    def test_listdir_missing(self):
+        expect_error('نظام.ملفات_في("مجلد_غير_موجود_سزا")',
+                     ArabiRuntimeError, 'غير موجود')
+
+    def test_mkdir_and_isdir(self, td=None):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            target = os.path.join(td, 'مجلد_جديد').replace('\\', '/')
+            out = run_arabi(f'نظام.انشاء_مجلد("{target}")\n'
+                            f'اطبع(نظام.مجلد_موجود("{target}"))')
+            self.assertEqual(out, 'صح\n')
+
+
+class TestRegexModule(unittest.TestCase):
+    """وحدة تنظيم"""
+
+    def test_find(self):
+        self.assertEqual(
+            run_arabi(r'اطبع(تنظيم.يجد("[٠-٩]+"، "عندي ٤٢ تفاحة"))'), '٤٢\n')
+
+    def test_find_none(self):
+        self.assertEqual(
+            run_arabi(r'اطبع(تنظيم.يجد("[٠-٩]+"، "لا أرقام هنا"))'), 'ولا شيء\n')
+
+    def test_findall(self):
+        self.assertEqual(
+            run_arabi(r'اطبع(تنظيم.كل_المطابقات("\d+"، "أ ١ ب ٢٢ ج ٣٣٣"))'),
+            '[١، ٢٢، ٣٣٣]\n')
+
+    def test_sub(self):
+        self.assertEqual(
+            run_arabi(r'اطبع(تنظيم.يستبدل("\s+"، " "، "نص    متباعد  جدًا"))'),
+            'نص متباعد جدًا\n')
+
+    def test_split(self):
+        self.assertEqual(
+            run_arabi(r'اطبع(تنظيم.ينقسم("[،،]\s*"، "واحد، اثنان، ثلاثة"))'),
+            '[واحد، اثنان، ثلاثة]\n')
+
+    def test_fullmatch(self):
+        out = run_arabi(r'اطبع(تنظيم.يطابق("[٠-٩]+"، "١٢٣"))' + '\n'
+                        + r'اطبع(تنظيم.يطابق("[٠-٩]+"، "١٢٣أ"))')
+        self.assertEqual(out, 'صح\nخطأ\n')
+
+    def test_match_start(self):
+        out = run_arabi(r'اطبع(تنظيم.يبدأ("مرحبا"، "مرحبا بالعالم"))')
+        self.assertEqual(out, 'صح\n')
+
+    def test_invalid_pattern(self):
+        expect_error(r'تنظيم.يجد("[مفتوح"، "نص")',
+                     ArabiRuntimeError, 'نمط غير صالح')
+
+    def test_non_string_text(self):
+        expect_error('تنظيم.يجد("أ"، ١٢٣)', ArabiRuntimeError, 'نصًا')
+
+
+class TestNetworkModule(unittest.TestCase):
+    """وحدة شبكة — اختبارات بلا اتصال فعلي (التحقق من المدخلات)"""
+
+    def test_requires_http(self):
+        expect_error('شبكة.اطلب("ftp://مثال.كوم")',
+                     ArabiRuntimeError, 'http')
+
+    def test_requires_string_url(self):
+        expect_error('شبكة.اطلب(١٢٣)', ArabiRuntimeError, 'نصيًا')
+
+    def test_invalid_method(self):
+        expect_error('شبكة.اطلب("https://مثال.كوم"، "رفع")',
+                     ArabiRuntimeError, 'طريقة الطلب')
+
+    def test_invalid_headers(self):
+        expect_error('شبكة.اطلب("https://مثال.كوم"، "GET"، "ليست قاموس")',
+                     ArabiRuntimeError, 'قاموسًا')
+
+    def test_invalid_data(self):
+        expect_error('شبكة.اطلب("https://مثال.كوم"، "GET"، {}، ١٢٣)',
+                     ArabiRuntimeError, 'البيانات')
+
+    def test_wrong_timeout(self):
+        expect_error('شبكة.اطلب("https://مثال.كوم"، "GET"، {}، ولا شيء، -١)',
+                     ArabiRuntimeError, 'المهلة')
+
+
+class TestConvertModule(unittest.TestCase):
+    """وحدة تحويل — التفقيط والأرقام العربية"""
+
+    def test_words_zero(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٠))'), 'صفر\n')
+
+    def test_words_single_digits(self):
+        out = run_arabi('اطبع(تحويل.كلمات(١))\nاطبع(تحويل.كلمات(٩))')
+        self.assertEqual(out, 'واحد\nتسعة\n')
+
+    def test_words_teens(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١١))'), 'أحد عشر\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٩))'), 'تسعة عشر\n')
+
+    def test_words_tens(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٢٠))'), 'عشرون\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٦٥))'), 'خمسة وستون\n')
+
+    def test_words_hundreds(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٠٠))'), 'مئة\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٢٠٠))'), 'مئتان\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٢٠٥))'), 'مئتان وخمسة\n')
+
+    def test_words_thousands(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٠٠٠))'), 'ألف\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٢٠٠٠))'), 'ألفان\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٣٠٠٠))'), 'ثلاثة آلاف\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٢٣٤))'),
+                         'ألف ومئتان وأربعة وثلاثون\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١١٠٠٠))'),
+                         'أحد عشر ألفًا\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٠٠٠٠٠))'), 'مئة ألف\n')
+
+    def test_words_millions(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٠٠٠٠٠٠))'), 'مليون\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٢٠٠٠٠٠٠))'), 'مليونان\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٣٠٠٠٠٠٠))'), 'ثلاثة ملايين\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٠٠٠٠٠٠٠))'), 'عشرة ملايين\n')
+
+    def test_words_billions(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(١٠٠٠٠٠٠٠٠٠))'), 'مليار\n')
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(٢٠٠٠٠٠٠٠٠٠))'), 'ملياران\n')
+
+    def test_words_negative(self):
+        self.assertEqual(run_arabi('اطبع(تحويل.كلمات(-٥))'), 'سالب خمسة\n')
+
+    def test_words_rejects_float(self):
+        expect_error('تحويل.كلمات(١.٥)', ArabiRuntimeError, 'عددًا صحيحًا')
+
+    def test_words_rejects_too_big(self):
+        expect_error('تحويل.كلمات(١٠٠٠٠٠٠٠٠٠٠٠٠٠)',
+                     ArabiRuntimeError, 'كبير جدًا')
+
+    def test_eastern_digits(self):
+        self.assertEqual(
+            run_arabi('اطبع(تحويل.إلى_شرقية(1234567890))'), '١٢٣٤٥٦٧٨٩٠\n')
+        self.assertEqual(
+            run_arabi('اطبع(تحويل.إلى_شرقية("سنة ٢٠٢٦"))'), 'سنة ٢٠٢٦\n')
+
+    def test_western_digits(self):
+        self.assertEqual(
+            run_arabi('اطبع(تحويل.إلى_غربية("١٢٣٤٥"))'), '12345\n')
+
+    def test_roundtrip(self):
+        self.assertEqual(
+            run_arabi('اطبع(تحويل.إلى_غربية(تحويل.إلى_شرقية("٧٨٩")))'),
+            '789\n')
+
+
+class TestMathTimeExpansion(unittest.TestCase):
+    """توسيع وحدتي رياضيات ووقت"""
+
+    def test_gcd(self):
+        self.assertEqual(
+            run_arabi('اطبع(رياضيات.مشترك_الأكبر(١٢، ١٨))'), '6\n')
+
+    def test_lcm(self):
+        self.assertEqual(
+            run_arabi('اطبع(رياضيات.مشترك_الأصغر(٤، ٦))'), '12\n')
+
+    def test_lcm_with_zero(self):
+        self.assertEqual(
+            run_arabi('اطبع(رياضيات.مشترك_الأصغر(٠، ٥))'), '0\n')
+
+    def test_sign(self):
+        out = run_arabi('اطبع(رياضيات.علامة(-٧))\n'
+                        'اطبع(رياضيات.علامة(٠))\n'
+                        'اطبع(رياضيات.علامة(٣))')
+        self.assertEqual(out, '-1\n0\n1\n')
+
+    def test_log10(self):
+        self.assertEqual(
+            run_arabi('اطبع(رياضيات.لوغاريتم_عشري(١٠٠٠))'), '3.0\n')
+
+    def test_now_structure(self):
+        out = run_arabi('الآن = وقت.الآن()\n'
+                        'اطبع(نوع(الآن))\n'
+                        'اطبع(الآن["السنة"] >= ٢٠٢٦)')
+        self.assertEqual(out.splitlines()[0], 'قاموس')
+        self.assertEqual(out.splitlines()[1], 'صح')
+
+    def test_format(self):
+        out = run_arabi('ن = وقت.تنسيق("سنة %س شهر %ش يوم %ي")\n'
+                        'اطبع("سنة" في ن و "شهر" في ن)')
+        self.assertEqual(out, 'صح\n')
+
+    def test_time_still_works(self):
+        out = run_arabi('اطبع(وقت.زمن() > ٠)')
+        self.assertEqual(out, 'صح\n')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

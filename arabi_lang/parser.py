@@ -9,8 +9,9 @@ from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
     Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda, Switch,
+    EnumDef, PropertyDef, Global, Assert, Delete,
     Num, Str, FString, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
-    Call, Index, Slice, MethodCall, Attribute, This, Super,
+    Call, Index, Slice, MethodCall, Attribute, This, Super, Ternary,
 )
 from .errors import ParseError
 
@@ -41,7 +42,13 @@ STMT_KEYWORDS = {
     T.RAISE: 'ارفع', T.IMPORT: 'استورد', T.PASS: 'تجاهل',
     T.CLASS: 'صنف', T.THIS: 'هذا', T.SUPER: 'الأصل',
     T.SWITCH: 'بدّل', T.CASE: 'حالة', T.DEFAULT: 'افتراض',
+    T.ENUM: 'تعداد', T.PROPERTY: 'خاصية', T.GLOBAL: 'عالمي',
+    T.ASSERT: 'تحقق', T.DELETE: 'احذف',
 }
+
+# كلمات مفتاحية يُسمح بظهورها كأسماء خصائص/طرق بعد النقطة
+# (مثل ق["م"].احذف("مفتاح")) لعدم كسر طرق الأنواع المدمجة
+KEYWORD_AS_NAME = {T.ENUM, T.PROPERTY, T.GLOBAL, T.ASSERT, T.DELETE}
 
 
 def tok_desc(tok):
@@ -128,7 +135,8 @@ class Parser:
             return stmt
         # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب/صنف/بدّل) تستهلك DEDENT
         # داخل block()، لذا الجملة التالية تبدأ مباشرة
-        if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef, Switch)):
+        if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef,
+                             Switch, PropertyDef, EnumDef)):
             return stmt
         self.error('متوقع نهاية السطر بعد الجملة')
 
@@ -163,6 +171,16 @@ class Parser:
             return self.class_def()
         if t is T.SWITCH:
             return self.switch_stmt()
+        if t is T.ENUM:
+            return self.enum_stmt()
+        if t is T.PROPERTY:
+            return self.property_def()
+        if t is T.GLOBAL:
+            return self.global_stmt()
+        if t is T.ASSERT:
+            return self.assert_stmt()
+        if t is T.DELETE:
+            return self.delete_stmt()
         # «من وحدة استورد ...» — 'من' كلمة سياقية في بداية الجملة
         if (t is T.IDENT and self.cur().value == 'من'
                 and self.peek(1).type in (T.IDENT, T.STRING)):
@@ -258,16 +276,20 @@ class Parser:
         tok = self.advance()                       # جرب
         body = self.block()
         except_body = None
+        except_binding = None
         finally_body = None
         if self.check(T.EXCEPT):
             self.advance()
+            # ربط اختياري: باستثناء هـ:
+            if self.check(T.IDENT):
+                except_binding = self.advance().value
             except_body = self.block()
         if self.check(T.FINALLY):
             self.advance()
             finally_body = self.block()
         if except_body is None and finally_body is None:
             self.error("'جرب' يتطلب 'باستثناء' أو 'اخيرا' بعده")
-        return Try(body, except_body, finally_body, tok.line)
+        return Try(body, except_body, finally_body, except_binding, tok.line)
 
     def raise_stmt(self):
         tok = self.advance()                       # ارفع
@@ -344,6 +366,59 @@ class Parser:
         if not cases and default_body is None:
             self.error("'بدّل' يحتاج 'حالة' واحدة على الأقل أو 'افتراض'")
         return Switch(subject, cases, default_body, tok.line)
+
+    def enum_stmt(self):
+        """تعداد الاسم: عضو، عضو = قيمة — كل عضو في سطر مستقل.
+
+        الأعضاء بدون قيمة تأخذ رقمًا تلقائيًا يبدأ من ١ ويزيد.
+        """
+        tok = self.advance()                       # تعداد
+        name = self.expect_ident("متوقع اسم التعداد بعد 'تعداد'")
+        body = self.block()
+        members = []
+        for stmt in body:
+            if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Name):
+                members.append((stmt.expr.name, None, stmt.line))
+            elif (isinstance(stmt, Assign) and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], Name)):
+                members.append((stmt.targets[0].name, stmt.value, stmt.line))
+            else:
+                self.error("داخل 'تعداد' تُعرّف أسماء فقط: عضو أو عضو = قيمة")
+        if not members:
+            self.error(f"التعداد '{name}' فارغ — أضف عضوًا واحدًا على الأقل")
+        return EnumDef(name, members, tok.line)
+
+    def property_def(self):
+        """خاصية محسوبة داخل صنف: خاصية الاسم: ... جسم ..."""
+        tok = self.advance()                       # خاصية
+        name = self.expect_ident("متوقع اسم الخاصية بعد 'خاصية'")
+        body = self.block()
+        return PropertyDef(name, body, tok.line)
+
+    def global_stmt(self):
+        """عالمي اسم، اسم — تعيينات هذه الأسماء تذهب للنطاق العام."""
+        tok = self.advance()                       # عالمي
+        names = [self.expect_ident("متوقع اسمًا بعد 'عالمي'")]
+        while self.match(T.COMMA):
+            names.append(self.expect_ident('متوقع اسمًا'))
+        return Global(names, tok.line)
+
+    def assert_stmt(self):
+        """تحقق شرط، "رسالة" — يرفع خطأ إذا كان الشرط خطأ."""
+        tok = self.advance()                       # تحقق
+        test = self.expression()
+        message = None
+        if self.match(T.COMMA):
+            message = self.expression()
+        return Assert(test, message, tok.line)
+
+    def delete_stmt(self):
+        """احذف اسم أو عنصر قائمة/قاموس أو خاصية كائن."""
+        tok = self.advance()                       # احذف
+        target = self.expression()
+        if not isinstance(target, (Name, Index, Attribute)):
+            self.error("بعد 'احذف' متوقع اسمًا أو فهرسة [م] أو خاصية كائن")
+        return Delete(target, tok.line)
 
     def expr_stmt(self):
         tok = self.cur()
@@ -515,7 +590,11 @@ class Parser:
 
     def attribute(self, obj):
         tok = self.advance()                       # .
-        name = self.expect_ident("متوقع اسم خاصية أو طريقة بعد '.'")
+        name_tok = self.cur()
+        if name_tok.type is not T.IDENT and name_tok.type not in KEYWORD_AS_NAME:
+            self.error("متوقع اسم خاصية أو طريقة بعد '.'")
+        self.advance()
+        name = name_tok.value
         if self.check(T.LPAREN):
             self.advance()
             args = self.parse_call_args()
@@ -549,6 +628,8 @@ class Parser:
         if t is T.SUPER:
             self.advance()
             return Super(tok.line)
+        if t is T.IF:
+            return self.ternary_node()             # لو شرط: قيمة وإلا قيمة
         if t is T.IDENT:
             self.advance()
             return Name(tok.value, tok.line)
@@ -564,6 +645,19 @@ class Parser:
         if t is T.LBRACE:
             return self.dict_literal()
         self.error('متوقع تعبيرًا')
+
+    def ternary_node(self):
+        """التعبير الثلاثي: لو شرط: قيمة1 وإلا قيمة2.
+
+        يمكن أن يظهر في أي موضع تعبير: النتيجة = لو العمر >= ١٨: "بالغ" وإلا "طفل"
+        """
+        tok = self.advance()                       # لو
+        test = self.or_expr()
+        self.expect(T.COLON, "متوقع ':' بعد شرط التعبير الثلاثي 'لو'")
+        if_true = self.or_expr()
+        self.expect(T.ELSE, "متوقع 'وإلا' لإكمال التعبير الثلاثي: لو شرط: قيمة وإلا قيمة")
+        if_false = self.expression()
+        return Ternary(test, if_true, if_false, tok.line)
 
     def lambda_expr(self):
         """دالة سهمية: دالة(س، ص) => س + ص"""

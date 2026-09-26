@@ -43,6 +43,13 @@ class T(Enum):
     DEFAULT = auto()   # افتراض
     FSTRING = auto()   # ق"نص منسق {تعبير}"
 
+    # ---- كلمات الإصدار 1.5 ----
+    ENUM = auto()      # تعداد
+    PROPERTY = auto()  # خاصية (محسوبة)
+    GLOBAL = auto()    # عالمي
+    ASSERT = auto()    # تحقق
+    DELETE = auto()    # احذف
+
     # ---- معاملات ----
     PLUS = auto()          # +
     MINUS = auto()         # -

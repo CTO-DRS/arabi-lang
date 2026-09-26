@@ -6,6 +6,7 @@
     python arabi.py ملف.عربي        تشغيل ملف برمجي
     python arabi.py                 فتح المفسر التفاعلي (REPL)
     python arabi.py -c "كود"        تنفيذ كود مباشر
+    python arabi.py --تحقق ملف      فحص الصياغة دون تنفيذ
     python arabi.py --نسخة          عرض الإصدار
 """
 
@@ -53,6 +54,26 @@ def print_error(error, lines=None):
         width = len(str(error.line))
         print(f'  {error.line} | {source_line}', file=sys.stderr)
         print('  ' + ' ' * width + ' | ^', file=sys.stderr)
+
+
+def check_file(path):
+    """يفحص صياغة الملف دون تنفيذه — يفيد في الأدوات والتحرير الآلي."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            source = f.read()
+    except FileNotFoundError:
+        print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
+        sys.exit(1)
+    except UnicodeDecodeError:
+        print('خطأ: الملف يجب أن يكون بترميز UTF-8', file=sys.stderr)
+        sys.exit(1)
+    try:
+        tokens = Lexer(source).tokenize()
+        tree = Parser(tokens).parse()
+    except ArabiError as error:
+        print_error(error, source.splitlines())
+        sys.exit(1)
+    print(f'✓ الصياغة سليمة — {len(tree.statements)} جملة على المستوى الأعلى')
 
 
 def run_file(path):
@@ -170,9 +191,11 @@ def show_help():
     python arabi.py ملف.عربي        تشغيل ملف برمجي
     python arabi.py                 فتح المفسر التفاعلي (REPL)
     python arabi.py -c "كود"        تنفيذ كود مباشر
+    python arabi.py --تحقق ملف      فحص الصياغة دون تنفيذ
     python arabi.py --نسخة | -v     عرض الإصدار
     python arabi.py --مساعدة | -h   عرض هذه المساعدة
 
+الوحدات المدمجة: رياضيات، وقت، ملفات، جيسون، عشوائية، نظام، تنظيم، شبكة، تحويل
 الأمثلة موجودة في مجلد examples/""")
     sys.exit(0)
 
@@ -187,7 +210,12 @@ def main():
         print(f'عربي — الإصدار {__version__}')
     elif first in ('--مساعدة', '-h', '--help'):
         show_help()
-    elif first in ('-c', '--كود'):
+    elif first in ('--تحقق', '--check'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--تحقق' يحتاج مسار ملف بعده", file=sys.stderr)
+            sys.exit(1)
+        check_file(args[1])
+    elif first in ('-c', '--كود', '--تنفيذ'):
         if len(args) < 2:
             print("خطأ: الخيار '-c' يحتاج كودًا بعده", file=sys.stderr)
             sys.exit(1)

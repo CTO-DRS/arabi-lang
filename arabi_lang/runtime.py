@@ -4,10 +4,11 @@
 import json
 import math
 import os
+import re
 import time
 import random
 
-from .errors import ArabiRuntimeError
+from .errors import ArabiRuntimeError, ArabiUserError
 
 AR2EN = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
@@ -38,11 +39,12 @@ def ar2en(text):
 class Env:
     """بيئة متغيرات مرتبطة بسلسلة أبوية للنطاقات المتداخلة."""
 
-    __slots__ = ('vars', 'parent')
+    __slots__ = ('vars', 'parent', 'global_decls')
 
     def __init__(self, parent=None):
         self.vars = {}
         self.parent = parent
+        self.global_decls = set()      # أسماء أعلنت بجملة 'عالمي'
 
     def get(self, name, line=None):
         env = self
@@ -54,7 +56,16 @@ class Env:
             f"المتغير '{name}' غير معرّف — تأكد من تعريفه أولًا", line)
 
     def set(self, name, value):
-        """يعدّل المتغير إن وُجد في أي نطاق، وإلا ينشئه في النطاق الحالي."""
+        """يعدّل المتغير إن وُجد في أي نطاق، وإلا ينشئه في النطاق الحالي.
+
+        إذا أُعلن الاسم بجملة 'عالمي' في هذا النطاق يذهب التعيين للجذر مباشرة.
+        """
+        if name in self.global_decls:
+            root = self
+            while root.parent is not None:
+                root = root.parent
+            root.vars[name] = value
+            return
         env = self
         while env is not None:
             if name in env.vars:
@@ -65,6 +76,17 @@ class Env:
 
     def define(self, name, value):
         self.vars[name] = value
+
+    def remove(self, name, line=None):
+        """يحذف المتغير من النطاق الذي وُجد فيه (لجملة 'احذف')."""
+        env = self
+        while env is not None:
+            if name in env.vars:
+                del env.vars[name]
+                return
+            env = env.parent
+        raise ArabiRuntimeError(
+            f"لا يمكن حذف '{name}' — المتغير غير معرّف", line)
 
 
 # ================== القيم ==================
@@ -148,6 +170,58 @@ class BoundMethod:
         self.func = func
 
 
+class Property:
+    """خاصية محسوبة داخل صنف — تُقيّم عند الوصول إليها بلا أقواس."""
+
+    __slots__ = ('func',)
+
+    def __init__(self, func):
+        self.func = func
+
+
+class NativeCtor:
+    """مُنشئ أصلي مدمج (مثل مُنشئ الصنف المدمج 'خطأ').
+
+    تتعامل معه المفسّر بشكل خاص بدل تنفيذه كدالة عربية.
+    """
+
+    __slots__ = ('name', 'kind')
+
+    def __init__(self, name, kind):
+        self.name = name
+        self.kind = kind
+
+
+class EnumMember:
+    """عضو في تعداد — يحمل اسمه وقيمته واسم تعداده."""
+
+    __slots__ = ('name', 'value', 'enum_name')
+
+    def __init__(self, name, value, enum_name):
+        self.name = name
+        self.value = value
+        self.enum_name = enum_name
+
+    def __eq__(self, other):
+        if not isinstance(other, EnumMember):
+            return NotImplemented
+        return (self.enum_name == other.enum_name
+                and self.name == other.name)
+
+    def __hash__(self):
+        return hash((self.enum_name, self.name))
+
+
+class EnumValue:
+    """تعداد معرف من قبل المستخدم — مجموعة أعضاء ثابتة مسماة."""
+
+    __slots__ = ('name', 'members')
+
+    def __init__(self, name, members):
+        self.name = name
+        self.members = members          # {الاسم: EnumMember}
+
+
 def typename(v):
     if v is None:
         return 'ولا شيء'
@@ -175,6 +249,10 @@ def typename(v):
         return 'كائن'
     if isinstance(v, BoundMethod):
         return 'طريقة'
+    if isinstance(v, EnumValue):
+        return 'تعداد'
+    if isinstance(v, EnumMember):
+        return 'عضو تعداد'
     return type(v).__name__
 
 
@@ -207,7 +285,20 @@ def display(v):
         return f'<كائن من صنف {v.cls.name}>'
     if isinstance(v, BoundMethod):
         return f'<طريقة {v.func.name}>'
+    if isinstance(v, EnumValue):
+        return f'<تعداد {v.name}>'
+    if isinstance(v, EnumMember):
+        return f'{v.enum_name}.{v.name}'
     return str(v)
+
+
+# أسماء الطرق الخاصة لتحميل العوامل على الكائنات
+OVERLOAD_METHODS = {
+    '+': 'اجمع', '-': 'اطرح', '*': 'اضرب', '/': 'اقسم',
+    '%': 'باقي', '**': 'قوة',
+    '<': 'أصغر_من', '>': 'أكبر_من',
+    '<=': 'أصغر_يساوي', '>=': 'أكبر_يساوي',
+}
 
 
 # ================== طرق الأنواع المدمجة ==================
@@ -436,17 +527,24 @@ def _num_check(v, what, line):
     return v
 
 
-def _bi_print(args, line):
-    print(' '.join(display(a) for a in args))
+def _bi_print(interp, args, line):
+    print(' '.join(interp._display(a) for a in args))
     return None
 
 
-def _bi_len(args, line):
+def _bi_len(interp, args, line):
     if len(args) != 1:
         raise ArabiRuntimeError(f"'طول' تتوقع معاملًا واحدًا لكنها استلمت {len(args)}", line)
     v = args[0]
     if isinstance(v, (str, list, dict, range)):
         return len(v)
+    # كائن من صنف يعرّف الطريقة الخاصة 'طول'
+    if isinstance(v, InstanceValue):
+        result = interp._call_special(v, 'طول', line)
+        if isinstance(result, bool) or not isinstance(result, int):
+            raise ArabiRuntimeError(
+                "الطريقة الخاصة 'طول' يجب أن تعيد عددًا صحيحًا", line)
+        return result
     raise ArabiRuntimeError(f"لا يمكن حساب طول {typename(v)}", line)
 
 
@@ -514,10 +612,10 @@ def _bi_float(args, line):
     raise ArabiRuntimeError(f'لا يمكن تحويل {typename(v)} إلى عدد عشري', line)
 
 
-def _bi_str(args, line):
+def _bi_str(interp, args, line):
     if len(args) != 1:
         raise ArabiRuntimeError(f"'نص' تتوقع معاملًا واحدًا", line)
-    return display(args[0])
+    return interp._display(args[0])
 
 
 def _bi_list(args, line):
@@ -641,13 +739,13 @@ def _bi_sorted(args, line):
 def install_builtins(env):
     """يثبت الدوال الجاهزة والوحدات في البيئة العامة."""
     builtins_list = [
-        ('اطبع', _bi_print),
-        ('طول', _bi_len),
+        ('اطبع', BuiltinFunc('اطبع', _bi_print, takes_interp=True)),
+        ('طول', BuiltinFunc('طول', _bi_len, takes_interp=True)),
         ('مدى', _bi_range),
         ('إدخال', _bi_input),
         ('عدد', _bi_int),
         ('عشري', _bi_float),
-        ('نص', _bi_str),
+        ('نص', BuiltinFunc('نص', _bi_str, takes_interp=True)),
         ('قائمة', _bi_list),
         ('قاموس', _bi_dict),
         ('جمع', _bi_sum),
@@ -674,9 +772,13 @@ def install_builtins(env):
         'سقف': BuiltinFunc('سقف', _math_ceil),
         'أرضية': BuiltinFunc('أرضية', _math_floor),
         'لوغاريتم': BuiltinFunc('لوغاريتم', _math_log),
+        'لوغاريتم_عشري': BuiltinFunc('لوغاريتم_عشري', _math_log10),
         'جيب': BuiltinFunc('جيب', _math_sin),
         'جيب_التام': BuiltinFunc('جيب_التام', _math_cos),
         'ظل': BuiltinFunc('ظل', _math_tan),
+        'مشترك_الأكبر': BuiltinFunc('مشترك_الأكبر', _math_gcd),
+        'مشترك_الأصغر': BuiltinFunc('مشترك_الأصغر', _math_lcm),
+        'علامة': BuiltinFunc('علامة', _math_sign),
         'بي': math.pi,
         'نيبير': math.e,
     }))
@@ -684,6 +786,8 @@ def install_builtins(env):
     env.define('وقت', ModuleValue('وقت', {
         'زمن': BuiltinFunc('زمن', _time_now),
         'نوم': BuiltinFunc('نوم', _time_sleep),
+        'الآن': BuiltinFunc('الآن', _time_details),
+        'تنسيق': BuiltinFunc('تنسيق', _time_format),
     }))
 
     env.define('ملفات', ModuleValue('ملفات', {
@@ -698,6 +802,49 @@ def install_builtins(env):
     env.define('جيسون', ModuleValue('جيسون', {
         'حلل': BuiltinFunc('حلل', _json_parse),
         'نص': BuiltinFunc('نص', _json_text),
+    }))
+
+    env.define('عشوائية', ModuleValue('عشوائية', {
+        'صحيح': BuiltinFunc('صحيح', _rand_int),
+        'عشري': BuiltinFunc('عشري', _rand_float),
+        'اختيار': BuiltinFunc('اختيار', _rand_choice),
+        'خلط': BuiltinFunc('خلط', _rand_shuffle),
+        'عينة': BuiltinFunc('عينة', _rand_sample),
+        'بذرة': BuiltinFunc('بذرة', _rand_seed),
+    }))
+
+    env.define('نظام', ModuleValue('نظام', {
+        'مجلد_العمل': BuiltinFunc('مجلد_العمل', _sys_cwd),
+        'متغير': BuiltinFunc('متغير', _sys_env),
+        'المتغيرات': BuiltinFunc('المتغيرات', _sys_env_all),
+        'ملفات_في': BuiltinFunc('ملفات_في', _sys_listdir),
+        'مجلد_موجود': BuiltinFunc('مجلد_موجود', _sys_isdir),
+        'انشاء_مجلد': BuiltinFunc('انشاء_مجلد', _sys_mkdir),
+        'فصل': BuiltinFunc('فصل', _sys_join),
+        'اسم_الملف': BuiltinFunc('اسم_الملف', _sys_basename),
+        'المجلد': BuiltinFunc('المجلد', _sys_dirname),
+        'المسار_الكامل': BuiltinFunc('المسار_الكامل', _sys_abspath),
+        'النظام': BuiltinFunc('النظام', _sys_platform),
+    }))
+
+    env.define('تنظيم', ModuleValue('تنظيم', {
+        'يجد': BuiltinFunc('يجد', _re_find),
+        'كل_المطابقات': BuiltinFunc('كل_المطابقات', _re_findall),
+        'يستبدل': BuiltinFunc('يستبدل', _re_sub),
+        'ينقسم': BuiltinFunc('ينقسم', _re_split),
+        'يطابق': BuiltinFunc('يطابق', _re_fullmatch),
+        'يبدأ': BuiltinFunc('يبدأ', _re_match),
+    }))
+
+    env.define('شبكة', ModuleValue('شبكة', {
+        'اطلب': BuiltinFunc('اطلب', _net_request),
+        'نص_الصفحة': BuiltinFunc('نص_الصفحة', _net_text),
+    }))
+
+    env.define('تحويل', ModuleValue('تحويل', {
+        'إلى_شرقية': BuiltinFunc('إلى_شرقية', _conv_eastern),
+        'إلى_غربية': BuiltinFunc('إلى_غربية', _conv_western),
+        'كلمات': BuiltinFunc('كلمات', _conv_words),
     }))
 
 
@@ -971,3 +1118,516 @@ def _json_text(args, line):
     except (TypeError, ValueError) as exc:
         raise ArabiRuntimeError(
             f"لا يمكن تحويل {typename(args[0])} إلى JSON: {exc}", line)
+
+
+# ================== توسيع وحدة رياضيات ==================
+
+def _math_log10(args, line):
+    x = _one_num(args, 'لوغاريتم_عشري', line)
+    if x <= 0:
+        raise ArabiRuntimeError('اللوغاريتم يحتاج عددًا أكبر من صفر', line)
+    return math.log10(x)
+
+
+def _two_ints(args, name, line):
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج عددين صحيحين لكنها استلمت {len(args)}", line)
+    for x in args:
+        if isinstance(x, bool) or not isinstance(x, int):
+            raise ArabiRuntimeError(
+                f"'{name}' تحتاج عددين صحيحين لكن استلمت {typename(x)}", line)
+    return args[0], args[1]
+
+
+def _math_gcd(args, line):
+    a, b = _two_ints(args, 'مشترك_الأكبر', line)
+    return math.gcd(abs(a), abs(b))
+
+
+def _math_lcm(args, line):
+    a, b = _two_ints(args, 'مشترك_الأصغر', line)
+    if a == 0 or b == 0:
+        return 0
+    return abs(a * b) // math.gcd(abs(a), abs(b))
+
+
+def _math_sign(args, line):
+    x = _one_num(args, 'علامة', line)
+    if x > 0:
+        return 1
+    if x < 0:
+        return -1
+    return 0
+
+
+# ================== توسيع وحدة وقت ==================
+
+_AR_WEEKDAYS = ('الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس',
+                'الجمعة', 'السبت', 'الأحد')
+
+
+def _time_details(args, line):
+    """الآن() — يعيد قاموسًا بتفاصيل الوقت الحالي."""
+    if args:
+        raise ArabiRuntimeError("'الآن' لا تقبل معاملات", line)
+    t = time.localtime()
+    return {
+        'السنة': t.tm_year,
+        'الشهر': t.tm_mon,
+        'اليوم': t.tm_mday,
+        'الساعة': t.tm_hour,
+        'الدقيقة': t.tm_min,
+        'الثانية': t.tm_sec,
+        'يوم_الأسبوع': _AR_WEEKDAYS[t.tm_wday],
+    }
+
+
+_TIME_TOKENS = {
+    '%س': 'year', '%ش': 'mon', '%ي': 'mday',
+    '%ع': 'hour', '%د': 'min', '%ث': 'sec', '%أ': 'wday',
+}
+
+
+def _time_format(args, line):
+    """تنسيق(قالب) — ينظم الوقت الحالي وفق رموز: %س سنة، %ش شهر، %ي يوم،
+    %ع ساعة، %د دقيقة، %ث ثانية، %أ اسم يوم الأسبوع."""
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError(
+            f"'تنسيق' تحتاج قالبًا نصيًا لكنها استلمت "
+            f"{typename(args[0]) if args else 'لا معاملات'}", line)
+    t = time.localtime()
+    values = {
+        'year': f'{t.tm_year:04d}', 'mon': f'{t.tm_mon:02d}',
+        'mday': f'{t.tm_mday:02d}', 'hour': f'{t.tm_hour:02d}',
+        'min': f'{t.tm_min:02d}', 'sec': f'{t.tm_sec:02d}',
+        'wday': _AR_WEEKDAYS[t.tm_wday],
+    }
+    result = args[0]
+    for token, key in _TIME_TOKENS.items():
+        result = result.replace(token, values[key])
+    return result
+
+
+# ================== وحدة عشوائية ==================
+
+def _rand_int(args, line):
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'صحيح' تحتاج عددين (الأدنى والأعلى) لكنها استلمت {len(args)}", line)
+    a, b = _two_ints(args, 'صحيح', line)
+    if a > b:
+        a, b = b, a
+    return random.randint(a, b)
+
+
+def _rand_float(args, line):
+    if args:
+        raise ArabiRuntimeError("'عشري' لا تقبل معاملات — تعيد عددًا بين 0 و 1", line)
+    return random.random()
+
+
+def _rand_choice(args, line):
+    if len(args) != 1 or not isinstance(args[0], (list, range, str)):
+        raise ArabiRuntimeError(
+            f"'اختيار' تحتاج قائمة أو نصًا أو مدى لكنها استلمت "
+            f"{typename(args[0]) if args else 'لا معاملات'}", line)
+    items = list(args[0])
+    if not items:
+        raise ArabiRuntimeError("'اختيار' لا تقبل تسلسلًا فارغًا", line)
+    return random.choice(items)
+
+
+def _rand_shuffle(args, line):
+    """خلط(قائمة) — يعيد نسخة جديدة مخلوطة (لا يعدل الأصل)."""
+    if len(args) != 1 or not isinstance(args[0], (list, range, str)):
+        raise ArabiRuntimeError(
+            f"'خلط' تحتاج قائمة أو نصًا أو مدى لكنها استلمت "
+            f"{typename(args[0]) if args else 'لا معاملات'}", line)
+    items = list(args[0])
+    random.shuffle(items)
+    return items
+
+
+def _rand_sample(args, line):
+    if len(args) != 2 or not isinstance(args[0], (list, range, str)):
+        raise ArabiRuntimeError(
+            f"'عينة' تحتاج قائمة وعددًا صحيحًا لكنها استلمت {len(args)} معاملًا", line)
+    n = args[1]
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ArabiRuntimeError(
+            f"معامل العدد في 'عينة' يجب أن يكون عددًا صحيحًا لكن استلمت {typename(n)}", line)
+    items = list(args[0])
+    if n < 0 or n > len(items):
+        raise ArabiRuntimeError(
+            f"عدد العينة ({n}) يجب أن يكون بين 0 وطول التسلسل ({len(items)})", line)
+    return random.sample(items, n)
+
+
+def _rand_seed(args, line):
+    if len(args) != 1:
+        raise ArabiRuntimeError("'بذرة' تتوقع معاملًا واحدًا", line)
+    x = _num_check(args[0], "'بذرة'", line)
+    random.seed(x)
+    return None
+
+
+# ================== وحدة نظام ==================
+
+def _sys_cwd(args, line):
+    if args:
+        raise ArabiRuntimeError("'مجلد_العمل' لا تقبل معاملات", line)
+    return os.getcwd()
+
+
+def _sys_env(args, line):
+    if not 1 <= len(args) <= 2 or not isinstance(args[0], str):
+        raise ArabiRuntimeError(
+            "'متغير' تحتاج اسم متغير نصيًا وقيمة افتراضية اختيارية", line)
+    name = args[0]
+    default = args[1] if len(args) == 2 else None
+    return os.environ.get(name, default)
+
+
+def _sys_env_all(args, line):
+    if args:
+        raise ArabiRuntimeError("'المتغيرات' لا تقبل معاملات", line)
+    return dict(os.environ)
+
+
+def _sys_listdir(args, line):
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError("'ملفات_في' تحتاج مسار مجلد نصيًا", line)
+    path = args[0]
+    try:
+        return sorted(os.listdir(path))
+    except FileNotFoundError:
+        raise ArabiRuntimeError(f"المجلد '{path}' غير موجود", line)
+    except NotADirectoryError:
+        raise ArabiRuntimeError(f"'{path}' ملف وليس مجلدًا", line)
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن قراءة المجلد '{path}': {exc}", line)
+
+
+def _sys_isdir(args, line):
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError("'مجلد_موجود' تحتاج مسارًا نصيًا", line)
+    return os.path.isdir(args[0])
+
+
+def _sys_mkdir(args, line):
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError("'انشاء_مجلد' تحتاج مسارًا نصيًا", line)
+    try:
+        os.makedirs(args[0], exist_ok=True)
+        return None
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن إنشاء المجلد '{args[0]}': {exc}", line)
+
+
+def _sys_join(args, line):
+    if not args:
+        raise ArabiRuntimeError("'فصل' تحتاج مسارًا واحدًا على الأقل", line)
+    for x in args:
+        if not isinstance(x, str):
+            raise ArabiRuntimeError(
+                f"'فصل' تحتاج نصوصًا فقط لكن استلمت {typename(x)}", line)
+    return os.path.join(*args)
+
+
+def _sys_basename(args, line):
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError("'اسم_الملف' تحتاج مسارًا نصيًا", line)
+    return os.path.basename(args[0])
+
+
+def _sys_dirname(args, line):
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError("'المجلد' تحتاج مسارًا نصيًا", line)
+    return os.path.dirname(args[0])
+
+
+def _sys_abspath(args, line):
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError("'المسار_الكامل' تحتاج مسارًا نصيًا", line)
+    return os.path.abspath(args[0])
+
+
+def _sys_platform(args, line):
+    if args:
+        raise ArabiRuntimeError("'النظام' لا تقبل معاملات", line)
+    import platform
+    return platform.system()
+
+
+# ================== وحدة تنظيم (التعبيرات النمطية) ==================
+
+def _re_compile(pattern, name, line):
+    if not isinstance(pattern, str):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج نمطًا نصيًا لكن استلمت {typename(pattern)}", line)
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        raise ArabiRuntimeError(f"نمط غير صالح '{pattern}': {exc}", line)
+
+
+def _re_text(value, name, line):
+    if not isinstance(value, str):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج نصًا لكن استلمت {typename(value)}", line)
+    return value
+
+
+def _re_find(args, line):
+    """يجد(نمط، نص) — أول تطابق أو ولا شيء."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'يجد' تحتاج معاملين (نمط ونص) لكنها استلمت {len(args)}", line)
+    rx = _re_compile(args[0], 'يجد', line)
+    text = _re_text(args[1], 'يجد', line)
+    m = rx.search(text)
+    return m.group(0) if m else None
+
+
+def _re_findall(args, line):
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'كل_المطابقات' تحتاج معاملين (نمط ونص) لكنها استلمت {len(args)}", line)
+    rx = _re_compile(args[0], 'كل_المطابقات', line)
+    text = _re_text(args[1], 'كل_المطابقات', line)
+    return rx.findall(text)
+
+
+def _re_sub(args, line):
+    """يستبدل(نمط، بديل، نص)."""
+    if len(args) != 3:
+        raise ArabiRuntimeError(
+            f"'يستبدل' تحتاج ثلاثة معاملات (نمط، بديل، نص) لكنها استلمت {len(args)}", line)
+    rx = _re_compile(args[0], 'يستبدل', line)
+    repl = _re_text(args[1], 'يستبدل', line)
+    text = _re_text(args[2], 'يستبدل', line)
+    return rx.sub(repl, text)
+
+
+def _re_split(args, line):
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'ينقسم' تحتاج معاملين (نمط ونص) لكنها استلمت {len(args)}", line)
+    rx = _re_compile(args[0], 'ينقسم', line)
+    text = _re_text(args[1], 'ينقسم', line)
+    return rx.split(text)
+
+
+def _re_fullmatch(args, line):
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'يطابق' تحتاج معاملين (نمط ونص) لكنها استلمت {len(args)}", line)
+    rx = _re_compile(args[0], 'يطابق', line)
+    text = _re_text(args[1], 'يطابق', line)
+    return rx.fullmatch(text) is not None
+
+
+def _re_match(args, line):
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'يبدأ' تحتاج معاملين (نمط ونص) لكنها استلمت {len(args)}", line)
+    rx = _re_compile(args[0], 'يبدأ', line)
+    text = _re_text(args[1], 'يبدأ', line)
+    return rx.match(text) is not None
+
+
+# ================== وحدة شبكة ==================
+
+_NET_METHODS = ('GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'PATCH')
+
+
+def _net_request(args, line):
+    """اطلب(رابط، طريقة؟، ترويسة؟، بيانات؟، مهلة؟) — طلب HTTP ويعيد قاموسًا:
+    {الحالة، النص، الترويسات}. الأخطاء الشبكية ترفع خطأ، والحالات غير ٢٠٠ تعاد كناتج."""
+    if not 1 <= len(args) <= 5:
+        raise ArabiRuntimeError(
+            f"'اطلب' تقبل من ١ إلى ٥ معاملات لكنها استلمت {len(args)}", line)
+    import urllib.request
+    import urllib.error
+
+    url = args[0]
+    if not isinstance(url, str):
+        raise ArabiRuntimeError(f"'اطلب' تحتاج رابطًا نصيًا لكن استلمت {typename(url)}", line)
+    if not url.startswith(('http://', 'https://')):
+        raise ArabiRuntimeError(
+            f"الرابط يجب أن يبدأ بـ http:// أو https:// — استلمت '{url}'", line)
+
+    method = 'GET'
+    if len(args) >= 2:
+        method = args[1]
+        if not isinstance(method, str) or method.upper() not in _NET_METHODS:
+            raise ArabiRuntimeError(
+                f"طريقة الطلب يجب أن تكون واحدة من: {', '.join(_NET_METHODS)}", line)
+        method = method.upper()
+
+    headers = {}
+    if len(args) >= 3:
+        if not isinstance(args[2], dict):
+            raise ArabiRuntimeError(
+                f"الترويسات يجب أن تكون قاموسًا لكن استلمت {typename(args[2])}", line)
+        for k, v in args[2].items():
+            headers[str(k)] = str(v)
+
+    data = None
+    if len(args) >= 4 and args[3] is not None:
+        payload = args[3]
+        if isinstance(payload, str):
+            data = payload.encode('utf-8')
+        elif isinstance(payload, dict):
+            data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            headers.setdefault('Content-Type', 'application/json; charset=utf-8')
+        else:
+            raise ArabiRuntimeError(
+                f"البيانات يجب أن تكون نصًا أو قاموسًا لكن استلمت {typename(payload)}", line)
+
+    timeout = 10.0
+    if len(args) == 5:
+        timeout = _num_check(args[4], "مهلة 'اطلب'", line)
+        if timeout <= 0:
+            raise ArabiRuntimeError("المهلة يجب أن تكون عددًا موجبًا", line)
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            body = resp.read().decode('utf-8', errors='replace')
+            resp_headers = dict(resp.headers.items())
+    except urllib.error.HTTPError as exc:
+        # أخطاء HTTP (٤٠٤ وغيرها) تعاد كناتج طبيعي ليقرر المستخدم
+        try:
+            body = exc.read().decode('utf-8', errors='replace')
+        except Exception:
+            body = ''
+        return {'الحالة': exc.code, 'النص': body,
+                'الترويسات': dict(exc.headers.items() if exc.headers else [])}
+    except urllib.error.URLError as exc:
+        raise ArabiRuntimeError(
+            f"تعذر الاتصال بالرابط '{url}': {exc.reason}", line)
+    except OSError as exc:
+        raise ArabiRuntimeError(f"فشل طلب الشبكة '{url}': {exc}", line)
+
+    return {'الحالة': status, 'النص': body, 'الترويسات': resp_headers}
+
+
+def _net_text(args, line):
+    """نص_الصفحة(رابط) — يعيد نص استجابة الرابط مباشرة."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'نص_الصفحة' تحتاج رابطًا واحدًا لكنها استلمت {len(args)}", line)
+    return _net_request([args[0]], line)['النص']
+
+
+# ================== وحدة تحويل (الأرقام العربية) ==================
+
+EN2AR = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
+
+_ONES_AR = ('', 'واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة',
+            'ستة', 'سبعة', 'ثمانية', 'تسعة')
+_TEENS_AR = ('عشرة', 'أحد عشر', 'اثنا عشر', 'ثلاثة عشر', 'أربعة عشر',
+             'خمسة عشر', 'ستة عشر', 'سبعة عشر', 'ثمانية عشر', 'تسعة عشر')
+_TENS_AR = ('', '', 'عشرون', 'ثلاثون', 'أربعون', 'خمسون',
+            'ستون', 'سبعون', 'ثمانون', 'تسعون')
+_HUNDREDS_AR = ('', 'مئة', 'مئتان', 'ثلاثمئة', 'أربعمئة', 'خمسمئة',
+                'ستمئة', 'سبعمئة', 'ثمانمئة', 'تسعمئة')
+# (مفرد، مثنى، جمع ٣-١٠، منصوب ١١-٩٩، مجرور ١٠٠+)
+_SCALES_AR = (
+    ('مليار', 'ملياران', 'مليارات', 'مليارًا', 'مليار'),
+    ('مليون', 'مليونان', 'ملايين', 'مليونًا', 'مليون'),
+    ('ألف', 'ألفان', 'آلاف', 'ألفًا', 'ألف'),
+)
+
+
+def _three_digits_words(n):
+    """يكتب عددًا من ١ إلى ٩٩٩ بكلمات عربية (الآحاد تسبق العشرات)."""
+    parts = []
+    hundreds, rest = divmod(n, 100)
+    if hundreds:
+        parts.append(_HUNDREDS_AR[hundreds])
+    tens, ones = divmod(rest, 10)
+    if tens == 1:
+        parts.append(_TEENS_AR[ones])
+    else:
+        # العربية تقرأ الآحاد قبل العشرات: خمسة وستون
+        if ones:
+            parts.append(_ONES_AR[ones])
+        if tens:
+            parts.append(_TENS_AR[tens])
+    return ' و'.join(parts)
+
+
+def _scale_words(count, forms):
+    singular, dual, plural, accusative, genitive = forms
+    if count == 1:
+        return singular
+    if count == 2:
+        return dual
+    if count <= 10:
+        return f'{_three_digits_words(count)} {plural}'
+    if count <= 99:
+        return f'{_three_digits_words(count)} {accusative}'
+    return f'{_three_digits_words(count)} {genitive}'
+
+
+def tafqit(n, line=None):
+    """تفقيط: يحول عددًا صحيحًا إلى كلمات عربية (حتى ٩٩٩ مليارًا و٩٩٩...)."""
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ArabiRuntimeError(
+            f"'كلمات' تحتاج عددًا صحيحًا لكنها استلمت {typename(n)}", line)
+    if n == 0:
+        return 'صفر'
+    prefix = ''
+    if n < 0:
+        prefix = 'سالب '
+        n = -n
+    if n >= 10 ** 12:
+        raise ArabiRuntimeError(
+            "'كلمات' تدعم الأعداد حتى ٩٩٩,٩٩٩,٩٩٩,٩٩٩ — العدد كبير جدًا", line)
+    billions, rest = divmod(n, 10 ** 9)
+    millions, rest = divmod(rest, 10 ** 6)
+    thousands, units = divmod(rest, 10 ** 3)
+    parts = []
+    if billions:
+        parts.append(_scale_words(billions, _SCALES_AR[0]))
+    if millions:
+        parts.append(_scale_words(millions, _SCALES_AR[1]))
+    if thousands:
+        parts.append(_scale_words(thousands, _SCALES_AR[2]))
+    if units:
+        parts.append(_three_digits_words(units))
+    return prefix + ' و'.join(parts)
+
+
+def _conv_eastern(args, line):
+    """إلى_شرقية(قيمة) — يحول الأرقام الغربية إلى عربية مشرقية (٠-٩)."""
+    if len(args) != 1:
+        raise ArabiRuntimeError("'إلى_شرقية' تتوقع معاملًا واحدًا", line)
+    v = args[0]
+    if isinstance(v, str):
+        return v.translate(EN2AR)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ArabiRuntimeError(
+            f"'إلى_شرقية' تحتاج عددًا أو نصًا لكنها استلمت {typename(v)}", line)
+    return str(v).translate(EN2AR)
+
+
+def _conv_western(args, line):
+    """إلى_غربية(نص) — يحول الأرقام العربية الشرقية إلى غربية ويعيد نصًا."""
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError(
+            f"'إلى_غربية' تحتاج نصًا واحدًا لكنها استلمت "
+            f"{typename(args[0]) if args else 'لا معاملات'}", line)
+    return args[0].translate(AR2EN)
+
+
+def _conv_words(args, line):
+    """كلمات(عدد) — تفقيط العدد إلى كلمات عربية."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'كلمات' تتوقع معاملًا واحدًا لكنها استلمت {len(args)}", line)
+    return tafqit(args[0], line)

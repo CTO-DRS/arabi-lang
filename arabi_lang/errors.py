@@ -33,3 +33,20 @@ class ParseError(ArabiError):
 class ArabiRuntimeError(ArabiError):
     """خطأ يحدث أثناء تنفيذ البرنامج."""
     label = 'خطأ تشغيلي'
+
+
+class ArabiUserError(ArabiRuntimeError):
+    """خطأ رفعته لغة عربي عبر كائن من صنف يرث الصنف المدمج 'استثناء'.
+
+    يحمل instance الكائن الأصلي ليُربط بـ 'باستثناء' فيكتلة جرب.
+    """
+
+    label = 'خطأ'
+
+    def __init__(self, instance, line=None):
+        self.instance = instance
+        cls_name = instance.cls.name
+        msg = instance.fields.get('رسالة', '')
+        msg = msg if isinstance(msg, str) else str(msg)
+        text = f'{cls_name}: {msg}' if msg else cls_name
+        super().__init__(text, line)

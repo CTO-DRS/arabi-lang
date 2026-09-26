@@ -3,19 +3,45 @@
   "name": "عربي",
   "scopeName": "source.arabi",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#function-def" },
-    { "include": "#class-def" },
-    { "include": "#compound-keywords" },
-    { "include": "#keywords" },
-    { "include": "#builtins" },
-    { "include": "#modules" },
-    { "include": "#constants" },
-    { "include": "#numbers" },
-    { "include": "#operators" },
-    { "include": "#punctuation" },
-    { "include": "#identifiers" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#function-def"
+    },
+    {
+      "include": "#class-def"
+    },
+    {
+      "include": "#compound-keywords"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#modules"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
   ],
   "repository": {
     "comments": {
@@ -32,11 +58,15 @@
           "name": "string.interpolated.arabi",
           "begin": "ق(['\"])",
           "beginCaptures": {
-            "1": { "name": "punctuation.definition.string.begin.arabi" }
+            "1": {
+              "name": "punctuation.definition.string.begin.arabi"
+            }
           },
           "end": "\\1",
           "endCaptures": {
-            "0": { "name": "punctuation.definition.string.end.arabi" }
+            "0": {
+              "name": "punctuation.definition.string.end.arabi"
+            }
           },
           "patterns": [
             {
@@ -102,15 +132,23 @@
     "function-def": {
       "match": "(?<![\\u0600-\\u06FF\\w])(دالة)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
       "captures": {
-        "1": { "name": "keyword.declaration.function.arabi" },
-        "2": { "name": "entity.name.function.arabi" }
+        "1": {
+          "name": "keyword.declaration.function.arabi"
+        },
+        "2": {
+          "name": "entity.name.function.arabi"
+        }
       }
     },
     "class-def": {
       "match": "(?<![\\u0600-\\u06FF\\w])(صنف)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
       "captures": {
-        "1": { "name": "keyword.declaration.class.arabi" },
-        "2": { "name": "entity.name.class.arabi" }
+        "1": {
+          "name": "keyword.declaration.class.arabi"
+        },
+        "2": {
+          "name": "entity.name.class.arabi"
+        }
       }
     },
     "compound-keywords": {
@@ -134,6 +172,30 @@
         {
           "name": "keyword.control.switch.arabi",
           "match": "(?<![\\u0600-\\u06FF\\w])(بدّل|حالة|افتراض)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.declaration.enum.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(تعداد)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.enum.arabi"
+            },
+            "2": {
+              "name": "entity.name.enum.arabi"
+            }
+          }
+        },
+        {
+          "name": "keyword.declaration.property.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])خاصية(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.other.scope.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(عالمي|احذف)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.operator.assert.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])تحقق(?![\\u0600-\\u06FF\\w])"
         },
         {
           "name": "keyword.control.conditional.arabi",
@@ -185,7 +247,7 @@
       "patterns": [
         {
           "name": "constant.numeric.float.arabi",
-          "match": "(?<![\\u0600-\\u06FF\\w])((\\d|[\u0660-\u0669])+(\\.(\\d|[\u0660-\u0669])+)?)((e|E)(\\+|-)?(\\d|[\u0660-\u0669])+)?(?![\\u0600-\\u06FF\\w])"
+          "match": "(?<![\\u0600-\\u06FF\\w])((\\d|[٠-٩])+(\\.(\\d|[٠-٩])+)?)((e|E)(\\+|-)?(\\d|[٠-٩])+)?(?![\\u0600-\\u06FF\\w])"
         }
       ]
     },

@@ -11,14 +11,15 @@ import os
 import sys
 
 from . import nodes as N
-from .errors import ArabiRuntimeError
+from .errors import ArabiRuntimeError, ArabiUserError
 from .lexer import Lexer
 from .parser import Parser
 from .runtime import (
     Env, ArabiFunc, BuiltinFunc, ModuleValue,
     ClassValue, InstanceValue, BoundMethod,
+    EnumValue, EnumMember, Property, NativeCtor,
     typename, display, install_builtins, NO_DEFAULT,
-    LIST_METHODS, STR_METHODS, DICT_METHODS,
+    LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
 )
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
@@ -32,7 +33,11 @@ CATCHABLE = (
 )
 
 # الوحدات الجاهزة المدمجة في اللغة
-BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون')
+BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
+                   'نظام', 'تنظيم', 'شبكة', 'تحويل')
+
+# علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
+_SKIP = object()
 
 
 class BreakSignal(Exception):
@@ -54,6 +59,11 @@ class Interpreter:
     def __init__(self, script_dir=None):
         self.globals = Env()
         install_builtins(self.globals)
+        # الصنف المدمج 'استثناء' — أصله لأخطاء المستخدم المخصصة
+        self.error_class = ClassValue('استثناء', None, {
+            'إنشاء': NativeCtor('إنشاء', 'خطأ'),
+        }, Env())
+        self.globals.define('استثناء', self.error_class)
         # مجلد البرنامج الرئيسي (أساس البحث عن الوحدات)
         self.script_dir = script_dir or os.getcwd()
         # كومة مجلدات الوحدات قيد التحميل (للاستيراد المتداخل)
@@ -226,6 +236,13 @@ class Interpreter:
                           for name, default in stmt.params]
                 members[stmt.name] = ArabiFunc(
                     stmt.name, params, stmt.body, class_env)
+            elif isinstance(stmt, N.PropertyDef):
+                if stmt.name in members:
+                    raise ArabiRuntimeError(
+                        f"تكرار الاسم '{stmt.name}' في الصنف '{node.name}'",
+                        stmt.line)
+                members[stmt.name] = Property(
+                    ArabiFunc(stmt.name, [], stmt.body, class_env))
             elif isinstance(stmt, N.Pass):
                 continue                          # جملة تجاهل مسموحة في جسم الصنف
             elif (isinstance(stmt, N.Assign) and len(stmt.targets) == 1
@@ -236,7 +253,7 @@ class Interpreter:
                 class_env.define(name, value)
             else:
                 raise ArabiRuntimeError(
-                    "داخل 'صنف' لا يُسمح إلا بتعريف دوال وثوابت",
+                    "داخل 'صنف' لا يُسمح إلا بتعريف دوال وخصائص وثوابت",
                     stmt.line)
         env.set(node.name, ClassValue(node.name, superclass, members, class_env))
 
@@ -267,18 +284,42 @@ class Interpreter:
                         raise exc
                 if node.except_body is None:
                     raise
+                if node.except_binding:
+                    env.define(node.except_binding,
+                               self._error_binding_value(exc))
                 self.exec_statements(node.except_body, env)
         finally:
             if node.finally_body is not None:
                 self.exec_statements(node.finally_body, env)
 
+    def _error_binding_value(self, exc):
+        """القيمة المرتبطة بـ 'باستثناء هـ' — كائن الخطأ إن كان مخصصًا."""
+        if isinstance(exc, ArabiUserError):
+            return exc.instance
+        if isinstance(exc, ArabiRuntimeError):
+            return exc.message
+        return str(exc)
+
     def exec_Raise(self, node, env):
         value = self.evaluate(node.value, env)
         if isinstance(value, ArabiRuntimeError):
             raise value
+        if self._is_error_instance(value):
+            raise ArabiUserError(value, node.line)
         if isinstance(value, str):
             raise ArabiRuntimeError(value, node.line)
         raise ArabiRuntimeError(display(value), node.line)
+
+    def _is_error_instance(self, value):
+        """صح إذا كان الكائن من الصنف المدمج 'استثناء' أو صنف يرثه."""
+        if not isinstance(value, InstanceValue):
+            return False
+        cls = value.cls
+        while cls is not None:
+            if cls is self.error_class:
+                return True
+            cls = cls.superclass
+        return False
 
     def exec_Import(self, node, env):
         """تنفيذ الاستيراد بأصغاله الثلاثة."""
@@ -294,6 +335,85 @@ class Interpreter:
                 env.set(name, module.members[name])
             return
         env.set(node.bound_name, module)
+
+    # ================== جمل الإصدار 1.5 ==================
+
+    def exec_EnumDef(self, node, env):
+        """تعريف تعداد: أعضاء بقيم تلقائية (١، ٢، ٣...) أو صريحة."""
+        members = {}
+        counter = 1
+        for name, value_expr, line in node.members:
+            if name in members:
+                raise ArabiRuntimeError(
+                    f"تكرار العضو '{name}' في التعداد '{node.name}'", line)
+            if value_expr is not None:
+                value = self.evaluate(value_expr, env)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ArabiRuntimeError(
+                        f"قيمة العضو '{name}' في التعداد يجب أن تكون عددًا صحيحًا",
+                        line)
+                counter = value
+            members[name] = EnumMember(name, counter, node.name)
+            counter += 1
+        env.set(node.name, EnumValue(node.name, members))
+
+    def exec_Global(self, node, env):
+        """عالمي أسماء — التعيينات اللاحقة تذهب للنطاق العام."""
+        for name in node.names:
+            env.global_decls.add(name)
+
+    def exec_Assert(self, node, env):
+        """تحقق شرط، "رسالة" — يرفع خطأ إذا كان الشرط خطأ."""
+        if not self._truthy(self.evaluate(node.test, env)):
+            if node.message is not None:
+                message = self.evaluate(node.message, env)
+                raise ArabiRuntimeError(
+                    f'فشل التحقق: {self._display(message)}', node.line)
+            raise ArabiRuntimeError('فشل التحقق', node.line)
+
+    def exec_Delete(self, node, env):
+        """احذف اسمًا أو عنصرًا مفهرسًا أو خاصية كائن."""
+        target = node.target
+        if isinstance(target, N.Name):
+            env.remove(target.name, target.line)
+            return
+        if isinstance(target, N.Index):
+            obj = self.evaluate(target.obj, env)
+            index = self.evaluate(target.index, env)
+            self._delete_index(obj, index, target.line)
+            return
+        if isinstance(target, N.Attribute):
+            obj = self.evaluate(target.obj, env)
+            if isinstance(obj, InstanceValue):
+                if target.name in obj.fields:
+                    del obj.fields[target.name]
+                    return
+                raise ArabiRuntimeError(
+                    f"الكائن لا يحتوي على الخاصية '{target.name}' لحذفها",
+                    target.line)
+            if isinstance(obj, dict) and target.name in obj:
+                del obj[target.name]
+                return
+            raise ArabiRuntimeError(
+                f"لا يمكن حذف '{target.name}' من {typename(obj)}", target.line)
+        raise ArabiRuntimeError('هدف حذف غير صالح', node.line)
+
+    def _delete_index(self, obj, index, line):
+        if isinstance(obj, list):
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ArabiRuntimeError('فهرس القائمة يجب أن يكون عددًا صحيحًا', line)
+            if not -len(obj) <= index < len(obj):
+                raise ArabiRuntimeError(
+                    f'الفهرس {index} خارج النطاق (طول القائمة {len(obj)})', line)
+            del obj[index]
+            return
+        if isinstance(obj, dict):
+            if index in obj:
+                del obj[index]
+                return
+            raise ArabiRuntimeError(
+                f"المفتاح '{display(index)}' غير موجود في القاموس", line)
+        raise ArabiRuntimeError(f'لا يمكن الحذف بالفهرسة من {typename(obj)}', line)
 
     # ================== تحميل الوحدات من الملفات ==================
 
@@ -378,6 +498,9 @@ class Interpreter:
             module_env = Env()
             install_builtins(module_env)
             builtin_names = set(module_env.vars)
+            # الصنف المدمج 'استثناء' متاح داخل الوحدات (للوراثة) لكن لا يُصدَّر
+            module_env.define('استثناء', self.error_class)
+            builtin_names.add('استثناء')
             self._module_stack.append(os.path.dirname(path))
             try:
                 self.exec_statements(tree.statements, module_env)
@@ -423,8 +546,33 @@ class Interpreter:
             if kind == 'str':
                 out.append(val)
             else:
-                out.append(display(self.evaluate(val, env)))
+                out.append(self._display(self.evaluate(val, env)))
         return ''.join(out)
+
+    def _display(self, value):
+        """عرض قيمة مع احترام الطريقة الخاصة 'نص' للكائنات."""
+        if isinstance(value, InstanceValue):
+            func, _owner = self._lookup_member(value.cls, 'نص')
+            if isinstance(func, ArabiFunc):
+                result = self._invoke_bound(func, value, [], {}, None)
+                if not isinstance(result, str):
+                    raise ArabiRuntimeError(
+                        "الطريقة الخاصة 'نص' يجب أن تعيد نصًا")
+                return result
+            # كائن خطأ مخصص يُعرض برسالته
+            if self._is_error_instance(value):
+                msg = value.fields.get('رسالة', '')
+                msg = msg if isinstance(msg, str) else display(msg)
+                return f'{value.cls.name}: {msg}' if msg else value.cls.name
+        return display(value)
+
+    def _call_special(self, instance, name, line):
+        """يستدعي طريقة خاصة (طول/نص/...) على كائن إن وُجدت، وإلا يرفع خطأ."""
+        func, _owner = self._lookup_member(instance.cls, name)
+        if not isinstance(func, ArabiFunc):
+            raise ArabiRuntimeError(
+                f"الكائن من صنف '{instance.cls.name}' لا يعرّف '{name}'", line)
+        return self._invoke_bound(func, instance, [], {}, line)
 
     def eval_Bool(self, node, env):
         return node.value
@@ -490,12 +638,23 @@ class Interpreter:
         value = self.evaluate(node.operand, env)
         if node.op == '-':
             if isinstance(value, bool) or not isinstance(value, (int, float)):
+                # كائن يعرّف الطريقة الخاصة 'سالب'
+                if isinstance(value, InstanceValue):
+                    func, _owner = self._lookup_member(value.cls, 'سالب')
+                    if isinstance(func, ArabiFunc):
+                        return self._invoke_bound(func, value, [], {}, node.line)
                 raise ArabiRuntimeError(
                     f'لا يمكن وضع سالب أمام {typename(value)}', node.line)
             return -value
         if node.op == 'ليس':
             return not self._truthy(value)
         raise ArabiRuntimeError(f"معامل أحادي غير معروف: {node.op}", node.line)
+
+    def eval_Ternary(self, node, env):
+        """التعبير الثلاثي: لو شرط: قيمة1 وإلا قيمة2"""
+        if self._truthy(self.evaluate(node.test, env)):
+            return self.evaluate(node.if_true, env)
+        return self.evaluate(node.if_false, env)
 
     def eval_Call(self, node, env):
         func = self.evaluate(node.func, env)
@@ -603,6 +762,22 @@ class Interpreter:
 
     def eval_Attribute(self, node, env):
         obj = self.evaluate(node.obj, env)
+        if isinstance(obj, EnumMember):
+            if node.name == 'الاسم':
+                return obj.name
+            if node.name == 'القيمة':
+                return obj.value
+            raise ArabiRuntimeError(
+                f"عضو التعداد لا يحتوي على '{node.name}' — المتوفر: الاسم، القيمة",
+                node.line)
+        if isinstance(obj, EnumValue):
+            member = obj.members.get(node.name)
+            if member is None:
+                available = '، '.join(obj.members) or 'لا شيء'
+                raise ArabiRuntimeError(
+                    f"التعداد '{obj.name}' لا يحتوي على '{node.name}' — "
+                    f'الأعضاء: {available}', node.line)
+            return member
         if isinstance(obj, InstanceValue):
             if node.name in obj.fields:
                 return obj.fields[node.name]
@@ -611,6 +786,8 @@ class Interpreter:
                 raise ArabiRuntimeError(
                     f"الكائن من صنف '{obj.cls.name}' لا يحتوي على '{node.name}'",
                     node.line)
+            if isinstance(member, Property):
+                return self._invoke_bound(member.func, obj, [], {}, node.line)
             if isinstance(member, ArabiFunc):
                 return BoundMethod(obj, member)
             return member
@@ -664,6 +841,15 @@ class Interpreter:
         raise ArabiRuntimeError('تعبير غير صالح للإسناد المركب', target.line)
 
     def _set_index(self, obj, index, value, line):
+        # كائن يعرّف الطريقة الخاصة 'عيّن_فهرس'
+        if isinstance(obj, InstanceValue):
+            func, _owner = self._lookup_member(obj.cls, 'عيّن_فهرس')
+            if isinstance(func, ArabiFunc):
+                self._invoke_bound(func, obj, [index, value], {}, line)
+                return
+            raise ArabiRuntimeError(
+                f"الكائن من صنف '{obj.cls.name}' لا يدعم التعيين بالفهرسة — "
+                "عرّف الطريقة الخاصة 'عيّن_فهرس'", line)
         if isinstance(obj, list):
             if isinstance(index, bool) or not isinstance(index, int):
                 raise ArabiRuntimeError('فهرس القائمة يجب أن يكون عددًا صحيحًا', line)
@@ -680,6 +866,14 @@ class Interpreter:
         raise ArabiRuntimeError(f'لا يمكن الإسناد بالفهرسة في {typename(obj)}', line)
 
     def _get_index(self, obj, index, line):
+        # كائن يعرّف الطريقة الخاصة 'فهرس'
+        if isinstance(obj, InstanceValue):
+            func, _owner = self._lookup_member(obj.cls, 'فهرس')
+            if isinstance(func, ArabiFunc):
+                return self._invoke_bound(func, obj, [index], {}, line)
+            raise ArabiRuntimeError(
+                f"الكائن من صنف '{obj.cls.name}' لا يدعم الفهرسة — "
+                "عرّف الطريقة الخاصة 'فهرس'", line)
         if isinstance(obj, (list, range)):
             if isinstance(index, bool) or not isinstance(index, int):
                 raise ArabiRuntimeError(
@@ -733,6 +927,9 @@ class Interpreter:
             ctor, _owner = self._lookup_member(func, 'إنشاء')
             if isinstance(ctor, ArabiFunc):
                 self._invoke_bound(ctor, instance, args, kwargs, line)
+            elif isinstance(ctor, NativeCtor) and ctor.kind == 'خطأ':
+                message = display(args[0]) if args else 'خطأ'
+                instance.fields['رسالة'] = message
             return instance
         # طريقة مرتبطة كُلّمت لاحقًا: م = ك.طريقة ثم م()
         if isinstance(func, BoundMethod):
@@ -824,12 +1021,27 @@ class Interpreter:
             raise ArabiRuntimeError(
                 f"الصنف '{cls.name}' لا يحتوي على طريقة أو خاصية اسمها '{name}'",
                 line)
+        if isinstance(func, Property):
+            raise ArabiRuntimeError(
+                f"'{name}' خاصية محسوبة في الصنف '{owner.name}' — "
+                'تُقرأ بلا أقواس ولا تُستدعى كدالة', line)
+        if isinstance(func, NativeCtor):
+            if owner is self.error_class and func.kind == 'خطأ':
+                message = display(args[0]) if args else 'خطأ'
+                instance.fields['رسالة'] = message
+                return None
+            raise ArabiRuntimeError(
+                f"'{owner.name}.{name}' مُنشئ أصلي غير قابل للاستدعاء هنا", line)
         if not isinstance(func, ArabiFunc):
             raise ArabiRuntimeError(
                 f"'{name}' في الصنف '{owner.name}' ثابت وليس طريقة", line)
         return self._invoke_bound(func, instance, args, kwargs, line)
 
     def _binop(self, op, left, right, line):
+        # تحميل العوامل على الكائنات (اجمع، اطرح، اضرب...)
+        overloaded = self._try_overload(op, left, right, line)
+        if overloaded is not _SKIP:
+            return overloaded
         if op == '+':
             l_num = self._is_number(left)
             r_num = self._is_number(right)
@@ -903,6 +1115,21 @@ class Interpreter:
             return not self._membership(left, right, line)
         raise ArabiRuntimeError(f"معامل غير معروف: {op}", line)
 
+    def _try_overload(self, op, left, right, line):
+        """يجرب الطرق الخاصة للعوامل على الكائنات (يسارًا ثم يمينًا).
+
+        يعيد _SKIP إذا لم يجد طريقة مناسبة ليكمل المسار الأصلي.
+        """
+        method_name = OVERLOAD_METHODS.get(op)
+        if method_name is None:
+            return _SKIP
+        for operand, other in ((left, right), (right, left)):
+            if isinstance(operand, InstanceValue):
+                func, _owner = self._lookup_member(operand.cls, method_name)
+                if isinstance(func, ArabiFunc):
+                    return self._invoke_bound(func, operand, [other], {}, line)
+        return _SKIP
+
     def _is_number(self, v):
         return isinstance(v, (int, float)) and not isinstance(v, bool)
 
@@ -913,9 +1140,23 @@ class Interpreter:
                 line)
 
     def _values_equal(self, left, right):
+        # كائن يعرّف الطريقة الخاصة 'يساوي'
+        if isinstance(left, InstanceValue):
+            func, _owner = self._lookup_member(left.cls, 'يساوي')
+            if isinstance(func, ArabiFunc):
+                return bool(self._invoke_bound(func, left, [right], {}, None))
+        if isinstance(right, InstanceValue):
+            func, _owner = self._lookup_member(right.cls, 'يساوي')
+            if isinstance(func, ArabiFunc):
+                return bool(self._invoke_bound(func, right, [left], {}, None))
         return left == right
 
     def _membership(self, left, right, line):
+        # كائن يعرّف الطريقة الخاصة 'يحتوي'
+        if isinstance(right, InstanceValue):
+            func, _owner = self._lookup_member(right.cls, 'يحتوي')
+            if isinstance(func, ArabiFunc):
+                return bool(self._invoke_bound(func, right, [left], {}, line))
         if isinstance(right, str):
             if not isinstance(left, str):
                 raise ArabiRuntimeError(
