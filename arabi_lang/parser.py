@@ -686,17 +686,24 @@ class Parser:
         keys = []
         values = []
         if not self.check(T.RBRACE):
-            keys.append(self.expression())
+            keys.append(self._dict_key())
             self.expect(T.COLON, "متوقع ':' بين مفتاح القاموس وقيمته")
             values.append(self.expression())
             while self.match(T.COMMA):
                 if self.check(T.RBRACE):
                     break
-                keys.append(self.expression())
+                keys.append(self._dict_key())
                 self.expect(T.COLON, "متوقع ':' بين مفتاح القاموس وقيمته")
                 values.append(self.expression())
         self.expect(T.RBRACE, "متوقع '}' لإغلاق القاموس")
         return DictLit(keys, values, tok.line)
+
+    def _dict_key(self):
+        """مفتاح القاموس: معرّف بلا اقتباس يعامل كنص — {الحالة: 200} ≡ {"الحالة": 200}."""
+        if self.check(T.IDENT):
+            tok = self.advance()
+            return Str(tok.value, tok.line)
+        return self.expression()
 
     # ---------- أدوات ----------
 

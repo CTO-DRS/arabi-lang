@@ -12,6 +12,12 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT)
 
 from arabi import run_code                                  # noqa: E402
+from arabi_lang.lexer import Lexer                           # noqa: E402
+from arabi_lang.tokens import T                              # noqa: E402
+from arabi_lang.parser import Parser                         # noqa: E402
+from arabi_lang.tools import (                                # noqa: E402
+    format_source, lint_source, generate_docs, install_package, list_packages,
+)
 from arabi_lang.errors import (                              # noqa: E402
     ArabiError, ArabiRuntimeError, ParseError, LexerError,
 )
@@ -2123,6 +2129,532 @@ class TestMathTimeExpansion(unittest.TestCase):
     def test_time_still_works(self):
         out = run_arabi('اطبع(وقت.زمن() > ٠)')
         self.assertEqual(out, 'صح\n')
+
+
+# ================== الإصدار 1.6: الوحدات والأدوات الجديدة ==================
+
+class TestTestsModule(unittest.TestCase):
+    """وحدة اختبارات — إطار الاختبارات داخل اللغة."""
+
+    def test_passing_flow(self):
+        out = run_arabi(
+            'اختبارات.ابدأ("مجموعتي")\n'
+            'اختبارات.يساوي(١ + ١، ٢، "الجمع")\n'
+            'اختبارات.يختلف(١، ٢)\n'
+            'اختبارات.يصح("نص")\n'
+            'اختبارات.يخطئ(ولا شيء)\n'
+            'اختبارات.ملخص()\n')
+        self.assertIn('== مجموعتي ==', out)
+        self.assertIn('✓ الجمع', out)
+        self.assertIn('✓ الاختبار رقم 2', out)
+        self.assertIn('== الملخص: 4 ناجحة، 0 فاشلة من 4 اختبارًا ==', out)
+
+    def test_failure_output(self):
+        out = run_arabi('اختبارات.يساوي(١، ٢، "فاشل")\nاختبارات.ملخص()\n')
+        self.assertIn('✗ فاشل — المتوقع: 2، الفعلي: 1', out)
+        self.assertIn('1 فاشلة', out)
+
+    def test_summary_dict_auto_start(self):
+        out = run_arabi(
+            'ن = اختبارات.ملخص()\n'
+            'اطبع(ن["ناجح"]، ن["فاشل"]، ن["الكل"])\n')
+        self.assertEqual(
+            out, '== الملخص: 0 ناجحة، 0 فاشلة من 0 اختبارًا ==\n0 0 0\n')
+
+    def test_eq_with_lists_and_dicts(self):
+        out = run_arabi(
+            'اختبارات.يساوي([١، ٢]، [١، ٢]، "قوائم")\n'
+            'اختبارات.يساوي({أ: ١}، {"أ": ١}، "قواميس")\n'
+            'اختبارات.ملخص()\n')
+        self.assertIn('2 ناجحة', out)
+
+    def test_raises_passes_on_error(self):
+        out = run_arabi('اختبارات.يرفع(دالة() => عدد("خطأ")، "يرفع خطأ")\n')
+        self.assertIn('✓ يرفع خطأ', out)
+
+    def test_raises_fails_without_error(self):
+        out = run_arabi('اختبارات.يرفع(دالة() => ٥، "لا يرفع")\n')
+        self.assertIn('✗ لا يرفع — لم ترفع الدالة أي خطأ', out)
+
+    def test_raises_accepts_user_class_error(self):
+        out = run_arabi(
+            'صنف خطأي من استثناء:\n'
+            '    تجاهل\n'
+            'دالة رامي():\n'
+            '    ارفع خطأي("بوم")\n'
+            'اختبارات.يرفع(رامي، "خطأ مخصص")\n')
+        self.assertIn('✓ خطأ مخصص', out)
+
+    def test_state_resets_on_start(self):
+        out = run_arabi(
+            'اختبارات.ابدأ()\n'
+            'اختبارات.يصح(صح)\n'
+            'اختبارات.ابدأ("جديدة")\n'
+            'ن = اختبارات.ملخص()\n'
+            'اطبع(ن["الكل"])\n')
+        self.assertTrue(out.rstrip().endswith('0'))
+
+    def test_arg_validation(self):
+        expect_error('اختبارات.يساوي(١)', ArabiRuntimeError, 'تقبل')
+        expect_error('اختبارات.ابدأ(٥)', ArabiRuntimeError, 'نصًا')
+        expect_error('اختبارات.يرفع(٥)', ArabiRuntimeError, 'دالة')
+        expect_error('اختبارات.يصح(صح، ٥)', ArabiRuntimeError, 'نصًا')
+
+
+class TestServerModule(unittest.TestCase):
+    """وحدة خادم — خوادم ويب حقيقية بلغة عربي."""
+
+    ROUTES = (
+        'دالة معالج(طلب):\n'
+        '    لو طلب["المسار"] == "/":\n'
+        '        أعد "الصفحة الرئيسية"\n'
+        '    وإلا إذا طلب["المسار"] == "/بحث":\n'
+        '        أعد "نتائج: " + طلب["المعاملات"]["كلمة"]\n'
+        '    أعد {الحالة: 404، النص: "غير موجودة"}\n'
+    )
+
+    def tearDown(self):
+        run_arabi('جرب:\n    خادم.قف()\nباستثناء:\n    تجاهل\n')
+
+    def test_roundtrip_get(self):
+        out = run_arabi(
+            self.ROUTES +
+            'المنفذ = خادم.ابدأ(٠، معالج)\n'
+            'اطبع(المنفذ > ٠)\n'
+            'ر = شبكة.اطلب("http://127.0.0.1:" + نص(المنفذ) + "/")\n'
+            'اطبع(ر["الحالة"]، ر["النص"])\n'
+            'خادم.قف()\n')
+        self.assertIn('صح', out)
+        self.assertIn('200 الصفحة الرئيسية', out)
+
+    def test_query_params_arabic(self):
+        out = run_arabi(
+            self.ROUTES +
+            'المنفذ = خادم.ابدأ(٠، معالج)\n'
+            'ر = شبكة.اطلب("http://127.0.0.1:" + نص(المنفذ) + "/بحث؟كلمة=سلام")\n'
+            'اطبع(ر["النص"])\n'
+            'خادم.قف()\n')
+        self.assertIn('نتائج: سلام', out)
+
+    def test_post_body(self):
+        out = run_arabi(
+            'دالة معالج(طلب):\n'
+            '    أعد "تحية " + طلب["النص"]\n'
+            'المنفذ = خادم.ابدأ(٠، معالج)\n'
+            'ر = شبكة.اطلب("http://127.0.0.1:" + نص(المنفذ)، "POST"، {}، "زائر")\n'
+            'اطبع(ر["النص"])\n'
+            'خادم.قف()\n')
+        self.assertIn('تحية زائر', out)
+
+    def test_status_and_headers(self):
+        out = run_arabi(
+            'دالة معالج(طلب):\n'
+            '    أعد {الحالة: 201، النص: "أُنشئ"، الترويسات: {نوع_المحتوى: "text/plain"}}\n'
+            'المنفذ = خادم.ابدأ(٠، معالج)\n'
+            'ر = شبكة.اطلب("http://127.0.0.1:" + نص(المنفذ) + "/")\n'
+            'اطبع(ر["الحالة"]، ر["الترويسات"]["Content-Type"])\n'
+            'خادم.قف()\n')
+        self.assertIn('201 text/plain', out)
+
+    def test_404_from_handler(self):
+        out = run_arabi(
+            self.ROUTES +
+            'المنفذ = خادم.ابدأ(٠، معالج)\n'
+            'ر = شبكة.اطلب("http://127.0.0.1:" + نص(المنفذ) + "/مفقود")\n'
+            'اطبع(ر["الحالة"])\n'
+            'خادم.قف()\n')
+        self.assertIn('404', out)
+
+    def test_restart_after_stop(self):
+        out = run_arabi(
+            'دالة معالج(طلب):\n'
+            '    أعد "أهلا"\n'
+            'م١ = خادم.ابدأ(٠، معالج)\n'
+            'خادم.قف()\n'
+            'م٢ = خادم.ابدأ(٠، معالج)\n'
+            'اطبع(م١ > ٠ و م٢ > ٠)\n'
+            'خادم.قف()\n')
+        self.assertIn('صح', out)
+
+    def test_double_start_error(self):
+        out = run_arabi(
+            'دالة معالج(طلب):\n'
+            '    أعد ""\n'
+            'خادم.ابدأ(٠، معالج)\n')
+        expect_error(out if False else
+                     'دالة معالج(طلب):\n    أعد ""\n'
+                     'خادم.ابدأ(٠، معالج)\nخادم.ابدأ(٠، معالج)\n',
+                     ArabiRuntimeError, 'يعمل بالفعل')
+
+    def test_stop_and_wait_without_server(self):
+        expect_error('خادم.قف()', ArabiRuntimeError, 'لا يوجد خادم')
+        expect_error('خادم.انتظر()', ArabiRuntimeError, 'لا يوجد خادم')
+
+    def test_invalid_port_and_handler(self):
+        body = 'دالة معالج(طلب):\n    أعد ""\n'
+        expect_error(body + 'خادم.ابدأ(٧٠٠٠٠، معالج)\n',
+                     ArabiRuntimeError, '٦٥٥٣٥')
+        expect_error(body + 'خادم.ابدأ(٠، ٥)\n',
+                     ArabiRuntimeError, 'دالة')
+
+
+class TestSysAdditions(unittest.TestCase):
+    """إضافات وحدة نظام: وسيطات وخروج."""
+
+    def test_args(self):
+        old = sys.argv
+        try:
+            sys.argv = ['arabi.py', 'برنامج.عربي', 'أول', 'ثانٍ']
+            out = run_arabi('اطبع(نظام.وسيطات())')
+            self.assertEqual(out, '[أول، ثانٍ]\n')
+        finally:
+            sys.argv = old
+
+    def test_exit_with_code(self):
+        with self.assertRaises(SystemExit) as cm:
+            run_arabi('نظام.خروج(٣)')
+        self.assertEqual(cm.exception.code, 3)
+
+    def test_exit_default(self):
+        with self.assertRaises(SystemExit) as cm:
+            run_arabi('نظام.خروج()')
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_exit_type_validation(self):
+        expect_error('نظام.خروج("نص")', ArabiRuntimeError, 'عددًا صحيحًا')
+        expect_error('نظام.خروج(صح)', ArabiRuntimeError, 'عددًا صحيحًا')
+
+
+class TestDictBareKeys(unittest.TestCase):
+    """مفاتيح القواميس بلا اقتباس — {الحالة: 200} ≡ {"الحالة": 200}."""
+
+    def test_bare_keys_basic(self):
+        out = run_arabi(
+            'شخص = {الاسم: "خالد"، العمر: ٣٠}\n'
+            'اطبع(شخص["الاسم"]، شخص["العمر"])\n')
+        self.assertEqual(out, 'خالد 30\n')
+
+    def test_mixed_keys(self):
+        out = run_arabi(
+            'د = {أ: ١، "ب": ٢}\n'
+            'اطبع(د["أ"] + د["ب"])\n')
+        self.assertEqual(out, '3\n')
+
+    def test_nested_bare_keys(self):
+        out = run_arabi(
+            'ر = {الحالة: 200، البيانات: {الاسم: "نورة"}}\n'
+            'اطبع(ر["البيانات"]["الاسم"])\n')
+        self.assertEqual(out, 'نورة\n')
+
+    def test_variable_value_not_affected(self):
+        out = run_arabi(
+            'مفتاح = "ديناميكي"\n'
+            'د = {مفتاح_ثابت: ١}\n'
+            'اطبع(د["مفتاح_ثابت"]، مفتاح)\n')
+        self.assertEqual(out, '1 ديناميكي\n')
+
+
+class TestLibrariesPath(unittest.TestCase):
+    """مجلد مكتبات/ في مسار البحث عن الوحدات."""
+
+    def test_import_from_libraries_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib_dir = os.path.join(d, 'مكتبات')
+            os.makedirs(lib_dir)
+            with open(os.path.join(lib_dir, 'مكتبتي.عربي'), 'w',
+                      encoding='utf-8') as f:
+                f.write('القيمة = ٤٢\n')
+            out = run_code('استورد مكتبتي\nاطبع(مكتبتي.القيمة)\n',
+                           script_dir=d)
+            self.assertEqual(out, '42\n')
+
+
+class TestFormatter(unittest.TestCase):
+    """المنسق --نسق."""
+
+    def test_tabs_to_spaces(self):
+        fixed, _ = format_source('لو صح:\n\tاطبع(١)\n')
+        self.assertIn('\n    اطبع(١)', fixed)
+
+    def test_depth_normalization(self):
+        fixed, _ = format_source('لو صح:\n  اطبع(١)\n  اطبع(٢)\n')
+        lines = fixed.splitlines()
+        self.assertEqual(lines[1], '    اطبع(١)')
+        self.assertEqual(lines[2], '    اطبع(٢)')
+
+    def test_trailing_whitespace_removed(self):
+        fixed, _ = format_source('اطبع(١)   \n')
+        self.assertEqual(fixed, 'اطبع(١)\n')
+
+    def test_blank_lines_collapse(self):
+        fixed, _ = format_source('اطبع(١)\n\n\n\nاطبع(٢)\n')
+        self.assertEqual(fixed, 'اطبع(١)\n\nاطبع(٢)\n')
+
+    def test_idempotent(self):
+        src = 'لو صح:\n\tاطبع(١)\n\n\n\nاطبع(٢)  \n'
+        once, _ = format_source(src)
+        twice, changes = format_source(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(changes, 0)
+
+    def test_multiline_string_preserved(self):
+        src = 'نص = """سطر أول\n    بإزاحة داخل النص\nسطر ثالث"""\nاطبع(نص)\n'
+        fixed, _ = format_source(src)
+        self.assertIn('    بإزاحة داخل النص', fixed)
+
+    def test_continuation_lines_preserved(self):
+        src = 'ق = [\n    ١،\n    ٢\n]\n'
+        fixed, changes = format_source(src)
+        self.assertEqual(fixed, src)
+        self.assertEqual(changes, 0)
+
+    def test_valid_code_stays_valid(self):
+        src = 'لو صح:\n\tاطبع(١)\n'
+        fixed, _ = format_source(src)
+        Parser(Lexer(fixed).tokenize()).parse()   # فحص صارم ينجح
+
+    def test_broken_original_best_effort(self):
+        # ملف غير سليم بنيويًا — لا ينهار المنسق
+        fixed, _ = format_source('اطبع(١)\n')
+        self.assertEqual(fixed, 'اطبع(١)\n')
+
+
+class TestLinter(unittest.TestCase):
+    """الفاحص --افحص."""
+
+    def lint(self, src):
+        return lint_source(src)
+
+    def has(self, src, keyword, kind=None):
+        issues = self.lint(src)
+        for line, k, msg in issues:
+            if keyword in msg and (kind is None or k == kind):
+                return True
+        return False
+
+    def test_unused_variable(self):
+        self.assertTrue(self.has('س = ٥\n', "المتغير 'س' معرّف لكنه غير مستخدم"))
+
+    def test_used_variable_clean(self):
+        self.assertEqual(self.lint('س = ٥\nاطبع(س)\n'), [])
+
+    def test_unused_import(self):
+        self.assertTrue(self.has('استورد رياضيات\n', "الاستيراد 'رياضيات' غير مستخدم"))
+
+    def test_used_import_clean(self):
+        self.assertEqual(self.lint('استورد رياضيات\nاطبع(رياضيات.بي)\n'), [])
+
+    def test_unreachable_code(self):
+        self.assertTrue(self.has(
+            'دالة خ():\n    أعد ١\n    اطبع(٢)\n',
+            'كود غير قابل للوصول'))
+
+    def test_duplicate_params(self):
+        self.assertTrue(self.has('دالة خ(س، س):\n    تجاهل\n', "المعامل 'س' مكرر"))
+
+    def test_undefined_name(self):
+        self.assertTrue(self.has('اطبع(غير_موجود)\n',
+                                 "الاسم 'غير_موجود' غير معرّف", 'تحذير'))
+
+    def test_return_outside_function(self):
+        self.assertTrue(self.has('أعد ١\n', "جملة 'أعد' خارج الدالة", 'خطأ'))
+
+    def test_break_outside_loop(self):
+        self.assertTrue(self.has('كسر\n', "جملة 'كسر' خارج حلقة", 'خطأ'))
+
+    def test_break_inside_loop_clean(self):
+        self.assertEqual(self.lint('طالما صح:\n    كسر\n'), [])
+
+    def test_shadowing_builtin_variable(self):
+        self.assertTrue(self.has('اطبع = ٥\n', 'يظلّل'))
+
+    def test_underscore_exempt(self):
+        self.assertEqual(self.lint('_س = ٥\n'), [])
+
+    def test_syntax_error_passthrough(self):
+        issues = self.lint('دالة خ(:\n')
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0][1], 'خطأ')
+
+    def test_closure_no_false_positive(self):
+        src = ('دالة عداد():\n'
+               '    العدد = ٠\n'
+               '    دالة زد():\n'
+               '        العدد = العدد + ١\n'
+               '        أعد العدد\n'
+               '    أعد زد\n'
+               'اطبع(عداد()())\n')
+        self.assertEqual(self.lint(src), [])
+
+    def test_try_then_use_no_false_positive(self):
+        src = ('جرب:\n'
+               '    س = ١\n'
+               'باستثناء:\n'
+               '    تجاهل\n'
+               'اطبع(س)\n')
+        self.assertEqual(self.lint(src), [])
+
+    def test_clean_program(self):
+        src = ('دالة جمع(أ، ب):\n'
+               '    أعد أ + ب\n'
+               'اطبع(جمع(١، ٢))\n')
+        self.assertEqual(self.lint(src), [])
+
+
+class TestDocGen(unittest.TestCase):
+    """مولد التوثيق --وثق."""
+
+    def test_module_docstring_and_function(self):
+        docs = generate_docs('مثال.عربي',
+                             '"""وحدة تجريبية."""\n'
+                             'دالة جمع(أ، ب):\n'
+                             '    """يجمع عددين."""\n'
+                             '    أعد أ + ب\n')
+        self.assertIn('# توثيق مثال.عربي', docs)
+        self.assertIn('وحدة تجريبية', docs)
+        self.assertIn('### جمع(أ، ب)', docs)
+        self.assertIn('يجمع عددين', docs)
+
+    def test_params_with_defaults(self):
+        docs = generate_docs('م.عربي',
+                             'دالة ترحيب(الاسم، تحية = "مرحبا"):\n'
+                             '    أعد ١\n')
+        self.assertIn('ترحيب(الاسم، تحية = "مرحبا")', docs)
+
+    def test_class_with_members(self):
+        docs = generate_docs('م.عربي',
+                             'صنف حساب:\n'
+                             '    """صنف الحساب."""\n'
+                             '    السقف = ١٠\n'
+                             '    دالة مضاعف(س):\n'
+                             '        """يضاعف."""\n'
+                             '        أعد س * ٢\n'
+                             '    خاصية الاسم:\n'
+                             '        أعد "حساب"\n')
+        self.assertIn('### حساب', docs)
+        self.assertIn('صنف الحساب', docs)
+        self.assertIn('**الثوابت:** `السقف`', docs)
+        self.assertIn('`مضاعف(س)`', docs)
+        self.assertIn('**الخصائص المحسوبة:** `الاسم`', docs)
+
+    def test_enum_table(self):
+        docs = generate_docs('م.عربي',
+                             'تعداد ألوان:\n'
+                             '    أحمر\n'
+                             '    أخضر = ٢\n')
+        self.assertIn('## التعدادات', docs)
+        self.assertIn('| `أحمر` | تلقائي |', docs)
+        self.assertIn('| `أخضر` | 2 |', docs)
+
+    def test_imports_listed(self):
+        docs = generate_docs('م.عربي',
+                             'استورد رياضيات\n'
+                             'من وقت استورد الآن\n')
+        self.assertIn('## الاعتماديات', docs)
+        self.assertIn('`رياضيات`', docs)
+        self.assertIn('من `وقت`', docs)
+
+    def test_empty_file(self):
+        docs = generate_docs('فارغ.عربي', 'تجاهل\n')
+        self.assertIn('لا يوجد عناصر موثقة', docs)
+
+
+class TestPackages(unittest.TestCase):
+    """مدير الحزم --ثبت و--حزم."""
+
+    def test_install_local_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, 'مكتبة_جيدة.عربي')
+            with open(src, 'w', encoding='utf-8') as f:
+                f.write('دالة ن():\n    أعد ١\n')
+            libs = os.path.join(d, 'libs')
+            name, dest = install_package(src, libs)
+            self.assertEqual(name, 'مكتبة_جيدة')
+            self.assertTrue(os.path.isfile(dest))
+            self.assertEqual(list_packages(libs), ['مكتبة_جيدة.عربي'])
+
+    def test_install_adds_extension(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, 'بلا_امتداد')
+            with open(src, 'w', encoding='utf-8') as f:
+                f.write('تجاهل\n')
+            libs = os.path.join(d, 'libs')
+            name, dest = install_package(src, libs)
+            self.assertEqual(name, 'بلا_امتداد')
+            self.assertTrue(dest.endswith('بلا_امتداد.عربي'))
+
+    def test_install_rejects_broken_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, 'سيئة.عربي')
+            with open(src, 'w', encoding='utf-8') as f:
+                f.write('دالة ناقصة(:\n')
+            libs = os.path.join(d, 'libs')
+            with self.assertRaises(ArabiError):
+                install_package(src, libs)
+            self.assertEqual(list_packages(libs), [])
+
+    def test_install_missing_file(self):
+        with self.assertRaises(ArabiError):
+            install_package('غير_موجود_إطلاقا.عربي',
+                            os.path.join(tempfile.gettempdir(), 'libs_عربي'))
+
+
+class TestLexerLineNumbers(unittest.TestCase):
+    """إصلاحات المحلل اللفظي: أرقام الأسطر بعد النصوص الممتدة وخطأ القوس المفتوح."""
+
+    def test_lines_after_multiline_string(self):
+        toks = Lexer('نص = """\nأ\nب\n"""\nاطبع(نص)').tokenize()
+        print_tok = [t for t in toks if t.value == 'اطبع'][0]
+        self.assertEqual(print_tok.line, 5)
+
+    def test_multiline_string_token_carries_start_line(self):
+        toks = Lexer('نص = """\nأ\nب\n"""').tokenize()
+        str_tok = [t for t in toks if t.type is T.STRING][0]
+        self.assertEqual(str_tok.line, 1)
+
+    def test_unclosed_bracket_reports_opening_line(self):
+        with self.assertRaises(LexerError) as cm:
+            Lexer('اطبع(١\nاطبع(٢\n').tokenize()
+        # القوس الأعمق (الأخير) هو المُبلَّغ عنه
+        self.assertEqual(cm.exception.line, 2)
+        self.assertIn("قوس '(' بقي مفتوحًا", cm.exception.message)
+
+    def test_strict_mode_still_rejects_inconsistent_indent(self):
+        with self.assertRaises(LexerError):
+            Lexer('لو صح:\n        اطبع(١)\n   اطبع(٢)\n').tokenize()
+
+    def test_lenient_mode_accepts_inconsistent_indent(self):
+        toks = Lexer('لو صح:\n        اطبع(١)\n   اطبع(٢)\n',
+                     lenient_indent=True).tokenize()
+        self.assertTrue(any(t.type is T.EOF for t in toks))
+
+
+class TestMultilineFString(unittest.TestCase):
+    """النصوص المنسقة متعددة الأسطر: ق + ثلاث علامات اقتباس."""
+
+    def test_basic_interpolation(self):
+        out = run_arabi('الاسم = "نورة"\n'
+                        'صفحة = ق"""مرحبا\n{الاسم}"""\n'
+                        'اطبع(صفحة)\n')
+        self.assertEqual(out, 'مرحبا\nنورة\n')
+
+    def test_expressions(self):
+        out = run_arabi('نص = ق"""المجموع: {٣ + ٤}\nالضِعف: {(٣ + ٤) * ٢}"""\n'
+                        'اطبع(نص)\n')
+        self.assertEqual(out, 'المجموع: 7\nالضِعف: 14\n')
+
+    def test_quotes_inside(self):
+        out = run_arabi('صفحة = ق"""<html dir="rtl">\n  <p>{١ + ١}</p>\n</html>"""\n'
+                        'اطبع(صفحة)\n')
+        self.assertEqual(out, '<html dir="rtl">\n  <p>2</p>\n</html>\n')
+
+    def test_unclosed_raises(self):
+        expect_error('نص = ق"""سطر\n', LexerError, 'غير مغلق')
+
+    def test_line_numbers_after(self):
+        toks = Lexer('ن = ق"""أ\nب"""\nاطبع(ن)').tokenize()
+        print_tok = [t for t in toks if t.value == 'اطبع'][0]
+        self.assertEqual(print_tok.line, 3)
 
 
 if __name__ == '__main__':

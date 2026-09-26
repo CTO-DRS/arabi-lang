@@ -55,6 +55,18 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.interpolated.multiline.arabi",
+          "match": "ق(\"\"\"|\\'\\'\\')(?:[^\\\\]|\\\\.)*?(\\1)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.arabi"
+            },
+            "2": {
+              "name": "punctuation.definition.string.end.arabi"
+            }
+          }
+        },
+        {
           "name": "string.interpolated.arabi",
           "begin": "ق(['\"])",
           "beginCaptures": {
@@ -241,7 +253,7 @@
     },
     "modules": {
       "name": "entity.other.module.arabi",
-      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت)(?![\\u0600-\\u06FF\\w])"
+      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت|ملفات|جيسون|عشوائية|نظام|تنظيم|شبكة|تحويل|اختبارات|خادم)(?![\\u0600-\\u06FF\\w])"
     },
     "numbers": {
       "patterns": [

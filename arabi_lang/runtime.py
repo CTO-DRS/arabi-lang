@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """طبقة التشغيل: البيئات، القيم، الدوال الجاهزة، الوحدات، وطرق الأنواع."""
 
+import http.server
 import json
 import math
 import os
 import re
+import sys
+import threading
 import time
 import random
+import urllib.parse
 
-from .errors import ArabiRuntimeError, ArabiUserError
+from .errors import ArabiError, ArabiRuntimeError, ArabiUserError
 
 AR2EN = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
@@ -825,6 +829,8 @@ def install_builtins(env):
         'المجلد': BuiltinFunc('المجلد', _sys_dirname),
         'المسار_الكامل': BuiltinFunc('المسار_الكامل', _sys_abspath),
         'النظام': BuiltinFunc('النظام', _sys_platform),
+        'وسيطات': BuiltinFunc('وسيطات', _sys_args),
+        'خروج': BuiltinFunc('خروج', _sys_exit),
     }))
 
     env.define('تنظيم', ModuleValue('تنظيم', {
@@ -845,6 +851,29 @@ def install_builtins(env):
         'إلى_شرقية': BuiltinFunc('إلى_شرقية', _conv_eastern),
         'إلى_غربية': BuiltinFunc('إلى_غربية', _conv_western),
         'كلمات': BuiltinFunc('كلمات', _conv_words),
+    }))
+
+    # ============ إطار الاختبارات (الإصدار 1.6) ============
+
+    _tests = _TestState()
+    env.define('اختبارات', ModuleValue('اختبارات', {
+        'ابدأ': BuiltinFunc('ابدأ', _tests_start(_tests)),
+        'يساوي': BuiltinFunc('يساوي', _tests_check(_tests, 'eq')),
+        'يختلف': BuiltinFunc('يختلف', _tests_check(_tests, 'ne')),
+        'يصح': BuiltinFunc('يصح', _tests_check(_tests, 'truthy')),
+        'يخطئ': BuiltinFunc('يخطئ', _tests_check(_tests, 'falsy')),
+        'يرفع': BuiltinFunc('يرفع', _tests_raises(_tests), takes_interp=True),
+        'ملخص': BuiltinFunc('ملخص', _tests_summary(_tests)),
+    }))
+
+    # ============ خادم الويب (الإصدار 1.6) ============
+
+    _srv = _ServerState()
+    env.define('خادم', ModuleValue('خادم', {
+        'ابدأ': BuiltinFunc('ابدأ', _srv.start, takes_interp=True),
+        'قف': BuiltinFunc('قف', _srv.stop),
+        'المنفذ': BuiltinFunc('المنفذ', _srv.get_port),
+        'انتظر': BuiltinFunc('انتظر', _srv.wait),
     }))
 
 
@@ -1360,6 +1389,24 @@ def _sys_platform(args, line):
     return platform.system()
 
 
+def _sys_args(args, line):
+    """وسيطات() — قائمة الوسائط الممررة للبرنامج بعد اسم الملف."""
+    if args:
+        raise ArabiRuntimeError("'وسيطات' لا تقبل معاملات", line)
+    return list(sys.argv[2:])
+
+
+def _sys_exit(args, line):
+    """خروج(كود؟) — ينهي البرنامج بكود خروج (افتراضيًا ٠)."""
+    if len(args) > 1:
+        raise ArabiRuntimeError("'خروج' تقبل معاملًا واحدًا على الأكثر (كود الخروج)", line)
+    code = args[0] if args else 0
+    if isinstance(code, bool) or not isinstance(code, int):
+        raise ArabiRuntimeError(
+            f"كود الخروج يجب أن يكون عددًا صحيحًا لكنه {typename(code)}", line)
+    raise SystemExit(code)
+
+
 # ================== وحدة تنظيم (التعبيرات النمطية) ==================
 
 def _re_compile(pattern, name, line):
@@ -1457,6 +1504,10 @@ def _net_request(args, line):
     if not url.startswith(('http://', 'https://')):
         raise ArabiRuntimeError(
             f"الرابط يجب أن يبدأ بـ http:// أو https:// — استلمت '{url}'", line)
+    # علامة الاستفهام العربية تُعامل كفاصل استعلام قياسي
+    url = url.replace('؟', '?')
+    # ترميز المحارف غير اللاتينية (مثل المسارات العربية) كما يتطلب HTTP
+    url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%")
 
     method = 'GET'
     if len(args) >= 2:
@@ -1631,3 +1682,349 @@ def _conv_words(args, line):
         raise ArabiRuntimeError(
             f"'كلمات' تتوقع معاملًا واحدًا لكنها استلمت {len(args)}", line)
     return tafqit(args[0], line)
+
+
+# ================== وحدة اختبارات (إطار الاختبارات) ==================
+
+class _TestState:
+    """حالة إطار الاختبارات — نسخة مستقلة لكل مفسر (لكل عملية تشغيل)."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.suite = 'الاختبارات'
+        self.started = False
+        self.passed = 0
+        self.failed = 0
+        self.failures = []
+
+    @property
+    def total(self):
+        return self.passed + self.failed
+
+    def record(self, ok, name, detail, line):
+        """يسجل نتيجة اختبار ويطبعها فورًا (مع بداية تلقائية عند الحاجة)."""
+        self.started = True
+        if not isinstance(name, str) or not name:
+            name = f'الاختبار رقم {self.total + 1}'
+        if ok:
+            self.passed += 1
+            print(f'✓ {name}')
+        else:
+            self.failed += 1
+            self.failures.append((name, detail, line))
+            print(f'✗ {name} — {detail}' if detail else f'✗ {name}')
+        return None
+
+
+def _tests_start(state):
+    def fn(args, line):
+        if len(args) > 1:
+            raise ArabiRuntimeError(
+                f"'ابدأ' تقبل معاملًا واحدًا على الأكثر لكنها استلمت {len(args)}", line)
+        name = 'الاختبارات'
+        if args:
+            if not isinstance(args[0], str):
+                raise ArabiRuntimeError(
+                    f"اسم المجموعة يجب أن يكون نصًا لكنه {typename(args[0])}", line)
+            name = args[0]
+        state.reset()
+        state.started = True
+        state.suite = name
+        print(f'== {name} ==')
+        return None
+    return fn
+
+
+def _tests_check(state, mode):
+    """مصنع دوال الفحص: يساوي / يختلف / يصح / يخطئ."""
+    required = 2 if mode in ('eq', 'ne') else 1
+    label = {'eq': 'يساوي', 'ne': 'يختلف',
+             'truthy': 'يصح', 'falsy': 'يخطئ'}[mode]
+
+    def fn(args, line):
+        if not required <= len(args) <= required + 1:
+            raise ArabiRuntimeError(
+                f"'{label}' تقبل {required} أو {required + 1} معاملات "
+                f"لكنها استلمت {len(args)}", line)
+        name = args[-1] if len(args) == required + 1 else None
+        if name is not None and not isinstance(name, str):
+            raise ArabiRuntimeError(
+                f"اسم الاختبار يجب أن يكون نصًا لكنه {typename(name)}", line)
+        values = args[:required]
+
+        if mode == 'eq':
+            ok = values[0] == values[1]
+            detail = '' if ok else (
+                f"المتوقع: {display(values[1])}، الفعلي: {display(values[0])}")
+        elif mode == 'ne':
+            ok = values[0] != values[1]
+            detail = '' if ok else (
+                f"القيمتان متساويتان: {display(values[0])}")
+        elif mode == 'truthy':
+            ok = bool(values[0])
+            detail = '' if ok else f"القيمة {display(values[0])} ليست قيمة صحية"
+        else:
+            ok = not bool(values[0])
+            detail = '' if ok else f"القيمة {display(values[0])} ليست خاطئة"
+        state.record(ok, name, detail, line)
+        return None
+    return fn
+
+
+def _tests_raises(state):
+    """يرفع(دالة، اسم؟) — يستدعي الدالة ويؤكد أنها ترفع خطأ."""
+
+    def fn(interp, args, line):
+        if len(args) not in (1, 2):
+            raise ArabiRuntimeError(
+                f"'يرفع' تقبل معاملًا أو معاملين لكنها استلمت {len(args)}", line)
+        name = args[1] if len(args) == 2 else None
+        if name is not None and not isinstance(name, str):
+            raise ArabiRuntimeError(
+                f"اسم الاختبار يجب أن يكون نصًا لكنه {typename(name)}", line)
+        func = args[0]
+        if not isinstance(func, (ArabiFunc, BuiltinFunc, BoundMethod)):
+            raise ArabiRuntimeError(
+                f"'يرفع' تحتاج دالة لكنها استلمت {typename(func)}", line)
+        try:
+            interp._call_value(func, [], {}, line)
+        except ArabiError as exc:
+            state.record(True, name, '', line)
+            return None
+        state.record(False, name, 'لم ترفع الدالة أي خطأ', line)
+        return None
+    return fn
+
+
+def _tests_summary(state):
+    def fn(args, line):
+        if args:
+            raise ArabiRuntimeError("'ملخص' لا تقبل معاملات", line)
+        if not state.started:
+            state.reset()
+        print(f"== الملخص: {state.passed} ناجحة، {state.failed} فاشلة "
+              f"من {state.total} اختبارًا ==")
+        return {
+            'المجموعة': state.suite,
+            'ناجح': state.passed,
+            'فاشل': state.failed,
+            'الكل': state.total,
+        }
+    return fn
+
+
+# ================== وحدة خادم (خوادم الويب) ==================
+
+# ترويسات الاستجابة الشائعة بأسمائها العربية ← الأسماء القياسية
+_HEADER_AR = {
+    'نوع_المحتوى': 'Content-Type',
+    'الموقع': 'Location',
+    'تخزين_مؤقت': 'Cache-Control',
+    'كوكيز': 'Set-Cookie',
+}
+
+
+class _ServerState:
+    """حالة خادم الويب — نسخة مستقلة لكل مفسر."""
+
+    def __init__(self):
+        self.server = None
+        self.thread = None
+        self.port = None
+        self.interp = None
+        self.handler = None
+
+    # ---------- الدوال المعرّضة للغة ----------
+
+    def start(self, interp, args, line):
+        """ابدأ(منفذ، معالج) — يشغل الخادم ويعيد المنفذ الفعلي."""
+        if self.server is not None:
+            raise ArabiRuntimeError(
+                "الخادم يعمل بالفعل — استدعِ 'خادم.قف' أولًا", line)
+        if len(args) != 2:
+            raise ArabiRuntimeError(
+                f"'ابدأ' تحتاج معاملين (المنفذ ودالة المعالجة) "
+                f"لكنها استلمت {len(args)}", line)
+        port = args[0]
+        if isinstance(port, bool) or not isinstance(port, int):
+            raise ArabiRuntimeError(
+                f"المنفذ يجب أن يكون عددًا صحيحًا لكنه {typename(port)}", line)
+        if not 0 <= port <= 65535:
+            raise ArabiRuntimeError(
+                f'المنفذ يجب أن يكون بين ٠ و ٦٥٥٣٥ لكنه {port}', line)
+        handler = args[1]
+        if not isinstance(handler, (ArabiFunc, BuiltinFunc, BoundMethod)):
+            raise ArabiRuntimeError(
+                f"المعالج يجب أن يكون دالة لكنه {typename(handler)}", line)
+
+        self.interp = interp
+        self.handler = handler
+        # صنف معالج فريد لكل خادم حتى لا تتعارض الخوادم المتعددة
+        handler_cls = type(
+            f'_ArabiHandler_{id(self):x}', (_ArabiHTTPRequestHandler,),
+            {'state': self})
+        try:
+            self.server = http.server.ThreadingHTTPServer(
+                ('127.0.0.1', port), handler_cls)
+        except OSError as exc:
+            self.server = None
+            self.interp = None
+            self.handler = None
+            raise ArabiRuntimeError(f"تعذر فتح المنفذ {port}: {exc}", line)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self.port
+
+    def stop(self, args, line):
+        """قف() — يوقف الخادم ويحرر المنفذ."""
+        if args:
+            raise ArabiRuntimeError("'قف' لا تقبل معاملات", line)
+        if self.server is None:
+            raise ArabiRuntimeError('لا يوجد خادم يعمل حاليًا', line)
+        self.server.shutdown()
+        self.server.server_close()
+        self.server = None
+        self.thread = None
+        self.port = None
+        self.interp = None
+        self.handler = None
+        return None
+
+    def get_port(self, args, line):
+        """المنفذ() — يعيد المنفذ الفعلي للخادم العامل أو ولا شيء."""
+        if args:
+            raise ArabiRuntimeError("'المنفذ' لا تقبل معاملات", line)
+        return self.port
+
+    def wait(self, args, line):
+        """انتظر() — يبقى البرنامج معلقًا خدمةً للطلبات حتى مقاطعة (Ctrl+C)."""
+        if args:
+            raise ArabiRuntimeError("'انتظر' لا تقبل معاملات", line)
+        if self.server is None:
+            raise ArabiRuntimeError(
+                "لا يوجد خادم يعمل — استدعِ 'خادم.ابدأ' أولًا", line)
+        try:
+            while self.server is not None:
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            print('\n(أُوقف الخادم)')
+        finally:
+            if self.server is not None:
+                self.server.shutdown()
+                self.server.server_close()
+                self.server = None
+                self.thread = None
+                self.port = None
+                self.interp = None
+                self.handler = None
+        return None
+
+
+class _ArabiHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+    """معالج HTTP يستدعي دالة معالجة مكتوبة بلغة عربي."""
+
+    state = None       # _ServerState — يُضبط في صنف فرعي لكل خادم
+    protocol_version = 'HTTP/1.1'
+
+    def log_message(self, fmt, *log_args):
+        pass                                        # كتم سجلات بايثون
+
+    def _build_request(self):
+        """يبني قاموس الطلب بلغة عربي من طلب HTTP الخام."""
+        parsed = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        params = {k: (v[0] if len(v) == 1 else v) for k, v in query.items()}
+        length = int(self.headers.get('Content-Length') or 0)
+        body = ''
+        if length > 0:
+            body = self.rfile.read(length).decode('utf-8', errors='replace')
+        headers = {}
+        for k, v in self.headers.items():
+            key = k.lower()
+            if key == 'نوع_المحتوى':
+                key = 'نوع_المحتوى'
+            elif key == 'content-type':
+                key = 'نوع_المحتوى'
+            headers[key] = v
+        return {
+            'الطريقة': self.command,
+            'المسار': urllib.parse.unquote(parsed.path),
+            'المعاملات': params,
+            'الترويسات': headers,
+            'النص': body,
+        }
+
+    def _respond(self, status, text, extra_headers):
+        """يرسل الاستجابة (يدعم الاستمرار مع HTTP/1.1 بطول المحتوى)."""
+        self.send_response(status)
+        content_type = 'text/html; charset=utf-8'
+        for k, v in extra_headers.items():
+            real = _HEADER_AR.get(k, k)
+            if real.lower() == 'content-type':
+                content_type = v
+            self.send_header(real, str(v))
+        payload = text.encode('utf-8')
+        if self.command == 'HEAD':
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            return
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _run(self):
+        st = self.state
+        request = self._build_request()
+        try:
+            result = st.interp._call_value(st.handler, [request], {}, 0)
+            if isinstance(result, str):
+                self._respond(200, result, {})
+                return
+            if isinstance(result, dict):
+                status = result.get('الحالة', 200)
+                if isinstance(status, bool) or not isinstance(status, int) \
+                        or not 100 <= status <= 599:
+                    raise ArabiRuntimeError(
+                        f"حالة الاستجابة يجب أن تكون عددًا صحيحًا بين ١٠٠ و ٥٩٩ "
+                        f"لكنها {display(status)}")
+                text = result.get('النص', '')
+                text = text if isinstance(text, str) else display(text)
+                raw_headers = result.get('الترويسات', {}) or {}
+                if not isinstance(raw_headers, dict):
+                    raise ArabiRuntimeError(
+                        f"الترويسات يجب أن تكون قاموسًا لكنها "
+                        f"{typename(raw_headers)}")
+                self._respond(status, text, raw_headers)
+                return
+            # أي قيمة أخرى تعاد كنص صفحة
+            self._respond(200, display(result), {})
+        except ArabiError as exc:
+            self._respond(500, f'<pre>{exc.message}</pre>',
+                          {'نوع_المحتوى': 'text/html; charset=utf-8'})
+        except Exception as exc:                 # حماية خيط الخادم من الانهيار
+            self._respond(500, f'<pre>خطأ داخلي: {exc}</pre>',
+                          {'نوع_المحتوى': 'text/html; charset=utf-8'})
+
+    # كل الطرق الشائعة تمر بنفس المسار
+    def do_GET(self):
+        self._run()
+
+    def do_POST(self):
+        self._run()
+
+    def do_PUT(self):
+        self._run()
+
+    def do_DELETE(self):
+        self._run()
+
+    def do_PATCH(self):
+        self._run()
+
+    def do_HEAD(self):
+        self._run()

@@ -94,7 +94,7 @@ ESCAPES = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '0': '\0', 'a': '\a', 'b
 class Lexer:
     """يستقبل نص البرنامج المصدري وينتج قائمة من الرموز."""
 
-    def __init__(self, source):
+    def __init__(self, source, lenient_indent=False):
         src = source.replace('\r\n', '\n').replace('\r', '\n')
         if not src.endswith('\n'):
             src += '\n'
@@ -105,6 +105,8 @@ class Lexer:
         self.indents = [0]
         self.brackets = []          # لتتبع الأقواس المفتوحة
         self.at_line_start = True
+        # الوضع المتساهل: يقبل إزاحات غير متسقة (لأدوات الفحص والتنسيق)
+        self.lenient_indent = lenient_indent
 
     # ---------- أدوات مساعدة ----------
 
@@ -162,9 +164,9 @@ class Lexer:
             if ch in ONE_CHAR_OPS:
                 t = ONE_CHAR_OPS[ch]
                 if ch in OPEN_BRACKETS:
-                    self.brackets.append(ch)
+                    self.brackets.append((ch, self.line))
                 elif ch in CLOSE_BRACKETS:
-                    if not self.brackets or self.brackets[-1] != CLOSE_BRACKETS[ch]:
+                    if not self.brackets or self.brackets[-1][0] != CLOSE_BRACKETS[ch]:
                         self.error(f"قوس إغلاق '{ch}' غير متوافق مع قوس الفتح")
                     self.brackets.pop()
                 self.add(t, ch)
@@ -179,7 +181,8 @@ class Lexer:
 
         # نهاية الملف
         if self.brackets:
-            self.error(f"قوس '{self.brackets[-1]}' بقي مفتوحًا حتى نهاية الملف")
+            ch, ln = self.brackets[-1]
+            raise LexerError(f"قوس '{ch}' بقي مفتوحًا حتى نهاية الملف", ln)
         if self.tokens and self.tokens[-1].type not in (T.NEWLINE, T.INDENT, T.DEDENT):
             self._emit_newline()
         while len(self.indents) > 1:
@@ -227,7 +230,12 @@ class Lexer:
                 self.indents.pop()
                 self.add(T.DEDENT, width)
             if self.indents[-1] != width:
-                self.error('مسافة بادئة غير متسقة — تحقق من محاذاة الأسطر')
+                if self.lenient_indent:
+                    # الوضع المتساهل: إزاحة بين مستويين — تعامل ككتلة أعمق
+                    self.indents.append(width)
+                    self.add(T.INDENT, width)
+                else:
+                    self.error('مسافة بادئة غير متسقة — تحقق من محاذاة الأسطر')
         self.at_line_start = False
         return False
 
@@ -297,6 +305,7 @@ class Lexer:
         self.pos += 1
 
     def _read_string(self, quote):
+        start_line = self.line
         self.pos += 1
         buf = []
         n = len(self.src)
@@ -313,6 +322,8 @@ class Lexer:
                 if self.src[self.pos:self.pos + 3] == closer:
                     self.pos += 3
                     break
+                if c == '\n':
+                    self.line += 1          # سطر حقيقي داخل النص — يحتسب للأخطاء اللاحقة
                 if c == '\\':
                     self.pos += 1
                     if self.pos >= n:
@@ -321,7 +332,8 @@ class Lexer:
                     continue
                 buf.append(c)
                 self.pos += 1
-            self.add(T.STRING, ''.join(buf))
+            # رمز النص الممتد يحمل سطر بدايته (أسلم لرسائل الأخطاء والتنسيق)
+            self.tokens.append(Token(T.STRING, ''.join(buf), start_line))
             return
 
         while True:
@@ -346,9 +358,44 @@ class Lexer:
     def _read_fstring(self, quote):
         """يقرأ نصًا منسقًا: ق"..." — البادئة ق اختصار لـ«قالب».
 
+        يدعم أيضًا النصوص المنسقة متعددة الأسطر: ق + ثلاث علامات اقتباس
         يبقى محتوى {تعبير} خامًا لمحلله لاحقًا، مع إدراك الأقواس
         ليسمح بعلامات اقتباس داخل التعبير: ق"طول الاسم {طول("أحمد")}"
         """
+        start_line = self.line
+
+        # ---- نص منسق متعدد الأسطر: ق"""...""" ----
+        if self.src[self.pos + 1:self.pos + 3] == quote * 2:
+            self.pos += 3
+            closer = quote * 3
+            buf = []
+            n = len(self.src)
+            depth = 0
+            while True:
+                if self.pos >= n:
+                    self.error('نص منسق متعدد الأسطر غير مغلق — أنسيت ثلاث علامات اقتباس')
+                c = self.src[self.pos]
+                if depth == 0 and self.src[self.pos:self.pos + 3] == closer:
+                    self.pos += 3
+                    break
+                if c == '\n':
+                    self.line += 1
+                if c == '\\':
+                    self.pos += 1
+                    if self.pos >= n:
+                        self.error('نص منسق غير مغلق')
+                    self._read_escape(buf)
+                    continue
+                if c in '([{':
+                    depth += 1
+                elif c in ')]}':
+                    depth = max(0, depth - 1)
+                buf.append(c)
+                self.pos += 1
+            self.tokens.append(Token(T.FSTRING, ''.join(buf), start_line))
+            return
+
+        # ---- نص منسق سطري: ق"..." ----
         self.pos += 1                     # تخطَّ علامة الاقتباس الافتتاحية
         buf = []
         n = len(self.src)
@@ -362,6 +409,8 @@ class Lexer:
                 break
             if c == '\n' and depth == 0:
                 self.error('نص منسق غير مغلق — النصوص لا تمتد على عدة أسطر')
+            if c == '\n':
+                self.line += 1              # سطر داخل تعبير متعدد الأسطر
             if c == '\\':
                 self.pos += 1
                 if self.pos >= n:
@@ -374,7 +423,7 @@ class Lexer:
                 depth = max(0, depth - 1)
             buf.append(c)
             self.pos += 1
-        self.add(T.FSTRING, ''.join(buf))
+        self.tokens.append(Token(T.FSTRING, ''.join(buf), start_line))
 
     # ---------- الكلمات والمعرفات ----------
 

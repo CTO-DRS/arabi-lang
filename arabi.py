@@ -7,6 +7,11 @@
     python arabi.py                 فتح المفسر التفاعلي (REPL)
     python arabi.py -c "كود"        تنفيذ كود مباشر
     python arabi.py --تحقق ملف      فحص الصياغة دون تنفيذ
+    python arabi.py --نسق ملفات     تنسيق الملفات وإصلاح الإزاحة
+    python arabi.py --افحص ملفات    فحص الملفات بحثًا عن المشكلات
+    python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
+    python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
+    python arabi.py --حزم           عرض المكتبات المثبتة
     python arabi.py --نسخة          عرض الإصدار
 """
 
@@ -22,6 +27,7 @@ from arabi_lang.lexer import Lexer
 from arabi_lang.parser import Parser
 from arabi_lang.interpreter import Interpreter
 from arabi_lang.errors import ArabiError
+from arabi_lang import tools
 
 BANNER = rf"""
   ____              _____
@@ -74,6 +80,111 @@ def check_file(path):
         print_error(error, source.splitlines())
         sys.exit(1)
     print(f'✓ الصياغة سليمة — {len(tree.statements)} جملة على المستوى الأعلى')
+
+
+def _read_source(path):
+    """يقرأ مصدر ملف مع رسائل خطأ عربية موحدة."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
+    except UnicodeDecodeError:
+        print('خطأ: الملف يجب أن يكون بترميز UTF-8', file=sys.stderr)
+    except IsADirectoryError:
+        print(f"خطأ: '{path}' مجلد وليس ملفًا", file=sys.stderr)
+    sys.exit(1)
+
+
+# ================== أدوات النظام البيئي (الإصدار 1.6) ==================
+
+def format_files(paths):
+    """ينسق الملفات الممررة في مكانها ويطبع ملخصًا لكل ملف."""
+    failed = False
+    for path in paths:
+        source = _read_source(path)
+        try:
+            formatted, changed = tools.format_source(source)
+        except ArabiError as error:
+            print_error(error, source.splitlines())
+            failed = True
+            continue
+        if changed:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(formatted)
+        print(f'✓ {path} — نُسّق ({changed} سطرًا معدلًا)'
+              if changed else f'✓ {path} — منسق أصلًا (لا تغييرات)')
+    if failed:
+        sys.exit(1)
+
+
+def lint_files(paths):
+    """يفحص الملفات ويطبع النتائج — يخرج بكود ١ عند وجود أخطاء مؤكدة."""
+    failed = False
+    for path in paths:
+        source = _read_source(path)
+        try:
+            issues = tools.lint_source(source)
+        except ArabiError as error:
+            print_error(error, source.splitlines())
+            failed = True
+            continue
+        if not issues:
+            print(f'✓ {path}: لا مشكلات')
+            continue
+        print(f'{path}:')
+        for line, kind, msg in issues:
+            mark = '✗' if kind == 'خطأ' else '⚠'
+            print(f'  {mark} سطر {line}: {msg}')
+            if kind == 'خطأ':
+                failed = True
+        errors = sum(1 for _, k, _ in issues if k == 'خطأ')
+        warnings = len(issues) - errors
+        print(f'  ── {errors} خطأ، {warnings} تحذير')
+    if failed:
+        sys.exit(1)
+
+
+def document_file(path, output=None):
+    """يولد توثيق Markdown للملف — يطبع أو يكتب في ملف ناتج."""
+    source = _read_source(path)
+    try:
+        docs = tools.generate_docs(path, source)
+    except ArabiError as error:
+        print_error(error, source.splitlines())
+        sys.exit(1)
+    if output:
+        with open(output, 'w', encoding='utf-8') as f:
+            f.write(docs)
+        print(f'✓ وُلّد التوثيق في {output}')
+    else:
+        print(docs, end='')
+
+
+def install_package(source):
+    """يثبت مكتبة .عربي من مسار محلي أو رابط في مجلد مكتبات/."""
+    try:
+        name, dest = tools.install_package(source)
+    except ArabiError as error:
+        print(f'✗ {error}', file=sys.stderr)
+        sys.exit(1)
+    except OSError as exc:
+        print(f"✗ فشل تحميل المكتبة: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f'✓ ثُبتت المكتبة \'{name}\' في {dest}')
+    print(f"  لاستخدامها: استورد {name}")
+
+
+def list_packages():
+    """يعرض المكتبات المثبتة في مجلد مكتبات/ الحالي."""
+    packages = tools.list_packages()
+    if not packages:
+        print('لا توجد مكتبات مثبتة في مجلد مكتبات/')
+        print('  للتثبيت: python arabi.py --ثبت مسار_أو_رابط')
+        return
+    print(f'المكتبات المثبتة ({len(packages)}):')
+    for pkg in packages:
+        print(f'  - {pkg[:-len(".عربي")]}')
 
 
 def run_file(path):
@@ -143,45 +254,87 @@ def _needs_more_input(code):
 
 
 def repl():
-    """المفسر التفاعلي — ينفذ الأسطر فورًا ويحفظ المتغيرات بينها."""
+    """المفسر التفاعلي — ينفذ الأسطر فورًا ويحفظ المتغيرات بينها.
+
+    يدعم سجل الأوامر والإكمال التلقائي (عند توفر readline).
+    """
     print(BANNER)
     interpreter = Interpreter()
+    history_file = _setup_readline(interpreter)
     buffer = []
-    while True:
-        try:
-            prompt = '>>> ' if not buffer else '... '
-            line = input(prompt)
-        except EOFError:
-            print()
-            break
-        except KeyboardInterrupt:
-            print('\n(أُلغيت الجملة الحالية)')
+    try:
+        while True:
+            try:
+                prompt = '>>> ' if not buffer else '... '
+                line = input(prompt)
+            except EOFError:
+                print()
+                break
+            except KeyboardInterrupt:
+                print('\n(أُلغيت الجملة الحالية)')
+                buffer = []
+                continue
+
+            if not buffer and line.strip() in ('خروج', 'exit', 'quit', 'سلام'):
+                print('إلى اللقاء!')
+                break
+
+            buffer.append(line)
+            code = '\n'.join(buffer)
+
+            if _needs_more_input(code):
+                continue
             buffer = []
-            continue
 
-        if not buffer and line.strip() in ('خروج', 'exit', 'quit', 'سلام'):
-            print('إلى اللقاء!')
-            break
+            if not code.strip():
+                continue
 
-        buffer.append(line)
-        code = '\n'.join(buffer)
+            try:
+                tokens = Lexer(code).tokenize()
+                tree = Parser(tokens).parse()
+                result = interpreter.run(tree)
+                if result is not None:
+                    from arabi_lang.runtime import display
+                    print(display(result))
+            except ArabiError as error:
+                print(str(error))
+    finally:
+        if history_file:
+            try:
+                import readline
+                readline.write_history_file(history_file)
+            except (ImportError, OSError):
+                pass
 
-        if _needs_more_input(code):
-            continue
-        buffer = []
 
-        if not code.strip():
-            continue
+def _setup_readline(interpreter):
+    """يفعّل سجل الأوامر والإكمال التلقائي — يعيد مسار ملف السجل."""
+    try:
+        import readline
+    except ImportError:
+        return None
 
-        try:
-            tokens = Lexer(code).tokenize()
-            tree = Parser(tokens).parse()
-            result = interpreter.run(tree)
-            if result is not None:
-                from arabi_lang.runtime import display
-                print(display(result))
-        except ArabiError as error:
-            print(str(error))
+    history_file = os.path.expanduser('~/.arabi_history')
+    try:
+        readline.read_history_file(history_file)
+    except (OSError, IOError):
+        pass
+
+    from arabi_lang.lexer import KEYWORDS
+
+    def complete(text, state):
+        names = sorted(set(KEYWORDS)
+                       | set(interpreter.globals.vars.keys()))
+        matches = [n for n in names if n.startswith(text)]
+        return matches[state] if state < len(matches) else None
+
+    readline.set_completer(complete)
+    readline.set_completer_delims(' \t\n,()[]{}:;=+-*/%<>!')
+    if 'libedit' in (readline.__doc__ or ''):
+        readline.parse_and_bind('bind ^I rl_complete')
+    else:
+        readline.parse_and_bind('tab: complete')
+    return history_file
 
 
 def show_help():
@@ -192,10 +345,15 @@ def show_help():
     python arabi.py                 فتح المفسر التفاعلي (REPL)
     python arabi.py -c "كود"        تنفيذ كود مباشر
     python arabi.py --تحقق ملف      فحص الصياغة دون تنفيذ
+    python arabi.py --نسق ملفات     تنسيق الملفات وإصلاح الإزاحة
+    python arabi.py --افحص ملفات    فحص الملفات بحثًا عن المشكلات
+    python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
+    python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
+    python arabi.py --حزم           عرض المكتبات المثبتة
     python arabi.py --نسخة | -v     عرض الإصدار
     python arabi.py --مساعدة | -h   عرض هذه المساعدة
 
-الوحدات المدمجة: رياضيات، وقت، ملفات، جيسون، عشوائية، نظام، تنظيم، شبكة، تحويل
+الوحدات المدمجة: رياضيات، وقت، ملفات، جيسون، عشوائية، نظام، تنظيم، شبكة، تحويل، اختبارات، خادم
 الأمثلة موجودة في مجلد examples/""")
     sys.exit(0)
 
@@ -215,6 +373,31 @@ def main():
             print("خطأ: الخيار '--تحقق' يحتاج مسار ملف بعده", file=sys.stderr)
             sys.exit(1)
         check_file(args[1])
+    elif first in ('--نسق', '--format'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--نسق' يحتاج مسار ملف واحد على الأقل بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        format_files(args[1:])
+    elif first in ('--افحص', '--lint'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--افحص' يحتاج مسار ملف واحد على الأقل بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        lint_files(args[1:])
+    elif first in ('--وثق', '--docs'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--وثق' يحتاج مسار ملف بعده", file=sys.stderr)
+            sys.exit(1)
+        document_file(args[1], args[2] if len(args) > 2 else None)
+    elif first in ('--ثبت', '--install'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--ثبت' يحتاج مسار ملف أو رابطًا بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        install_package(args[1])
+    elif first in ('--حزم', '--packages'):
+        list_packages()
     elif first in ('-c', '--كود', '--تنفيذ'):
         if len(args) < 2:
             print("خطأ: الخيار '-c' يحتاج كودًا بعده", file=sys.stderr)

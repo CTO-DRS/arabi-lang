@@ -34,7 +34,7 @@ CATCHABLE = (
 
 # الوحدات الجاهزة المدمجة في اللغة
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
-                   'نظام', 'تنظيم', 'شبكة', 'تحويل')
+                   'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -457,11 +457,12 @@ class Interpreter:
         return unique
 
     def _module_candidates(self, name):
-        """مواضع ملف الوحدة اسم.عربي في كل مجلدات البحث ومجلد وحدات الفرعي."""
+        """مواضع ملف الوحدة اسم.عربي في كل مجلدات البحث ومجلدا وحدات ومكتبات الفرعيان."""
         candidates = []
         for d in self._search_dirs():
             candidates.append(os.path.join(d, name + '.عربي'))
             candidates.append(os.path.join(d, 'وحدات', name + '.عربي'))
+            candidates.append(os.path.join(d, 'مكتبات', name + '.عربي'))
         return candidates
 
     def _path_candidates(self, path):
