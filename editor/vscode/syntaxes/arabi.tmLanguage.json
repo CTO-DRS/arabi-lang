@@ -85,6 +85,10 @@
           "match": "(?<![\\u0600-\\u06FF\\w])(طالما|لكل|كسر|استمر)(?![\\u0600-\\u06FF\\w])"
         },
         {
+          "name": "keyword.control.switch.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(بدّل|حالة|افتراض)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
           "name": "keyword.control.conditional.arabi",
           "match": "(?<![\\u0600-\\u06FF\\w])(لو|وإلا|وإلا إذا|أعد)(?![\\u0600-\\u06FF\\w])"
         },

@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """طبقة التشغيل: البيئات، القيم، الدوال الجاهزة، الوحدات، وطرق الأنواع."""
 
+import json
 import math
+import os
 import time
 import random
 
@@ -88,13 +90,17 @@ class BuiltinFunc:
     """دالة جاهزة مكتوبة بلغة بايثون.
 
     fn يستقبل (args: list, line: int) ويعيد قيمة.
+    الدوال ذات الترتيب الأعلى (خريطة/مرشّح/اختزل) تستقبل
+    المفسّر كأول معامل لتستطيع استدعاء دوال المستخدم:
+    fn(interp, args, line).
     """
 
-    __slots__ = ('name', 'fn')
+    __slots__ = ('name', 'fn', 'takes_interp')
 
-    def __init__(self, name, fn):
+    def __init__(self, name, fn, takes_interp=False):
         self.name = name
         self.fn = fn
+        self.takes_interp = takes_interp
 
 
 class ModuleValue:
@@ -616,11 +622,18 @@ def install_builtins(env):
         ('مطلق', _bi_abs),
         ('تقريب', _bi_round),
         ('عشوائي', _bi_random),
+        ('اختر', _bi_choose),
         ('نوع', _bi_type),
         ('رتّب', _bi_sorted),
+        ('خريطة', BuiltinFunc('خريطة', _hi_map, takes_interp=True)),
+        ('مرشّح', BuiltinFunc('مرشّح', _hi_filter, takes_interp=True)),
+        ('اختزل', BuiltinFunc('اختزل', _hi_reduce, takes_interp=True)),
     ]
     for name, fn in builtins_list:
-        env.define(name, BuiltinFunc(name, fn))
+        if isinstance(fn, BuiltinFunc):          # دوال جاهزة مغلفة مسبقًا
+            env.define(name, fn)
+        else:
+            env.define(name, BuiltinFunc(name, fn))
 
     env.define('رياضيات', ModuleValue('رياضيات', {
         'جذر': BuiltinFunc('جذر', _math_sqrt),
@@ -637,6 +650,20 @@ def install_builtins(env):
     env.define('وقت', ModuleValue('وقت', {
         'زمن': BuiltinFunc('زمن', _time_now),
         'نوم': BuiltinFunc('نوم', _time_sleep),
+    }))
+
+    env.define('ملفات', ModuleValue('ملفات', {
+        'اقرأ': BuiltinFunc('اقرأ', _file_read),
+        'اكتب': BuiltinFunc('اكتب', _file_write),
+        'أضف': BuiltinFunc('أضف', _file_append),
+        'أسطر': BuiltinFunc('أسطر', _file_lines),
+        'موجود': BuiltinFunc('موجود', _file_exists),
+        'احذف': BuiltinFunc('احذف', _file_delete),
+    }))
+
+    env.define('جيسون', ModuleValue('جيسون', {
+        'حلل': BuiltinFunc('حلل', _json_parse),
+        'نص': BuiltinFunc('نص', _json_text),
     }))
 
 
@@ -696,3 +723,217 @@ def _time_sleep(args, line):
         raise ArabiRuntimeError('عدد الثواني يجب أن يكون موجبًا', line)
     time.sleep(seconds)
     return None
+
+
+# ================== الدوال ذات الترتيب الأعلى ==================
+
+_CALLABLES = (ArabiFunc, BuiltinFunc, BoundMethod)
+
+
+def _callable(value, name, line):
+    if not isinstance(value, _CALLABLES):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج دالة كمعامل أول لكن استلمت {typename(value)}", line)
+    return value
+
+
+def _iterable(value, name, line):
+    if isinstance(value, (list, range)):
+        return list(value)
+    if isinstance(value, str):
+        return list(value)
+    raise ArabiRuntimeError(
+        f"'{name}' تحتاج قائمة أو نصًا أو مدى لكن استلمت {typename(value)}", line)
+
+
+def _hi_map(interp, args, line):
+    """خريطة(دالة، تسلسل) — تطبق الدالة على كل عنصر وتعيد قائمة النتائج."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'خريطة' تحتاج معاملين (دالة وتسلسل) لكنها استلمت {len(args)}", line)
+    func = _callable(args[0], 'خريطة', line)
+    items = _iterable(args[1], 'خريطة', line)
+    return [interp._call_value(func, [x], {}, line) for x in items]
+
+
+def _hi_filter(interp, args, line):
+    """مرشّح(دالة، تسلسل) — يعيد العناصر التي أعادت الدالة لها صح."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'مرشّح' تحتاج معاملين (دالة وتسلسل) لكنها استلمت {len(args)}", line)
+    func = _callable(args[0], 'مرشّح', line)
+    items = _iterable(args[1], 'مرشّح', line)
+    return [x for x in items if interp._call_value(func, [x], {}, line)]
+
+
+def _hi_reduce(interp, args, line):
+    """اختزل(دالة، تسلسل، بداية؟) — يطوي التسلسل لقيمة واحدة.
+
+    بدون قيمة بداية يستخدم أول عنصر كنقطة انطلاق.
+    """
+    if not 2 <= len(args) <= 3:
+        raise ArabiRuntimeError(
+            f"'اختزل' تحتاج معاملين أو ثلاثة (دالة وتسلسل وقيمة بداية اختيارية) "
+            f'لكنها استلمت {len(args)}', line)
+    func = _callable(args[0], 'اختزل', line)
+    items = list(_iterable(args[1], 'اختزل', line))
+    if len(args) == 3:
+        acc = args[2]
+    else:
+        if not items:
+            raise ArabiRuntimeError(
+                "'اختزل' لا تقبل تسلسلًا فارغًا بدون قيمة بداية", line)
+        acc = items.pop(0)
+    for x in items:
+        acc = interp._call_value(func, [acc, x], {}, line)
+    return acc
+
+
+def _bi_choose(args, line):
+    """اختر(قائمة) — يعيد عنصرًا عشوائيًا."""
+    if len(args) != 1:
+        raise ArabiRuntimeError("'اختر' تتوقع معاملًا واحدًا", line)
+    if not isinstance(args[0], (list, range, str)):
+        raise ArabiRuntimeError(
+            f"'اختر' تحتاج قائمة أو نصًا أو مدى لكن استلمت {typename(args[0])}", line)
+    items = list(args[0])
+    if not items:
+        raise ArabiRuntimeError("'اختر' لا تقبل تسلسلًا فارغًا", line)
+    return random.choice(items)
+
+
+# ================== وحدة ملفات ==================
+
+def _path_str(value, name, line):
+    if not isinstance(value, str):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج مسار نصي لكن استلمت {typename(value)}", line)
+    return value
+
+
+def _file_read(args, line):
+    """اقرأ(مسار) — يعيد محتوى الملف كنص."""
+    if len(args) != 1:
+        raise ArabiRuntimeError("'اقرأ' تتوقع معاملًا واحدًا (المسار)", line)
+    path = _path_str(args[0], 'اقرأ', line)
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        raise ArabiRuntimeError(f"الملف '{path}' غير موجود", line)
+    except UnicodeDecodeError:
+        raise ArabiRuntimeError(
+            f"الملف '{path}' يجب أن يكون بترميز UTF-8", line)
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن قراءة الملف '{path}': {exc}", line)
+
+
+def _file_write(args, line):
+    """اكتب(مسار، نص) — يكتب النص فوق محتوى الملف (أو ينشئه)."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'اكتب' تحتاج معاملين (المسار والنص) لكنها استلمت {len(args)}", line)
+    path = _path_str(args[0], 'اكتب', line)
+    text = args[1]
+    if not isinstance(text, str):
+        raise ArabiRuntimeError(
+            f"محتوى الملف يجب أن يكون نصًا لكن استلمت {typename(text)}", line)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return None
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن كتابة الملف '{path}': {exc}", line)
+
+
+def _file_append(args, line):
+    """أضف(مسار، نص) — يضيف النص إلى نهاية الملف."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'أضف' تحتاج معاملين (المسار والنص) لكنها استلمت {len(args)}", line)
+    path = _path_str(args[0], 'أضف', line)
+    text = args[1]
+    if not isinstance(text, str):
+        raise ArabiRuntimeError(
+            f"محتوى الإضافة يجب أن يكون نصًا لكن استلمت {typename(text)}", line)
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(text)
+        return None
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن الإضافة إلى الملف '{path}': {exc}", line)
+
+
+def _file_lines(args, line):
+    """أسطر(مسار) — يعيد أسطر الملف قائمة (دون رموز السطر الجديد)."""
+    if len(args) != 1:
+        raise ArabiRuntimeError("'أسطر' تتوقع معاملًا واحدًا (المسار)", line)
+    path = _path_str(args[0], 'أسطر', line)
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        raise ArabiRuntimeError(f"الملف '{path}' غير موجود", line)
+    except UnicodeDecodeError:
+        raise ArabiRuntimeError(
+            f"الملف '{path}' يجب أن يكون بترميز UTF-8", line)
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن قراءة الملف '{path}': {exc}", line)
+
+
+def _file_exists(args, line):
+    """موجود(مسار) — صح إن كان المسار موجودًا."""
+    if len(args) != 1:
+        raise ArabiRuntimeError("'موجود' تتوقع معاملًا واحدًا (المسار)", line)
+    path = _path_str(args[0], 'موجود', line)
+    return os.path.exists(path)
+
+
+def _file_delete(args, line):
+    """احذف(مسار) — يحذف الملف ويعيد صح، أو خطأ إن لم يوجد."""
+    if len(args) != 1:
+        raise ArabiRuntimeError("'احذف' تتوقع معاملًا واحدًا (المسار)", line)
+    path = _path_str(args[0], 'احذف', line)
+    if not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن حذف الملف '{path}': {exc}", line)
+
+
+# ================== وحدة جيسون ==================
+
+def _json_parse(args, line):
+    """حلل(نص) — يحلل نص JSON ويعيد القيمة المقابلة.
+
+    يقبل JSON القياسي أولًا، وإن فشل يعيد المحاولة بعد تحويل
+    الأرقام العربية الشرقية (٠-٩) إلى غربية — رحمةً بالمستخدم العربي.
+    """
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ArabiRuntimeError(
+            f"'حلل' تحتاج نصًا واحدًا لكنها استلمت "
+            f"{typename(args[0]) if args else 'لا معاملات'}", line)
+    try:
+        return json.loads(args[0])
+    except json.JSONDecodeError:
+        pass
+    # محاولة ثانية: تحويل الأرقام الشرقية والفاصلة العربية
+    try:
+        return json.loads(ar2en(args[0]).replace('،', ','))
+    except json.JSONDecodeError as exc:
+        raise ArabiRuntimeError(
+            f"نص JSON غير صالح عند الموضع {exc.pos}: {exc.msg}", line)
+
+
+def _json_text(args, line):
+    """نص(قيمة) — يحول قيمة إلى نص JSON (يحافظ على العربية)."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'نص' تتوقع معاملًا واحدًا لكنها استلمت {len(args)}", line)
+    try:
+        return json.dumps(args[0], ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ArabiRuntimeError(
+            f"لا يمكن تحويل {typename(args[0])} إلى JSON: {exc}", line)

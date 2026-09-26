@@ -32,7 +32,7 @@ CATCHABLE = (
 )
 
 # الوحدات الجاهزة المدمجة في اللغة
-BUILTIN_MODULES = ('رياضيات', 'وقت')
+BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون')
 
 
 class BreakSignal(Exception):
@@ -141,6 +141,20 @@ class Interpreter:
                 break
             except ContinueSignal:
                 continue
+
+    def exec_Switch(self, node, env):
+        """بدّل: ينفذ كتلة الحالة المطابقة فقط (بدون تساقط)، أو 'افتراض'.
+
+        تُقارن قيمة التعبير بالحالات بالترتيب حتى أول تطابق.
+        'كسر' داخل 'بدّل' يخرج من الحلقة المحيطة إن وُجدت (سلوك بايثوني).
+        """
+        subject = self.evaluate(node.subject, env)
+        for value_expr, body in node.cases:
+            if self._values_equal(subject, self.evaluate(value_expr, env)):
+                self.exec_statements(body, env)
+                return
+        if node.default_body is not None:
+            self.exec_statements(node.default_body, env)
 
     def exec_For(self, node, env):
         iterable = self.evaluate(node.iterable, env)
@@ -700,6 +714,8 @@ class Interpreter:
                 raise ArabiRuntimeError(
                     f"الدالة الجاهزة '{func.name}' لا تقبل معاملات بالاسم "
                     f'(استلمت: {names})', line)
+            if func.takes_interp:
+                return func.fn(self, args, line)
             return func.fn(args, line)
         # إنشاء كائن: نقطة(٣، ٤)
         if isinstance(func, ClassValue):

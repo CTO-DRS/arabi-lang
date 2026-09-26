@@ -8,7 +8,7 @@
 from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
-    Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda,
+    Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda, Switch,
     Num, Str, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
     Call, Index, Slice, MethodCall, Attribute, This, Super,
 )
@@ -40,6 +40,7 @@ STMT_KEYWORDS = {
     T.TRY: 'جرب', T.EXCEPT: 'باستثناء', T.FINALLY: 'اخيرا',
     T.RAISE: 'ارفع', T.IMPORT: 'استورد', T.PASS: 'تجاهل',
     T.CLASS: 'صنف', T.THIS: 'هذا', T.SUPER: 'الأصل',
+    T.SWITCH: 'بدّل', T.CASE: 'حالة', T.DEFAULT: 'افتراض',
 }
 
 
@@ -123,9 +124,9 @@ class Parser:
         t = self.cur().type
         if t in (T.NEWLINE, T.EOF, T.DEDENT):
             return stmt
-        # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب) تستهلك DEDENT
+        # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب/صنف/بدّل) تستهلك DEDENT
         # داخل block()، لذا الجملة التالية تبدأ مباشرة
-        if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef)):
+        if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef, Switch)):
             return stmt
         self.error('متوقع نهاية السطر بعد الجملة')
 
@@ -158,6 +159,8 @@ class Parser:
             return self.import_stmt()
         if t is T.CLASS:
             return self.class_def()
+        if t is T.SWITCH:
+            return self.switch_stmt()
         # «من وحدة استورد ...» — 'من' كلمة سياقية في بداية الجملة
         if (t is T.IDENT and self.cur().value == 'من'
                 and self.peek(1).type in (T.IDENT, T.STRING)):
@@ -312,6 +315,33 @@ class Parser:
             superclass = self.expect_ident("متوقع اسم الصنف الأصل بعد 'من'")
         body = self.block()
         return ClassDef(name, superclass, body, tok.line)
+
+    def switch_stmt(self):
+        """بدّل التعبير — كتل حالة على أسطر تالية بنفس مستوى 'بدّل':
+
+        بدّل يوم
+        حالة "السبت":
+            ...
+        افتراض:
+            ...
+        """
+        tok = self.advance()                       # بدّل
+        subject = self.expression()
+        self.expect(T.NEWLINE,
+                    "متوقع سطرًا جديدًا بعد تعبير 'بدّل'")
+        cases = []
+        default_body = None
+        while self.check(T.CASE):
+            self.advance()
+            value = self.expression()
+            body = self.block()
+            cases.append((value, body))
+        if self.check(T.DEFAULT):
+            self.advance()
+            default_body = self.block()
+        if not cases and default_body is None:
+            self.error("'بدّل' يحتاج 'حالة' واحدة على الأقل أو 'افتراض'")
+        return Switch(subject, cases, default_body, tok.line)
 
     def expr_stmt(self):
         tok = self.cur()

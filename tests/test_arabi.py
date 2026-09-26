@@ -848,5 +848,311 @@ class TestFileModules(unittest.TestCase):
         self.assertEqual(out, '3.0\n')
 
 
+class TestSwitch(unittest.TestCase):
+    """اختبارات جملة بدّل/حالة/افتراض."""
+
+    def test_string_match(self):
+        out = run_arabi('''
+يوم = "السبت"
+بدّل يوم
+حالة "الجمعة":
+    اطبع("صلاة")
+حالة "السبت":
+    اطبع("عطلة")
+حالة "الأحد":
+    اطبع("أسبوع")
+''')
+        self.assertEqual(out, 'عطلة\n')
+
+    def test_number_match(self):
+        out = run_arabi('''
+بدّل ٢ + ١
+حالة ١:
+    اطبع("واحد")
+حالة ٣:
+    اطبع("ثلاثة")
+''')
+        self.assertEqual(out, 'ثلاثة\n')
+
+    def test_default_runs_when_no_match(self):
+        out = run_arabi('''
+بدّل "خميس"
+حالة "السبت":
+    اطبع("عطلة")
+افتراض:
+    اطبع("يوم عادي")
+''')
+        self.assertEqual(out, 'يوم عادي\n')
+
+    def test_default_skipped_when_match(self):
+        out = run_arabi('''
+بدّل "السبت"
+حالة "السبت":
+    اطبع("عطلة")
+افتراض:
+    اطبع("يوم عادي")
+''')
+        self.assertEqual(out, 'عطلة\n')
+
+    def test_no_match_no_default_is_silent(self):
+        out = run_arabi('''
+بدّل ٩٩
+حالة ١:
+    اطبع("واحد")
+اطبع("استمر البرنامج")
+''')
+        self.assertEqual(out, 'استمر البرنامج\n')
+
+    def test_break_inside_switch_breaks_loop(self):
+        out = run_arabi('''
+لكل س في مدى(١، ٦):
+    بدّل س
+    حالة ٣:
+        كسر
+    افتراض:
+        اطبع(س)
+اطبع("انتهى")
+''')
+        self.assertEqual(out, '1\n2\nانتهى\n')
+
+    def test_cases_use_equality_not_truthiness(self):
+        out = run_arabi('''
+بدّل ٠
+حالة صح:
+    اطبع("خطأ: صح تطابق صفر")
+حالة ٠:
+    اطبع("صفر صحيح")
+''')
+        self.assertEqual(out, 'صفر صحيح\n')
+
+    def test_switch_needs_newline_after_subject(self):
+        expect_error('بدّل ١ حالة ٢:\n    اطبع(١)\n',
+                     ParseError, 'سطرًا جديدًا')
+
+    def test_switch_needs_at_least_one_case(self):
+        expect_error('بدّل ١\nاطبع(٢)\n', ParseError, 'حالة')
+
+    def test_switch_in_function(self):
+        out = run_arabi('''
+دالة اسم_اليوم(رقم):
+    بدّل رقم
+    حالة ١:
+        أعد "الاثنين"
+    حالة ٢:
+        أعد "الثلاثاء"
+    افتراض:
+        أعد "غير معروف"
+اطبع(اسم_اليوم(٢))
+اطبع(اسم_اليوم(٩))
+''')
+        self.assertEqual(out, 'الثلاثاء\nغير معروف\n')
+
+
+class TestHigherOrder(unittest.TestCase):
+    """اختبارات خريطة/مرشّح/اختزل."""
+
+    def test_map_with_lambda(self):
+        out = run_arabi('اطبع(خريطة(دالة(س) => س * س، [١، ٢، ٣، ٤]))')
+        self.assertEqual(out, '[1، 4، 9، 16]\n')
+
+    def test_map_with_named_function(self):
+        out = run_arabi('''
+دالة تحية(اسم):
+    أعد "مرحبا " + اسم
+اطبع(خريطة(تحية، ["سالم"، "ريم"]))''')
+        self.assertEqual(out, '[مرحبا سالم، مرحبا ريم]\n')
+
+    def test_map_on_range(self):
+        out = run_arabi('اطبع(خريطة(دالة(س) => س + ١، مدى(٠، ٣)))')
+        self.assertEqual(out, '[1، 2، 3]\n')
+
+    def test_filter_keeps_truthy(self):
+        out = run_arabi(
+            'اطبع(مرشّح(دالة(س) => س % ٢ == ٠، مدى(١، ١١)))')
+        self.assertEqual(out, '[2، 4، 6، 8، 10]\n')
+
+    def test_filter_strings(self):
+        out = run_arabi('''
+كلمات = ["تفاح"، "برتقال"، "زيتون"]
+أطول = مرشّح(دالة(ك) => طول(ك) >= ٥، كلمات)
+اطبع(أطول)''')
+        self.assertEqual(out, '[برتقال، زيتون]\n')
+
+    def test_reduce_without_initial(self):
+        out = run_arabi('اطبع(اختزل(دالة(أ، ب) => أ + ب، [١٠، ٢٠، ٣٠]))')
+        self.assertEqual(out, '60\n')
+
+    def test_reduce_with_initial(self):
+        out = run_arabi('اطبع(اختزل(دالة(أ، ب) => أ + ب، [١، ٢، ٣]، ١٠٠))')
+        self.assertEqual(out, '106\n')
+
+    def test_reduce_max_with_function(self):
+        out = run_arabi('''
+دالة الأكبر(أ، ب):
+    لو ب > أ:
+        أعد ب
+    وإلا:
+        أعد أ
+اطبع(اختزل(الأكبر، [٣، ٩، ٢]))''')
+        self.assertEqual(out, '9\n')
+
+    def test_map_requires_function(self):
+        expect_error('خريطة(٥، [١، ٢])', ArabiRuntimeError, 'تحتاج دالة')
+
+    def test_map_requires_list(self):
+        expect_error('خريطة(دالة(س) => س، ٥)', ArabiRuntimeError,
+                     'قائمة أو نصًا أو مدى')
+
+    def test_reduce_empty_without_initial(self):
+        expect_error('اختزل(دالة(أ، ب) => أ، [])', ArabiRuntimeError,
+                     'قيمة بداية')
+
+    def test_map_on_string(self):
+        out = run_arabi('اطبع(خريطة(دالة(ح) => ح + "!"، "أب"))')
+        self.assertEqual(out, '[أ!، ب!]\n')
+
+
+class TestChoose(unittest.TestCase):
+    """اختبارات دالة اختر العشوائية."""
+
+    def test_choose_returns_element(self):
+        out = run_arabi('''
+فواكه = ["تفاح"، "موز"، "عنب"]
+اختيار = اختر(فواكه)
+اطبع(اختيار في فواكه)''')
+        self.assertEqual(out, 'صح\n')
+
+    def test_choose_on_range(self):
+        out = run_arabi('اطبع(اختر(مدى(٥، ٦)) == ٥)')
+        self.assertEqual(out, 'صح\n')
+
+    def test_choose_empty_errors(self):
+        expect_error('اختر([])', ArabiRuntimeError, 'فارغ')
+
+    def test_choose_number_errors(self):
+        expect_error('اختر(٥)', ArabiRuntimeError, 'قائمة')
+
+
+class TestFilesModule(unittest.TestCase):
+    """اختبارات وحدة ملفات."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='arabi_files_')
+        self.path = os.path.join(self.dir, 'دفتر.txt')
+
+    def test_write_read_roundtrip(self):
+        out = run_arabi(
+            'ملفات.اكتب("%s"، "مرحبا بالملفات")\n'
+            'اطبع(ملفات.اقرأ("%s"))\n' % (self.path, self.path))
+        self.assertEqual(out, 'مرحبا بالملفات\n')
+
+    def test_write_overwrites(self):
+        run_arabi('ملفات.اكتب("%s"، "أول")\n' % self.path)
+        out = run_arabi(
+            'ملفات.اكتب("%s"، "ثانٍ")\n'
+            'اطبع(ملفات.اقرأ("%s"))\n' % (self.path, self.path))
+        self.assertEqual(out, 'ثانٍ\n')
+
+    def test_append_adds_to_end(self):
+        run_arabi('ملفات.اكتب("%s"، "سطر أول\\n")\n' % self.path)
+        out = run_arabi(
+            'ملفات.أضف("%s"، "سطر ثانٍ\\n")\n'
+            'اطبع(ملفات.أسطر("%s"))\n' % (self.path, self.path))
+        self.assertEqual(out, '[سطر أول، سطر ثانٍ]\n')
+
+    def test_lines_returns_list(self):
+        run_arabi('ملفات.اكتب("%s"، "أ\\nب\\nج")\n' % self.path)
+        out = run_arabi('اطبع(طول(ملفات.أسطر("%s")))\n' % self.path)
+        self.assertEqual(out, '3\n')
+
+    def test_exists(self):
+        out = run_arabi(
+            'اطبع(ملفات.موجود("%s"))\n'
+            'ملفات.اكتب("%s"، "محتوى")\n'
+            'اطبع(ملفات.موجود("%s"))\n' % (self.path, self.path, self.path))
+        self.assertEqual(out, 'خطأ\nصح\n')
+
+    def test_delete(self):
+        run_arabi('ملفات.اكتب("%s"، "سأحذف")\n' % self.path)
+        out = run_arabi(
+            'اطبع(ملفات.احذف("%s"))\n'
+            'اطبع(ملفات.موجود("%s"))\n' % (self.path, self.path))
+        self.assertEqual(out, 'صح\nخطأ\n')
+
+    def test_delete_missing_returns_false(self):
+        out = run_arabi('اطبع(ملفات.احذف("%s"))\n' % self.path)
+        self.assertEqual(out, 'خطأ\n')
+
+    def test_read_missing_file_errors(self):
+        expect_error('ملفات.اقرأ("%s")\n' % self.path,
+                     ArabiRuntimeError, 'غير موجود')
+
+    def test_write_non_string_content_errors(self):
+        expect_error('ملفات.اكتب("%s"، ٥)\n' % self.path,
+                     ArabiRuntimeError, 'نصًا')
+
+    def test_path_must_be_string(self):
+        expect_error('ملفات.اقرأ(٥)\n', ArabiRuntimeError, 'مسار نصي')
+
+    def test_files_module_with_json_roundtrip(self):
+        out = run_arabi('''
+الطريق = "%s"
+ملفات.اكتب(الطريق، جيسون.نص({"اسم": "ليلى"، "عمر": ٢٨}))
+بيانات = جيسون.حلل(ملفات.اقرأ(الطريق))
+اطبع(بيانات["اسم"] + " عمرها " + نص(بيانات["عمر"]))
+ملفات.احذف(الطريق)
+''' % self.path)
+        self.assertEqual(out, 'ليلى عمرها 28\n')
+
+
+class TestJsonModule(unittest.TestCase):
+    """اختبارات وحدة جيسون."""
+
+    def test_parse_simple(self):
+        out = run_arabi('''
+بيانات = جيسون.حلل("{\\"اسم\\": \\"سالم\\"، \\"عمر\\": ٢٥}")
+اطبع(بيانات["اسم"])''')
+        self.assertEqual(out, 'سالم\n')
+
+    def test_parse_with_arabic_commas(self):
+        out = run_arabi(
+            'ب = جيسون.حلل("[١، ٢، ٣]")\n'
+            'اطبع(ب[٢])\n')
+        self.assertEqual(out, '3\n')
+
+    def test_parse_accepts_ascii_digits(self):
+        out = run_arabi('اطبع(جيسون.حلل("٥") + ١)\n')
+        self.assertEqual(out, '6\n')
+
+    def test_stringify_preserves_arabic(self):
+        out = run_arabi('اطبع(جيسون.نص({"اسم": "ليلى"}))\n')
+        self.assertEqual(out, '{"اسم": "ليلى"}\n')
+
+    def test_roundtrip(self):
+        out = run_arabi('''
+المصدر = {"مهارات": ["برمجة"، "تصميم"]، "متاح": صح، "ملاحظة": ولا شيء}
+سلسلة = جيسون.نص(المصدر)
+المعاد = جيسون.حلل(سلسلة)
+اطبع(المعاد["مهارات"][١])
+اطبع(المعاد["متاح"])
+اطبع(المعاد["ملاحظة"])''')
+        self.assertEqual(out, 'تصميم\nصح\nولا شيء\n')
+
+    def test_json_true_parses_to_arabic(self):
+        out = run_arabi('اطبع(جيسون.حلل("true"))\n')
+        self.assertEqual(out, 'صح\n')
+
+    def test_parse_invalid_json(self):
+        expect_error('جيسون.حلل("{اسم بدون اقتباس}")',
+                     ArabiRuntimeError, 'غير صالح')
+
+    def test_parse_requires_string(self):
+        expect_error('جيسون.حلل(٥)', ArabiRuntimeError, 'نص')
+
+    def test_stringify_unsupported_value(self):
+        expect_error('اطبع(جيسون.نص(ملفات))\n',
+                     ArabiRuntimeError, 'JSON')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

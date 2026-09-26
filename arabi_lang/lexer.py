@@ -42,6 +42,9 @@ KEYWORDS = {
     'صنف': T.CLASS,
     'هذا': T.THIS,
     'الأصل': T.SUPER,
+    'بدّل': T.SWITCH,
+    'حالة': T.CASE,
+    'افتراض': T.DEFAULT,
 }
 
 # كلمات مفتاحية مركبة

@@ -133,6 +133,19 @@ class ClassDef(Node):
         self.body = body                  # [FuncDef | Assign]
 
 
+class Switch(Node):
+    """بدّل التعبير: ينفذ كتلة الحالة المطابقة فقط (بدون تساقط).
+
+    cases: [(تعبير القيمة، [جمل])، ...]
+    """
+
+    def __init__(self, subject, cases, default_body, line=None):
+        super().__init__(line)
+        self.subject = subject
+        self.cases = cases
+        self.default_body = default_body  # [stmt] أو None
+
+
 # ================== تعبيرات (Expressions) ==================
 
 class Num(Node):
