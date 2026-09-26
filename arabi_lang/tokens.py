@@ -41,6 +41,7 @@ class T(Enum):
     SWITCH = auto()    # بدّل
     CASE = auto()      # حالة
     DEFAULT = auto()   # افتراض
+    FSTRING = auto()   # ق"نص منسق {تعبير}"
 
     # ---- معاملات ----
     PLUS = auto()          # +

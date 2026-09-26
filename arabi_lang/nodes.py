@@ -160,6 +160,17 @@ class Str(Node):
         self.value = value
 
 
+class FString(Node):
+    """نص منسق: ق"مرحبا {الاسم}، الناتج {أ + ب}"
+
+    parts: [('str', نص حرفي) | ('expr', عقدة تعبير)، ...]
+    """
+
+    def __init__(self, parts, line=None):
+        super().__init__(line)
+        self.parts = parts
+
+
 class Bool(Node):
     def __init__(self, value, line=None):
         super().__init__(line)

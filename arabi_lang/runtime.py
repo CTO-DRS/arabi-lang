@@ -333,6 +333,36 @@ def _str_join(obj, args, line):
     return obj.join(seq)
 
 
+def _str_find(obj, args, line):
+    """أوجد(نص) — فهرس أول ظهور أو ١- إذا لم يوجد."""
+    _require_args('أوجد', args, 1, 1, line)
+    if not isinstance(args[0], str):
+        raise ArabiRuntimeError("طريقة 'أوجد' تحتاج نصًا", line)
+    return obj.find(args[0])
+
+
+def _str_contains(obj, args, line):
+    """يحتوي(نص) — صح إذا كان النص المطلوب جزءًا من النص."""
+    _require_args('يحتوي', args, 1, 1, line)
+    if not isinstance(args[0], str):
+        raise ArabiRuntimeError("طريقة 'يحتوي' تحتاج نصًا", line)
+    return args[0] in obj
+
+
+def _str_count(obj, args, line):
+    """عدد_التكرار(نص) — كم مرة يظهر النص المطلوب."""
+    _require_args('عدد_التكرار', args, 1, 1, line)
+    if not isinstance(args[0], str):
+        raise ArabiRuntimeError("طريقة 'عدد_التكرار' تحتاج نصًا", line)
+    return obj.count(args[0])
+
+
+def _str_reverse(obj, args, line):
+    """اعكس() — يعيد النص معكوسًا (النصوص غير قابلة للتعديل)."""
+    _require_args('اعكس', args, 0, 0, line)
+    return obj[::-1]
+
+
 def _dict_keys(obj, args, line):
     _require_args('مفاتيح', args, 0, 0, line)
     return list(obj.keys())
@@ -383,6 +413,10 @@ STR_METHODS = {
     'كبير': _str_upper,
     'صغير': _str_lower,
     'اجمع': _str_join,
+    'أوجد': _str_find,
+    'يحتوي': _str_contains,
+    'عدد_التكرار': _str_count,
+    'اعكس': _str_reverse,
 }
 
 DICT_METHODS = {

@@ -9,7 +9,7 @@ from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
     Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda, Switch,
-    Num, Str, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
+    Num, Str, FString, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
     Call, Index, Slice, MethodCall, Attribute, This, Super,
 )
 from .errors import ParseError
@@ -49,6 +49,8 @@ def tok_desc(tok):
         return TOKEN_DESC[tok.type]
     if tok.type is T.STRING:
         return f'نص "{tok.value}"'
+    if tok.type is T.FSTRING:
+        return f'نص منسق ق"{tok.value}"'
     if tok.type is T.IDENT:
         return f"الاسم '{tok.value}'"
     if tok.type in STMT_KEYWORDS:
@@ -529,6 +531,9 @@ class Parser:
         if t is T.STRING:
             self.advance()
             return Str(tok.value, tok.line)
+        if t is T.FSTRING:
+            self.advance()
+            return self._fstring_parts(tok)
         if t is T.TRUE:
             self.advance()
             return Bool(True, tok.line)
@@ -607,3 +612,76 @@ class Parser:
             self.error(message)
         self.advance()
         return tok.value
+
+    # ---------- النص المنسق ----------
+
+    def _fstring_parts(self, tok):
+        """يقسم محتوى النص المنسق إلى أجزاء حرفية وتعبيرات.
+
+        {تعبير} تُحلّل كتعبير كامل، و{{ و }} حرفيتان (قوس واحد).
+        """
+        text = tok.value
+        parts = []          # ('str', نص) أو ('expr', عقدة)
+        buf = []
+        i = 0
+        n = len(text)
+        while i < n:
+            c = text[i]
+            if c == '{':
+                if i + 1 < n and text[i + 1] == '{':
+                    buf.append('{')
+                    i += 2
+                    continue
+                if buf:
+                    parts.append(('str', ''.join(buf)))
+                    buf = []
+                depth = 1
+                j = i + 1
+                while j < n and depth > 0:
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    j += 1
+                if depth != 0:
+                    raise ParseError(
+                        "قوس '}' غير مغلق داخل النص المنسق", tok.line)
+                expr_src = text[i + 1:j - 1].strip()
+                if not expr_src:
+                    raise ParseError(
+                        'تعبير فارغ داخل {} في النص المنسق', tok.line)
+                parts.append(('expr', self._sub_expression(expr_src, tok.line)))
+                i = j
+            elif c == '}':
+                if i + 1 < n and text[i + 1] == '}':
+                    buf.append('}')
+                    i += 2
+                    continue
+                raise ParseError(
+                    "قوس '}' بدون '{' مقابلة في النص المنسق — استخدم }} لطباعة قوس", tok.line)
+            else:
+                buf.append(c)
+                i += 1
+        if buf:
+            parts.append(('str', ''.join(buf)))
+        return FString(parts, tok.line)
+
+    def _sub_expression(self, src, line):
+        """يحلل نصًا صغيرًا كتعبير واحد (لتعبيرات النص المنسق)."""
+        from .lexer import Lexer
+        try:
+            sub_toks = Lexer(src).tokenize()
+        except Exception as exc:
+            raise ParseError(
+                f"تعبير غير صالح داخل النص المنسق '{src}': {exc}", line)
+        # التعبيرات الفرعية سطر واحد — نتخلص من الرموز البنيوية
+        sub_toks = [t for t in sub_toks
+                    if t.type not in (T.NEWLINE, T.INDENT, T.DEDENT)]
+        sub = Parser(sub_toks)
+        try:
+            node = sub.expression()
+            sub.expect(T.EOF, f"تعبير غير مكتمل '{src}' داخل النص المنسق")
+        except ParseError as exc:
+            raise ParseError(
+                f"تعبير غير صالح داخل النص المنسق '{src}' — {exc.message}", line)
+        return node

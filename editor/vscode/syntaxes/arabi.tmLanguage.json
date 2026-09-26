@@ -29,6 +29,53 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.interpolated.arabi",
+          "begin": "ق(['\"])",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.string.begin.arabi" }
+          },
+          "end": "\\1",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.arabi" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.arabi",
+              "match": "\\\\(u[0-9a-fA-F]{4}|[ntr0abf'\"\\\\])"
+            },
+            {
+              "name": "meta.interpolation.arabi",
+              "match": "\\{[^{}]*\\}"
+            },
+            {
+              "name": "constant.character.escape.arabi",
+              "match": "\\{\\{|\\}\\}"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.triple.double.arabi",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.arabi",
+              "match": "\\\\(u[0-9a-fA-F]{4}|[ntr0abf'\"\\\\])"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.triple.single.arabi",
+          "begin": "'''",
+          "end": "'''",
+          "patterns": [
+            {
+              "name": "constant.character.escape.arabi",
+              "match": "\\\\(u[0-9a-fA-F]{4}|[ntr0abf'\"\\\\])"
+            }
+          ]
+        },
+        {
           "name": "string.quoted.double.arabi",
           "begin": "\"",
           "end": "\"",

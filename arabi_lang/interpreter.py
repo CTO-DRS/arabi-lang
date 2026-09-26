@@ -416,6 +416,16 @@ class Interpreter:
     def eval_Str(self, node, env):
         return node.value
 
+    def eval_FString(self, node, env):
+        """النص المنسق: ق"مرحبا {الاسم}، الناتج {أ + ب}" """
+        out = []
+        for kind, val in node.parts:
+            if kind == 'str':
+                out.append(val)
+            else:
+                out.append(display(self.evaluate(val, env)))
+        return ''.join(out)
+
     def eval_Bool(self, node, env):
         return node.value
 

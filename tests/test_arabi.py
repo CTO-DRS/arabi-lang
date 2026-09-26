@@ -1154,5 +1154,225 @@ class TestJsonModule(unittest.TestCase):
                      ArabiRuntimeError, 'JSON')
 
 
+class TestFStrings(unittest.TestCase):
+    """السلاسل المنسقة: ق"مرحبا {الاسم}" """
+
+    def test_lexer_fstring_token(self):
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('ق"نص {س}"').tokenize()
+        self.assertEqual(toks[0].type, T.FSTRING)
+        self.assertEqual(toks[0].value, 'نص {س}')
+
+    def test_lexer_ident_ق_alone(self):
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('ق = ٥').tokenize()
+        self.assertEqual(toks[0].type, T.IDENT)
+        self.assertEqual(toks[0].value, 'ق')
+
+    def test_lexer_ident_starting_with_ق(self):
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('قائمة = [١، ٢]').tokenize()
+        self.assertEqual(toks[0].type, T.IDENT)
+        self.assertEqual(toks[0].value, 'قائمة')
+
+    def test_basic(self):
+        self.assertEqual(run_arabi('الاسم = "أحمد"\nاطبع(ق"مرحبا {الاسم}!")'),
+                         'مرحبا أحمد!\n')
+
+    def test_expression(self):
+        self.assertEqual(run_arabi('أ = ٣\nب = ٤\nاطبع(ق"الناتج {أ + ب}")'),
+                         'الناتج 7\n')
+
+    def test_call_same_quote_nesting(self):
+        # اقتباس متشابه داخل التعبير — مسموح داخل الأقواس
+        self.assertEqual(run_arabi('اطبع(ق"الطول {طول("مرحبا")}")'),
+                         'الطول 5\n')
+
+    def test_dict_index_same_quote(self):
+        self.assertEqual(
+            run_arabi('د = {"اسم": "سلمى"}\nاطبع(ق"أهلًا {د["اسم"]}")'),
+            'أهلًا سلمى\n')
+
+    def test_nested_fstring(self):
+        self.assertEqual(
+            run_arabi('اطبع(ق"خارجي {ق"داخلي"} نهاية")'),
+            'خارجي داخلي نهاية\n')
+
+    def test_doubled_braces(self):
+        self.assertEqual(run_arabi('اطبع(ق"{{نص}}")'), '{نص}\n')
+
+    def test_method_call(self):
+        self.assertEqual(run_arabi('النص = "عربي"\nاطبع(ق"{النص.كبير()}")'),
+                         'عربي'.upper() + '\n')
+
+    def test_index(self):
+        self.assertEqual(
+            run_arabi('قائمة = [١٠، ٢٠]\nاطبع(ق"الثاني {قائمة[١]}")'),
+            'الثاني 20\n')
+
+    def test_bool_and_none(self):
+        self.assertEqual(run_arabi('اطبع(ق"{٣ > ٢}")'), 'صح\n')
+        self.assertEqual(run_arabi('اطبع(ق"{ولا شيء}")'), 'ولا شيء\n')
+
+    def test_float(self):
+        self.assertEqual(run_arabi('اطبع(ق"السعر {٢.٥}")'), 'السعر 2.5\n')
+
+    def test_concat_with_regular_string(self):
+        self.assertEqual(run_arabi('ن = ق"أ{١+١}" + "ج"\nاطبع(ن)'), 'أ2ج\n')
+
+    def test_as_argument_and_return(self):
+        self.assertEqual(
+            run_arabi('دالة انسخ(ن):\n'
+                      '    أعد ن\n'
+                      'اطبع(انسخ(ق"قيمة {٤٢}"))'),
+            'قيمة 42\n')
+
+    def test_empty_fstring(self):
+        self.assertEqual(run_arabi('اطبع(ق"")'), '\n')
+
+    def test_escaped_quote_inside(self):
+        self.assertEqual(run_arabi('اطبع(ق"يقول: \\"مرحبا\\"")'),
+                         'يقول: "مرحبا"\n')
+
+    def test_unclosed_brace_error(self):
+        # بدون إغلاق } يبتلع النص المنسق حتى نهاية السطر ثم يرفع خطأ لفطي
+        expect_error('اطبع(ق"نص {١+٢")', LexerError, 'غير مغلق')
+
+    def test_empty_expression_error(self):
+        expect_error('اطبع(ق"نص {}")', ParseError, 'فارغ')
+
+    def test_lone_close_brace_error(self):
+        expect_error('اطبع(ق"نص }")', ParseError, '}')
+
+    def test_unclosed_quote_error(self):
+        expect_error('اطبع(ق"نص)', LexerError, 'غير مغلق')
+
+
+class TestMultilineStrings(unittest.TestCase):
+    """النصوص متعددة الأسطر بثلاث علامات اقتباس"""
+
+    def test_two_lines_length(self):
+        self.assertEqual(
+            run_arabi('ن = """سطر أول\nسطر ثاني"""\nاطبع(طول(ن))'), '16\n')
+
+    def test_content(self):
+        self.assertEqual(
+            run_arabi('ن = """أ\nب"""\nاطبع(ن)'), 'أ\nب\n')
+
+    def test_three_lines(self):
+        self.assertEqual(run_arabi('اطبع(طول("""أ\nب\nج"""))'), '5\n')
+
+    def test_single_quote_style(self):
+        self.assertEqual(
+            run_arabi("ن = '''سطر\nثاني'''\nاطبع(ن)"), 'سطر\nثاني\n')
+
+    def test_quotes_inside(self):
+        self.assertEqual(
+            run_arabi('ن = """قال: "مرحبا" ثم انصرف"""\nاطبع(ن)'),
+            'قال: "مرحبا" ثم انصرف\n')
+
+    def test_escapes_inside(self):
+        self.assertEqual(
+            run_arabi('ن = """سطر\\nجديد بِتاب\\tوصلة"""\nاطبع(ن)'),
+            'سطر\nجديد بِتاب\tوصلة\n')
+
+    def test_empty_triple(self):
+        self.assertEqual(run_arabi('اطبع(طول(""""""))'), '0\n')
+
+    def test_in_function(self):
+        self.assertEqual(
+            run_arabi('دالة شعار():\n'
+                      '    أعد """لغة عربي"""\n'
+                      'اطبع(شعار())'),
+            'لغة عربي\n')
+
+    def test_unclosed_triple_error(self):
+        expect_error('ن = """نص\nبلا إغلاق', LexerError, 'غير مغلق')
+
+
+class TestStringMethodsV14(unittest.TestCase):
+    """الطرق النصية الجديدة: أوجد / يحتوي / عدد_التكرار / اعكس"""
+
+    # ---------- أوجد ----------
+
+    def test_find_found(self):
+        self.assertEqual(run_arabi('اطبع("مرحبا".أوجد("حب"))'), '2\n')
+
+    def test_find_at_start(self):
+        self.assertEqual(run_arabi('اطبع("مرحبا".أوجد("م"))'), '0\n')
+
+    def test_find_not_found(self):
+        self.assertEqual(run_arabi('اطبع("مرحبا".أوجد("س"))'), '-1\n')
+
+    def test_find_needs_string(self):
+        expect_error('اطبع("مرحبا".أوجد(٥))', ArabiRuntimeError, 'نصًا')
+
+    def test_find_one_arg(self):
+        expect_error('اطبع("مرحبا".أوجد())', ArabiRuntimeError, 'أوجد')
+
+    # ---------- يحتوي ----------
+
+    def test_contains_true(self):
+        self.assertEqual(run_arabi('اطبع("اللغة العربية".يحتوي("عرب"))'),
+                         'صح\n')
+
+    def test_contains_false(self):
+        self.assertEqual(run_arabi('اطبع("اللغة العربية".يحتوي("فرنس"))'),
+                         'خطأ\n')
+
+    def test_contains_empty(self):
+        self.assertEqual(run_arabi('اطبع("نص".يحتوي(""))'), 'صح\n')
+
+    def test_contains_needs_string(self):
+        expect_error('اطبع("نص".يحتوي([١]))', ArabiRuntimeError, 'نصًا')
+
+    # ---------- عدد_التكرار ----------
+
+    def test_count_basic(self):
+        self.assertEqual(run_arabi('اطبع("أبأبأ".عدد_التكرار("أب"))'), '2\n')
+
+    def test_count_char(self):
+        self.assertEqual(
+            run_arabi('اطبع("برمجة".عدد_التكرار("م"))'), '1\n')
+
+    def test_count_zero(self):
+        self.assertEqual(
+            run_arabi('اطبع("نص".عدد_التكرار("س"))'), '0\n')
+
+    def test_count_needs_string(self):
+        expect_error('اطبع("نص".عدد_التكرار(٣))', ArabiRuntimeError, 'نصًا')
+
+    # ---------- اعكس ----------
+
+    def test_reverse(self):
+        self.assertEqual(run_arabi('اطبع("مرحبا".اعكس())'), 'ابحرم\n')
+
+    def test_reverse_palindrome(self):
+        self.assertEqual(run_arabi('اطبع("كلك".اعكس())'), 'كلك\n')
+
+    def test_reverse_empty(self):
+        self.assertEqual(run_arabi('اطبع("".اعكس())'), '\n')
+
+    def test_reverse_no_args(self):
+        expect_error('اطبع("نص".اعكس("س"))', ArabiRuntimeError, 'اعكس')
+
+    # ---------- تركيبات ----------
+
+    def test_find_with_slice(self):
+        self.assertEqual(
+            run_arabi('اطبع("مرحبا يا عالم".أوجد("عالم"))'), '9\n')
+
+    def test_contains_in_condition(self):
+        self.assertEqual(
+            run_arabi('لو "النص العربي".يحتوي("عرب"):\n'
+                      '    اطبع("موجود")\n'
+                      'وإلا:\n'
+                      '    اطبع("مفقود")'),
+            'موجود\n')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -6,6 +6,8 @@
 - الفاصلة العربية (،) والغربية (,)
 - كلمات مفتاحية مركبة من كلمتين: «وإلا إذا» و«ولا شيء»
 - كتل بمسافات بادئة مثل بايثون (INDENT / DEDENT)
+- النصوص المنسقة: ق"مرحبا {الاسم}" — البادئة ق (قالب)
+- النصوص متعددة الأسطر: ثلاث علامات اقتباس مزدوجة أو مفردة
 """
 
 import re
@@ -262,10 +264,59 @@ class Lexer:
 
     # ---------- النصوص ----------
 
+    def _read_escape(self, buf):
+        """يعالج تسلسل الهروب بعد الرمز \\ ويسجل ناتجه في buf.
+
+        يستدعى والـ self.pos يشير إلى رمز الهروب (بعد \\).
+        """
+        if self.pos >= len(self.src):
+            self.error('نص غير مغلق')
+        e = self.src[self.pos]
+        if e == 'u':
+            hex_part = self.src[self.pos + 1:self.pos + 5]
+            if len(hex_part) != 4:
+                self.error("رمز '\\u' يحتاج 4 أرقام سداسية عشرية")
+            try:
+                buf.append(chr(int(hex_part, 16)))
+            except ValueError:
+                self.error(f"رمز سداسي عشري غير صالح: '{hex_part}'")
+            self.pos += 4
+        elif e in ESCAPES:
+            buf.append(ESCAPES[e])
+        elif e in '"\'':
+            buf.append(e)
+        else:
+            buf.append('\\' + e)
+        self.pos += 1
+
     def _read_string(self, quote):
         self.pos += 1
         buf = []
         n = len(self.src)
+
+        # نص متعدد الأسطر: """...""" أو '''...'''
+        triple = self.src[self.pos:self.pos + 2] == quote * 2
+        if triple:
+            self.pos += 2
+            closer = quote * 3
+            while True:
+                if self.pos >= n:
+                    self.error('نص غير مغلق — أنسيت ثلاث علامات اقتباس')
+                c = self.src[self.pos]
+                if self.src[self.pos:self.pos + 3] == closer:
+                    self.pos += 3
+                    break
+                if c == '\\':
+                    self.pos += 1
+                    if self.pos >= n:
+                        self.error('نص غير مغلق')
+                    self._read_escape(buf)
+                    continue
+                buf.append(c)
+                self.pos += 1
+            self.add(T.STRING, ''.join(buf))
+            return
+
         while True:
             if self.pos >= n:
                 self.error('نص غير مغلق — أنسيت علامة الاقتباس')
@@ -279,27 +330,44 @@ class Lexer:
                 self.pos += 1
                 if self.pos >= n:
                     self.error('نص غير مغلق')
-                e = self.src[self.pos]
-                if e == 'u':
-                    hex_part = self.src[self.pos + 1:self.pos + 5]
-                    if len(hex_part) != 4:
-                        self.error("رمز '\\u' يحتاج 4 أرقام سداسية عشرية")
-                    try:
-                        buf.append(chr(int(hex_part, 16)))
-                    except ValueError:
-                        self.error(f"رمز سداسي عشري غير صالح: '{hex_part}'")
-                    self.pos += 4
-                elif e in ESCAPES:
-                    buf.append(ESCAPES[e])
-                elif e in '"\'':
-                    buf.append(e)
-                else:
-                    buf.append('\\' + e)
-                self.pos += 1
+                self._read_escape(buf)
                 continue
             buf.append(c)
             self.pos += 1
         self.add(T.STRING, ''.join(buf))
+
+    def _read_fstring(self, quote):
+        """يقرأ نصًا منسقًا: ق"..." — البادئة ق اختصار لـ«قالب».
+
+        يبقى محتوى {تعبير} خامًا لمحلله لاحقًا، مع إدراك الأقواس
+        ليسمح بعلامات اقتباس داخل التعبير: ق"طول الاسم {طول("أحمد")}"
+        """
+        self.pos += 1                     # تخطَّ علامة الاقتباس الافتتاحية
+        buf = []
+        n = len(self.src)
+        depth = 0
+        while True:
+            if self.pos >= n:
+                self.error('نص منسق غير مغلق — أنسيت علامة الاقتباس')
+            c = self.src[self.pos]
+            if c == quote and depth == 0:
+                self.pos += 1
+                break
+            if c == '\n' and depth == 0:
+                self.error('نص منسق غير مغلق — النصوص لا تمتد على عدة أسطر')
+            if c == '\\':
+                self.pos += 1
+                if self.pos >= n:
+                    self.error('نص منسق غير مغلق')
+                self._read_escape(buf)
+                continue
+            if c in '([{':
+                depth += 1
+            elif c in ')]}':
+                depth = max(0, depth - 1)
+            buf.append(c)
+            self.pos += 1
+        self.add(T.FSTRING, ''.join(buf))
 
     # ---------- الكلمات والمعرفات ----------
 
@@ -323,6 +391,12 @@ class Lexer:
                 return
 
         self.pos = end
+
+        # بادئة النص المنسق: ق متبوعة مباشرة بعلامة اقتباس
+        if word == 'ق' and self.pos < len(self.src) and self.src[self.pos] in '"\'':
+            self._read_fstring(self.src[self.pos])
+            return
+
         kw = KEYWORDS.get(word)
         if kw is not None:
             self.add(kw, word)
