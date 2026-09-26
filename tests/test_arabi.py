@@ -4,6 +4,7 @@
 import io
 import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 
@@ -303,7 +304,7 @@ class TestModules(unittest.TestCase):
         self.assertEqual(run_arabi(src), '4.0\n3\n')
 
     def test_unknown_module(self):
-        expect_error('استورد غيره', ArabiRuntimeError, 'غير موجودة')
+        expect_error('استورد غيره', ArabiRuntimeError, 'لم يتم العثور على الوحدة')
 
 
 class TestDisplay(unittest.TestCase):
@@ -549,7 +550,8 @@ class TestExamples(unittest.TestCase):
                       encoding='utf-8') as f:
                 source = f.read()
             try:
-                run_code(source)
+                # مجلد الأمثلة أساس البحث عن الوحدات المستوردة
+                run_code(source, script_dir=self.EXAMPLES_DIR)
             except ArabiError as exc:
                 self.fail(f'المثال {name} فشل: {exc}')
 
@@ -565,6 +567,285 @@ class TestExamples(unittest.TestCase):
                 run_code(f.read())
         finally:
             builtins.input = original_input
+
+
+class TestKwargs(unittest.TestCase):
+    """القيم الافتراضية والمعاملات بالاسم."""
+
+    def test_default_value_used(self):
+        src = '''
+دالة ترحيب(الاسم، تحية = "مرحبا"):
+    أعد تحية + " " + الاسم
+اطبع(ترحيب("أحمد"))'''
+        self.assertEqual(run_arabi(src), 'مرحبا أحمد\n')
+
+    def test_default_value_overridden(self):
+        src = '''
+دالة ترحيب(الاسم، تحية = "مرحبا"):
+    أعد تحية + " " + الاسم
+اطبع(ترحيب("سارة"، "أهلاً"))'''
+        self.assertEqual(run_arabi(src), 'أهلاً سارة\n')
+
+    def test_all_defaults(self):
+        src = '''
+دالة قوة(أساس = ٢، أس = ٣):
+    أعد أساس ** أس
+اطبع(قوة())
+اطبع(قوة(٣))
+اطبع(قوة(٣، ٢))'''
+        self.assertEqual(run_arabi(src), '8\n27\n9\n')
+
+    def test_kwargs_call(self):
+        src = '''
+دالة تعريف(الاسم، العمر):
+    أعد الاسم + " عمره " + نص(العمر)
+اطبع(تعريف(العمر = ٣٠، الاسم = "ليلى"))'''
+        self.assertEqual(run_arabi(src), 'ليلى عمره 30\n')
+
+    def test_mixed_positional_and_kwargs(self):
+        src = '''
+دالة فاتورة(الصنف، الكمية = ١، سعر = ١٠):
+    أعد الصنف + ": " + نص(الكمية * سعر)
+اطبع(فاتورة("قلم"، سعر = ٢.٥))
+اطبع(فاتورة("دفتر"، ٣، سعر = ٥))'''
+        self.assertEqual(run_arabi(src), 'قلم: 2.5\nدفتر: 15\n')
+
+    def test_kwargs_in_method(self):
+        src = '''
+صنف دائرة:
+    دالة إنشاء(نق = ١):
+        هذا.نق = نق
+    دالة مساحة():
+        أعد ٣ * هذا.نق * هذا.نق
+ك = دائرة()
+اطبع(ك.مساحة())
+ك٢ = دائرة(نق = ٢)
+اطبع(ك٢.مساحة())
+اطبع(دائرة(نق = ٣).مساحة())'''
+        self.assertEqual(run_arabi(src), '3\n12\n27\n')
+
+    def test_missing_required_param(self):
+        expect_error('دالة عملية(أ، ب = ٢):\n    أعد أ\nعملية()',
+                     ArabiRuntimeError, "قيمة للمعامل 'أ'")
+
+    def test_unknown_kwarg(self):
+        expect_error('دالة عملية(أ):\n    أعد أ\nعملية(م = ١)',
+                     ArabiRuntimeError, "معامل بالاسم 'م'")
+
+    def test_duplicate_kwarg(self):
+        expect_error('دالة عملية(أ):\n    أعد أ\nعملية(١، أ = ٢)',
+                     ArabiRuntimeError, "أُرسل مرتين")
+
+    def test_too_many_args(self):
+        expect_error('دالة عملية(أ = ١):\n    أعد أ\nعملية(١، ٢)',
+                     ArabiRuntimeError, 'كحد أقصى')
+
+    def test_positional_after_kwarg(self):
+        expect_error('دالة عملية(أ، ب):\n    أعد أ + ب\nعملية(أ = ١، ٢)',
+                     ArabiRuntimeError, 'موضعي بعد معامل بالاسم')
+
+    def test_default_evaluated_at_def_time(self):
+        src = '''
+س = ١٠
+دالة اقرأ(قيمة = س):
+    أعد قيمة
+س = ٩٩
+اطبع(اقرأ())'''
+        self.assertEqual(run_arabi(src), '10\n')
+
+    def test_kwargs_not_supported_in_builtins(self):
+        expect_error('اطبع(نص = "مرحبا")', ArabiRuntimeError,
+                     "لا تقبل معاملات بالاسم")
+
+
+class TestLambda(unittest.TestCase):
+    """الدوال السهمية على سطر واحد."""
+
+    def test_basic(self):
+        self.assertEqual(run_arabi('ضاعف = دالة(س) => س * ٢\nاطبع(ضاعف(٢١))'),
+                         '42\n')
+
+    def test_two_params(self):
+        self.assertEqual(run_arabi('اجمع = دالة(أ، ب) => أ + ب\nاطبع(اجمع(٣، ٤))'),
+                         '7\n')
+
+    def test_zero_params(self):
+        self.assertEqual(run_arabi('درب = دالة() => "مرحبا"\nاطبع(درب())'),
+                         'مرحبا\n')
+
+    def test_inline_call(self):
+        self.assertEqual(run_arabi('اطبع((دالة(س) => س + ١)(٤١))'),
+                         '42\n')
+
+    def test_stored_in_list(self):
+        src = '''
+عمليات = [دالة(س) => س + ١، دالة(س) => س * ١٠]
+اطبع(عمليات[٠](٥))
+اطبع(عمليات[١](٥))'''
+        self.assertEqual(run_arabi(src), '6\n50\n')
+
+    def test_passed_as_callback(self):
+        src = '''
+دالة طبق(قيمة، تحويل):
+    أعد تحويل(قيمة)
+اطبع(طبق(٥، دالة(س) => س * س))'''
+        self.assertEqual(run_arabi(src), '25\n')
+
+    def test_closure_captures(self):
+        src = '''
+العامل = ٣
+ضاعف = دالة(س) => س * العامل
+اطبع(ضاعف(٧))'''
+        self.assertEqual(run_arabi(src), '21\n')
+
+    def test_default_params(self):
+        self.assertEqual(
+            run_arabi('سلم = دالة(أساس = ٢، أس = ٥) => أساس ** أس\nاطبع(سلم())'),
+            '32\n')
+
+    def test_recursion_style_stays_regular_func(self):
+        # التعاود يستخدم دالة عادية — السهمية تعبير واحد فقط
+        src = '''
+مضروب = دالة(ن) => ٠
+دالة حقيقية(ن):
+    لو ن <= ١:
+        أعد ١
+    أعد ن * حقيقية(ن - ١)
+اطبع(حقيقية(٥))'''
+        self.assertEqual(run_arabi(src), '120\n')
+
+    def test_display(self):
+        self.assertEqual(run_arabi('اطبع(دالة(س) => س)'), '<دالة سهمية>\n')
+
+    def test_type(self):
+        self.assertEqual(run_arabi('اطبع(نوع(دالة(س) => س))'), 'دالة\n')
+
+    def test_missing_arrow(self):
+        expect_error('مربع = دالة(س) س + ١', ParseError, "'=>'")
+
+    def test_multiline_body_rejected(self):
+        expect_error('مربع = دالة(س) =>\n    س + ١', ParseError, 'سطر')
+
+
+class TestFileModules(unittest.TestCase):
+    """الاستيراد من ملفات .عربي — يعمل على ملفات مؤقتة."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, relpath, content):
+        path = os.path.join(self.dir, relpath)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return path
+
+    def run_in_dir(self, source):
+        return run_code(source, script_dir=self.dir)
+
+    def test_basic_import(self):
+        self.write('هندسة.عربي',
+                   'ط = ٣.١٤\nدالة مساحة(نق):\n    أعد ط * نق * نق\n')
+        out = self.run_in_dir('استورد هندسة\nاطبع(هندسة.مساحة(٢))\n'
+                              'اطبع(هندسة.ط)\n')
+        self.assertEqual(out, '12.56\n3.14\n')
+
+    def test_from_import(self):
+        self.write('أدوات.عربي',
+                   'دالة ضاعف(س):\n    أعد س * ٢\n'
+                   'دالة ثلث(س):\n    أعد س / ٣\n')
+        out = self.run_in_dir('من أدوات استورد ضاعف\nاطبع(ضاعف(٥))\n')
+        self.assertEqual(out, '10\n')
+
+    def test_from_import_multiple_names(self):
+        self.write('أدوات.عربي',
+                   'أ = ١\nب = ٢\nج = ٣\n')
+        out = self.run_in_dir('من أدوات استورد أ، ج\nاطبع(أ + ج)\n')
+        self.assertEqual(out, '4\n')
+
+    def test_from_import_unknown_name(self):
+        self.write('أدوات.عربي', 'أ = ١\n')
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            self.run_in_dir('من أدوات استورد غيره\n')
+        self.assertIn("لا تحتوي على 'غيره'", str(ctx.exception))
+
+    def test_quoted_path_import(self):
+        self.write('مكتبة/تحويلات.عربي',
+                   'دالة مزدوج(س):\n    أعد س * ٢\n')
+        out = self.run_in_dir('استورد "مكتبة/تحويلات.عربي"\n'
+                              'اطبع(تحويلات.مزدوج(٨))\n')
+        self.assertEqual(out, '16\n')
+
+    def test_subfolder_import(self):
+        self.write('وحدات/نصوص.عربي', 'رسالة = "من مجلد وحدات"\n')
+        out = self.run_in_dir('استورد نصوص\nاطبع(نصوص.رسالة)\n')
+        self.assertEqual(out, 'من مجلد وحدات\n')
+
+    def test_module_cached_and_runs_once(self):
+        self.write('عدادات.عربي', 'زيارات = ١\n')
+        out = self.run_in_dir('''
+استورد عدادات
+استورد عدادات
+م = عدادات
+اطبع("تم")''')
+        self.assertEqual(out, 'تم\n')
+
+    def test_cyclic_import_detected(self):
+        self.write('أ.عربي', 'استورد ب\n')
+        self.write('ب.عربي', 'استورد أ\n')
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            self.run_in_dir('استورد أ\n')
+        self.assertIn('استيراد دائري', str(ctx.exception))
+
+    def test_nested_module_import(self):
+        self.write('أساس.عربي', 'قيمة = ٥\n')
+        self.write('أعلى.عربي', 'استورد أساس\nالنتيجة = أساس.قيمة * ٢\n')
+        out = self.run_in_dir('استورد أعلى\nاطبع(أعلى.النتيجة)\n')
+        self.assertEqual(out, '10\n')
+
+    def test_module_with_class(self):
+        self.write('حيوانات.عربي', '''
+صنف كلب:
+    دالة إنشاء(اسم):
+        هذا.اسم = اسم
+    دالة عوّ():
+        أعد هذا.اسم + ": هَو هَو!"
+''')
+        out = self.run_in_dir('''
+استورد حيوانات
+ك = حيوانات.كلب(اسم = "ريكس")
+اطبع(ك.عوّ())''')
+        self.assertEqual(out, 'ريكس: هَو هَو!\n')
+
+    def test_module_isolation(self):
+        # متغيرات الوحدة لا تتسرب للبرنامج الرئيسي
+        self.write('خفي.عربي', 'سر = ٤٢\n')
+        with self.assertRaises(ArabiRuntimeError):
+            self.run_in_dir('استورد خفي\nاطبع(سر)\n')
+
+    def test_module_sees_builtins(self):
+        self.write('مستخدم.عربي', 'النتيجة = طول("أبجدي")\n')
+        out = self.run_in_dir('استورد مستخدم\nاطبع(مستخدم.النتيجة)\n')
+        self.assertEqual(out, '5\n')
+
+    def test_module_error_line(self):
+        self.write('مكسور.عربي', 'أ = ١\nب = ٢ / ٠\n')
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            self.run_in_dir('استورد مكسور\n')
+        self.assertIn('قسمة على صفر', str(ctx.exception))
+
+    def test_missing_module_lists_paths(self):
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            self.run_in_dir('استورد غير_موجودة\n')
+        self.assertIn('بحثت في', str(ctx.exception))
+
+    def test_import_builtin_still_works(self):
+        out = self.run_in_dir('استورد رياضيات\nاطبع(رياضيات.جذر(٩))\n')
+        self.assertEqual(out, '3.0\n')
 
 
 if __name__ == '__main__':

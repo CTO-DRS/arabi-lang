@@ -1,0 +1,52 @@
+{
+  "name": "arabi-lang",
+  "displayName": "لغة عربي — Arabi Language",
+  "description": "دعم لغة عربي البرمجية: تلوين بناء الجملة، مقتطفات كود، وأدوات تحرير للملفات ذات الامتداد .عربي",
+  "version": "1.2.0",
+  "publisher": "arabi-lang",
+  "license": "MIT",
+  "icon": null,
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "arabic",
+    "arabi",
+    "عربي",
+    "برمجة",
+    "لغة عربية"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "arabi",
+        "aliases": [
+          "عربي",
+          "Arabi",
+          "arabi-lang"
+        ],
+        "extensions": [
+          ".عربي"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "arabi",
+        "scopeName": "source.arabi",
+        "path": "./syntaxes/arabi.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "arabi",
+        "path": "./snippets/arabi.json"
+      }
+    ]
+  }
+}

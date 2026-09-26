@@ -37,6 +37,7 @@ class T(Enum):
     CLASS = auto()     # صنف
     THIS = auto()      # هذا
     SUPER = auto()     # الأصل
+    ARROW = auto()     # => (الدوال السهمية)
 
     # ---- معاملات ----
     PLUS = auto()          # +

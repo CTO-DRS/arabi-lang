@@ -35,13 +35,13 @@ BANNER = rf"""
 """
 
 
-def run_code(source):
+def run_code(source, script_dir=None):
     """ينفذ كودًا ويعيد المخرجات المطبوعة — للاختبارات والاستدعاء البرمجي."""
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         tokens = Lexer(source).tokenize()
         tree = Parser(tokens).parse()
-        Interpreter().run(tree)
+        Interpreter(script_dir=script_dir).run(tree)
     return out.getvalue()
 
 
@@ -73,7 +73,9 @@ def run_file(path):
     try:
         tokens = Lexer(source).tokenize()
         tree = Parser(tokens).parse()
-        Interpreter().run(tree)
+        # مجلد الملف هو أساس البحث عن الوحدات المستوردة
+        script_dir = os.path.dirname(os.path.abspath(path))
+        Interpreter(script_dir=script_dir).run(tree)
     except ArabiError as error:
         print_error(error, lines)
         sys.exit(1)

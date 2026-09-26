@@ -2,18 +2,22 @@
 """المفسر (Interpreter) — ينفذ شجرة الصياغة سطرًا بسطر (Tree-Walking).
 
 يرفع ArabiRuntimeError برسائل عربية عند كل مشكلة، ويدعم:
-متغيرات، شروط، حلقات، دوال (مع تعاود وإغلاق)، قوائم وقواميس،
-تقطيع، معالجة أخطاء، إسناد متعدد، ووحدات جاهزة.
+متغيرات، شروط، حلقات، دوال (مع تعاود وإغلاق وافتراضات ومعاملات بالاسم)،
+دوال سهمية، قوائم وقواميس، تقطيع، معالجة أخطاء، إسناد متعدد،
+أصناف ووراثة، واستيراد وحدات من ملفات .عربي.
 """
 
+import os
 import sys
 
 from . import nodes as N
 from .errors import ArabiRuntimeError
+from .lexer import Lexer
+from .parser import Parser
 from .runtime import (
     Env, ArabiFunc, BuiltinFunc, ModuleValue,
     ClassValue, InstanceValue, BoundMethod,
-    typename, display, install_builtins,
+    typename, display, install_builtins, NO_DEFAULT,
     LIST_METHODS, STR_METHODS, DICT_METHODS,
 )
 
@@ -26,6 +30,9 @@ CATCHABLE = (
     ZeroDivisionError, ValueError, TypeError, IndexError,
     KeyError, AttributeError, OverflowError,
 )
+
+# الوحدات الجاهزة المدمجة في اللغة
+BUILTIN_MODULES = ('رياضيات', 'وقت')
 
 
 class BreakSignal(Exception):
@@ -44,9 +51,17 @@ class ReturnSignal(Exception):
 
 
 class Interpreter:
-    def __init__(self):
+    def __init__(self, script_dir=None):
         self.globals = Env()
         install_builtins(self.globals)
+        # مجلد البرنامج الرئيسي (أساس البحث عن الوحدات)
+        self.script_dir = script_dir or os.getcwd()
+        # كومة مجلدات الوحدات قيد التحميل (للاستيراد المتداخل)
+        self._module_stack = []
+        # ذاكرة الوحدات المحمّلة: مسار ← ModuleValue
+        self._module_cache = {}
+        # مسارات قيد التحميل حاليًا — لكشف الاستيراد الدائري
+        self._loading = set()
 
     # ================== التنفيذ ==================
 
@@ -157,7 +172,15 @@ class Interpreter:
                 continue
 
     def exec_FuncDef(self, node, env):
-        env.set(node.name, ArabiFunc(node.name, node.params, node.body, env))
+        params = [(name, self._eval_default(default, env))
+                  for name, default in node.params]
+        env.set(node.name, ArabiFunc(node.name, params, node.body, env))
+
+    def _eval_default(self, node, env):
+        """يقيّم تعبير القيمة الافتراضية عند التعريف، أو يعيد NO_DEFAULT."""
+        if node is None:
+            return NO_DEFAULT
+        return self.evaluate(node, env)
 
     def exec_ClassDef(self, node, env):
         """تعريف صنف: يجمع الطرق والثوابت ويربط الصنف بأصله إن وجد."""
@@ -185,8 +208,10 @@ class Interpreter:
                     raise ArabiRuntimeError(
                         f"تكرار تعريف الطريقة '{stmt.name}' في الصنف '{node.name}'",
                         stmt.line)
+                params = [(name, self._eval_default(default, env))
+                          for name, default in stmt.params]
                 members[stmt.name] = ArabiFunc(
-                    stmt.name, stmt.params, stmt.body, class_env)
+                    stmt.name, params, stmt.body, class_env)
             elif isinstance(stmt, N.Pass):
                 continue                          # جملة تجاهل مسموحة في جسم الصنف
             elif (isinstance(stmt, N.Assign) and len(stmt.targets) == 1
@@ -242,12 +267,122 @@ class Interpreter:
         raise ArabiRuntimeError(display(value), node.line)
 
     def exec_Import(self, node, env):
-        module = self.globals.vars.get(node.name)
-        if not isinstance(module, ModuleValue):
+        """تنفيذ الاستيراد بأصغاله الثلاثة."""
+        module = self._resolve_module(node, env)
+        if node.names is not None:
+            # صيغة «من وحدة استورد أ، ب» — ربط الأسماء مباشرة
+            for name in node.names:
+                if name not in module.members:
+                    available = '، '.join(sorted(module.members)) or 'لا شيء'
+                    raise ArabiRuntimeError(
+                        f"الوحدة '{module.name}' لا تحتوي على '{name}' "
+                        f'— المتوفر: {available}', node.line)
+                env.set(name, module.members[name])
+            return
+        env.set(node.bound_name, module)
+
+    # ================== تحميل الوحدات من الملفات ==================
+
+    def _resolve_module(self, node, env):
+        """يبحث عن الوحدة ويحملها مرة واحدة ويخزنها في الذاكرة."""
+        name = node.module or node.bound_name
+
+        # ١) الوحدات الجاهزة المدمجة
+        if node.module in BUILTIN_MODULES:
+            return self.globals.vars[node.module]
+
+        # ٢) تحديد مسارات البحث
+        if node.path is not None:
+            candidates = self._path_candidates(node.path)
+        else:
+            candidates = self._module_candidates(node.module)
+
+        # ٣) البحث عن الملف
+        for path in candidates:
+            if os.path.isfile(path):
+                return self._load_module_file(path, name, node.line)
+
+        searched = '\n  '.join(candidates)
+        raise ArabiRuntimeError(
+            f"لم يتم العثور على الوحدة '{name}' — بحثت في:\n  {searched}",
+            node.line)
+
+    def _search_dirs(self):
+        """مجلدات البحث عن الوحدات بالترتيب: البرنامج، الوحدة الحالية، ثم المجلد الحالي."""
+        dirs = [self.script_dir]
+        if self._module_stack:
+            dirs.append(self._module_stack[-1])
+        dirs.append(os.getcwd())
+        seen = set()
+        unique = []
+        for d in dirs:
+            d = os.path.abspath(d)
+            if d not in seen:
+                seen.add(d)
+                unique.append(d)
+        return unique
+
+    def _module_candidates(self, name):
+        """مواضع ملف الوحدة اسم.عربي في كل مجلدات البحث ومجلد وحدات الفرعي."""
+        candidates = []
+        for d in self._search_dirs():
+            candidates.append(os.path.join(d, name + '.عربي'))
+            candidates.append(os.path.join(d, 'وحدات', name + '.عربي'))
+        return candidates
+
+    def _path_candidates(self, path):
+        """مواضع مسار صريح: مطلق مباشرة، وإلا نسبي لمجلدات البحث."""
+        if os.path.isabs(path):
+            return [path]
+        return [os.path.join(d, path) for d in self._search_dirs()]
+
+    def _load_module_file(self, path, name, line):
+        """يقرأ ملف .عربي وينفذه في بيئة مستقلة ويعيد ModuleValue."""
+        path = os.path.abspath(path)
+        if path in self._module_cache:            # محمّلة سابقًا — إعادة استخدام
+            return self._module_cache[path]
+        if path in self._loading:
+            chain = ' ← '.join(
+                os.path.basename(p) for p in list(self._loading) + [path])
             raise ArabiRuntimeError(
-                f"الوحدة '{node.name}' غير موجودة — الوحدات المتاحة: رياضيات، وقت",
-                node.line)
-        env.set(node.name, module)
+                f'استيراد دائري: {chain} — الوحدة لا تستطيع استيراد نفسها '
+                'بشكل مباشر أو غير مباشر', line)
+        try:
+            with open(path, encoding='utf-8') as f:
+                source = f.read()
+        except UnicodeDecodeError:
+            raise ArabiRuntimeError(
+                f"ملف الوحدة '{path}' يجب أن يكون بترميز UTF-8", line)
+        except OSError as exc:
+            raise ArabiRuntimeError(
+                f"لا يمكن قراءة ملف الوحدة '{path}': {exc}", line)
+
+        self._loading.add(path)
+        try:
+            tokens = Lexer(source).tokenize()
+            tree = Parser(tokens).parse()
+            module_env = Env()
+            install_builtins(module_env)
+            builtin_names = set(module_env.vars)
+            self._module_stack.append(os.path.dirname(path))
+            try:
+                self.exec_statements(tree.statements, module_env)
+            finally:
+                self._module_stack.pop()
+            # الوحدة تصدّر ما عرّفه المستخدم فقط (وليس الجاهزات)
+            members = {k: v for k, v in module_env.vars.items()
+                       if k not in builtin_names}
+        except ArabiRuntimeError as exc:
+            if exc.line is not None:
+                raise
+            raise ArabiRuntimeError(
+                f"خطأ داخل الوحدة '{name}': {exc.message}", line)
+        finally:
+            self._loading.discard(path)
+
+        module = ModuleValue(name, members)
+        self._module_cache[path] = module
+        return module
 
     def _native_error(self, exc):
         text = str(exc)
@@ -340,8 +475,30 @@ class Interpreter:
 
     def eval_Call(self, node, env):
         func = self.evaluate(node.func, env)
-        args = [self.evaluate(a, env) for a in node.args]
-        return self._call_value(func, args, node.line)
+        args, kwargs = self._evaluate_args(node.args, env)
+        return self._call_value(func, args, kwargs, node.line)
+
+    def _evaluate_args(self, arg_nodes, env):
+        """يقيّم معاملات الاستدعاء ويفصل الموضعية عن المسماة."""
+        args = []
+        kwargs = {}
+        kw_started = False
+        for name, expr in arg_nodes:
+            value = self.evaluate(expr, env)
+            if name is None:
+                if kw_started:
+                    raise ArabiRuntimeError(
+                        'لا يمكن وضع معامل موضعي بعد معامل بالاسم',
+                        getattr(expr, 'line', None))
+                args.append(value)
+            else:
+                if name in kwargs:
+                    raise ArabiRuntimeError(
+                        f"تكرار المعامل بالاسم '{name}' في الاستدعاء",
+                        getattr(expr, 'line', None))
+                kwargs[name] = value
+                kw_started = True
+        return args, kwargs
 
     def eval_Index(self, node, env):
         obj = self.evaluate(node.obj, env)
@@ -364,7 +521,7 @@ class Interpreter:
 
     def eval_MethodCall(self, node, env):
         obj = self.evaluate(node.obj, env)
-        args = [self.evaluate(a, env) for a in node.args]
+        args, kwargs = self._evaluate_args(node.args, env)
         name = node.name
         line = node.line
         # كائن من صنف معرف من قبل المستخدم
@@ -372,29 +529,31 @@ class Interpreter:
             if name in obj.fields:
                 func = obj.fields[name]
                 if isinstance(func, (ArabiFunc, BuiltinFunc)):
-                    return self._call_value(func, args, line)
+                    return self._call_value(func, args, kwargs, line)
                 raise ArabiRuntimeError(
                     f"'{name}' خاصية من نوع {typename(func)} — لا يمكن استدعاؤها كدالة",
                     line)
-            return self._call_class_method(obj.cls, obj, name, args, line)
+            return self._call_class_method(obj.cls, obj, name, args, kwargs, line)
         # استدعاء غير مرتبط من الصنف نفسه: الأصل.إنشاء(هذا، ...)
         if isinstance(obj, ClassValue):
-            if not args:
+            if not args and not kwargs:
                 raise ArabiRuntimeError(
                     f"استدعاء '{obj.name}.{name}' يحتاج الكائن كأول معامل", line)
             this_val = args[0]
             if not isinstance(this_val, InstanceValue):
                 raise ArabiRuntimeError(
                     f"أول معامل في '{obj.name}.{name}' يجب أن يكون كائنًا", line)
-            return self._call_class_method(obj, this_val, name, args[1:], line)
+            return self._call_class_method(obj, this_val, name, args[1:], kwargs, line)
         if isinstance(obj, ModuleValue):
             member = obj.members.get(name)
             if member is None:
                 raise ArabiRuntimeError(
                     f"الوحدة '{obj.name}' لا تحتوي على '{name}'", line)
-            if isinstance(member, BuiltinFunc):
-                return member.fn(args, line)
-            return member
+            if isinstance(member, (ArabiFunc, BuiltinFunc, ClassValue, BoundMethod)):
+                return self._call_value(member, args, kwargs, line)
+            raise ArabiRuntimeError(
+                f"'{obj.name}.{name}' ثابت من نوع {typename(member)} وليس دالة — "
+                'لا يمكن استدعاؤه', line)
         if isinstance(obj, list):
             table = LIST_METHODS
         elif isinstance(obj, str):
@@ -410,6 +569,13 @@ class Interpreter:
             raise ArabiRuntimeError(
                 f"لا توجد طريقة اسمها '{name}' للنوع {typename(obj)}", line)
         return method(obj, args, line)
+
+    def eval_Lambda(self, node, env):
+        """الدالة السهمية قيمة عند التقييم — تُنشئ ArabiFunc بجسم من سطر واحد."""
+        params = [(name, self._eval_default(default, env))
+                  for name, default in node.params]
+        body = [N.Return(node.body, node.line)]
+        return ArabiFunc('سهمية', params, body, env, is_lambda=True)
 
     def eval_Attribute(self, node, env):
         obj = self.evaluate(node.obj, env)
@@ -520,34 +686,89 @@ class Interpreter:
             raise ArabiRuntimeError('حدود التقطيع يجب أن تكون أعدادًا صحيحة', line)
         return value
 
-    def _call_value(self, func, args, line):
+    def _call_value(self, func, args, kwargs, line):
         if isinstance(func, ArabiFunc):
-            if len(args) != len(func.params):
-                raise ArabiRuntimeError(
-                    f"الدالة '{func.name}' تتوقع {len(func.params)} معاملًا "
-                    f'لكنها استلمت {len(args)}', line)
-            local = Env(func.env)
-            for param, arg in zip(func.params, args):
-                local.define(param, arg)
+            local = self._bind_call_args(func, args, kwargs, line)
             try:
                 self.exec_statements(func.body, local)
             except ReturnSignal as signal:
                 return signal.value
             return None
         if isinstance(func, BuiltinFunc):
+            if kwargs:
+                names = '، '.join(kwargs)
+                raise ArabiRuntimeError(
+                    f"الدالة الجاهزة '{func.name}' لا تقبل معاملات بالاسم "
+                    f'(استلمت: {names})', line)
             return func.fn(args, line)
         # إنشاء كائن: نقطة(٣، ٤)
         if isinstance(func, ClassValue):
             instance = InstanceValue(func)
             ctor, _owner = self._lookup_member(func, 'إنشاء')
             if isinstance(ctor, ArabiFunc):
-                self._invoke_bound(ctor, instance, args, line)
+                self._invoke_bound(ctor, instance, args, kwargs, line)
             return instance
         # طريقة مرتبطة كُلّمت لاحقًا: م = ك.طريقة ثم م()
         if isinstance(func, BoundMethod):
-            return self._invoke_bound(func.func, func.instance, args, line)
+            return self._invoke_bound(func.func, func.instance, args, kwargs, line)
         raise ArabiRuntimeError(
             f"'{display(func)}' من نوع {typename(func)} — لا يمكن استدعاؤها كدالة", line)
+
+    def _bind_call_args(self, func, args, kwargs, line):
+        """يربط معاملات الاستدعاء (موضعية وبالاسم) بالمعاملات الرسمية.
+
+        يعيد بيئة محلية جاهزة للتنفيذ، ويرفع أخطاء عربية واضحة عند:
+        نقص معامل إجباري، زيادة معاملات، اسم غير معروف، أو تكرار إرسال قيمة.
+        """
+        params = func.params                      # [(الاسم، الافتراضي)، ...]
+        local = Env(func.env)
+        bound = {}
+
+        # ١) المعاملات الموضعية بالترتيب
+        for i, value in enumerate(args):
+            if i >= len(params):
+                raise ArabiRuntimeError(
+                    self._arity_message(func, len(params), len(args), kwargs), line)
+            bound[params[i][0]] = value
+
+        # ٢) المعاملات بالاسم
+        for name, value in kwargs.items():
+            if not any(p[0] == name for p in params):
+                raise ArabiRuntimeError(
+                    f"'{func.name}' لا تحتوي على معامل بالاسم '{name}' — "
+                    f"المعاملات: {self._params_list(params)}", line)
+            if name in bound:
+                raise ArabiRuntimeError(
+                    f"المعامل '{name}' أُرسل مرتين في '{func.name}' "
+                    '(موضعيًا وبالاسم)', line)
+            bound[name] = value
+
+        # ٣) الافتراضيات للمتبقي، وكشف الناقص
+        for name, default in params:
+            if name in bound:
+                continue
+            if default is NO_DEFAULT:
+                raise ArabiRuntimeError(
+                    f"'{func.name}' تحتاج قيمة للمعامل '{name}' — "
+                    'أرسلها موضعيًا أو بالاسم', line)
+            bound[name] = default
+
+        for name, _default in params:
+            local.define(name, bound[name])
+        return local
+
+    def _arity_message(self, func, n_params, n_args, kwargs):
+        required = sum(1 for _name, default in func.params
+                       if default is NO_DEFAULT)
+        got = n_args + len(kwargs)
+        if got > n_params:
+            return (f"'{func.name}' تقبل {n_params} معاملًا كحد أقصى "
+                    f'لكنها استلمت {got}')
+        return (f"'{func.name}' تتوقع {required} معاملًا إجباريًا "
+                f'لكنها استلمت {got}')
+
+    def _params_list(self, params):
+        return '، '.join(p[0] for p in params) or 'لا معاملات'
 
     # ================== أدوات الأصناف ==================
 
@@ -560,23 +781,17 @@ class Interpreter:
             scope = scope.superclass
         return None, None
 
-    def _invoke_bound(self, func, this_val, args, line):
+    def _invoke_bound(self, func, this_val, args, kwargs, line):
         """ينفذ طريقة مع ربط 'هذا' بالكائن الممرر."""
-        if len(args) != len(func.params):
-            raise ArabiRuntimeError(
-                f"الطريقة '{func.name}' تتوقع {len(func.params)} معاملًا "
-                f'لكنها استلمت {len(args)}', line)
-        local = Env(func.env)
+        local = self._bind_call_args(func, args, kwargs, line)
         local.define('هذا', this_val)
-        for param, arg in zip(func.params, args):
-            local.define(param, arg)
         try:
             self.exec_statements(func.body, local)
         except ReturnSignal as signal:
             return signal.value
         return None
 
-    def _call_class_method(self, cls, instance, name, args, line):
+    def _call_class_method(self, cls, instance, name, args, kwargs, line):
         """يبحث عن الطريقة في سلسلة الصنف وينفذها مرتبطة بالكائن."""
         func, owner = self._lookup_member(cls, name)
         if func is None:
@@ -586,7 +801,7 @@ class Interpreter:
         if not isinstance(func, ArabiFunc):
             raise ArabiRuntimeError(
                 f"'{name}' في الصنف '{owner.name}' ثابت وليس طريقة", line)
-        return self._invoke_bound(func, instance, args, line)
+        return self._invoke_bound(func, instance, args, kwargs, line)
 
     def _binop(self, op, left, right, line):
         if op == '+':

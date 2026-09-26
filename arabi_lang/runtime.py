@@ -10,6 +10,23 @@ from .errors import ArabiRuntimeError
 AR2EN = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
 
+class _NoDefault:
+    """حارس داخلي يمثل معاملًا بلا قيمة افتراضية."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return '<بلا افتراضي>'
+
+
+NO_DEFAULT = _NoDefault()
+
+
 def ar2en(text):
     return str(text).translate(AR2EN)
 
@@ -51,15 +68,20 @@ class Env:
 # ================== القيم ==================
 
 class ArabiFunc:
-    """دالة معرفة بلغة عربي نفسها."""
+    """دالة معرفة بلغة عربي نفسها.
 
-    __slots__ = ('name', 'params', 'body', 'env')
+    params قائمة أزواج (الاسم، القيمة الافتراضية أو NO_DEFAULT) —
+    تُقيّم الافتراضات مرة واحدة عند التعريف (كما في بايثون).
+    """
 
-    def __init__(self, name, params, body, env):
+    __slots__ = ('name', 'params', 'body', 'env', 'is_lambda')
+
+    def __init__(self, name, params, body, env, is_lambda=False):
         self.name = name
         self.params = params
         self.body = body
         self.env = env
+        self.is_lambda = is_lambda
 
 
 class BuiltinFunc:
@@ -166,6 +188,8 @@ def display(v):
     if isinstance(v, range):
         return f'مدى({v.start}, {v.stop}, {v.step})'
     if isinstance(v, ArabiFunc):
+        if v.is_lambda:
+            return '<دالة سهمية>'
         return f'<دالة {v.name}>'
     if isinstance(v, BuiltinFunc):
         return f'<دالة جاهزة {v.name}>'

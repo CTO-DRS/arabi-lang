@@ -61,6 +61,7 @@ TWO_CHAR_OPS = {
     '-=': T.MINUS_ASSIGN,
     '*=': T.STAR_ASSIGN,
     '/=': T.SLASH_ASSIGN,
+    '=>': T.ARROW,
 }
 
 ONE_CHAR_OPS = {

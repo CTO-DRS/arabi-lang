@@ -71,7 +71,7 @@ class FuncDef(Node):
     def __init__(self, name, params, body, line=None):
         super().__init__(line)
         self.name = name
-        self.params = params
+        self.params = params      # [(الاسم، تعبير الافتراضي أو None)، ...]
         self.body = body
 
 
@@ -108,9 +108,19 @@ class Raise(Node):
 
 
 class Import(Node):
-    def __init__(self, name, line=None):
+    """الاستيراد.
+
+    استورد وحدة        →  module='وحدة'، path=None، names=None
+    استورد "م/ملف.عربي" →  module=None، path='م/ملف.عربي'، names=None
+    من وحدة استورد أ، ب →  module='وحدة'، names=['أ'، 'ب']
+    """
+
+    def __init__(self, module, path, names, bound_name, line=None):
         super().__init__(line)
-        self.name = name
+        self.module = module          # اسم الوحدة أو None
+        self.path = path              # مسار نصي أو None
+        self.names = names            # قائمة أسماء (من...استورد) أو None
+        self.bound_name = bound_name  # الاسم المرتبط في البيئة (للاستيراد الكامل)
 
 
 class ClassDef(Node):
@@ -185,7 +195,7 @@ class Call(Node):
     def __init__(self, func, args, line=None):
         super().__init__(line)
         self.func = func
-        self.args = args
+        self.args = args              # [(الاسم أو None، تعبير)، ...]
 
 
 class Index(Node):
@@ -229,3 +239,12 @@ class This(Node):
 
 class Super(Node):
     """الكلمة المفتاحية 'الأصل' — الصنف الأب داخل جسم الصنف."""
+
+
+class Lambda(Node):
+    """دالة سهمية على سطر واحد: دالة(س، ص) => س + ص"""
+
+    def __init__(self, params, body, line=None):
+        super().__init__(line)
+        self.params = params          # [(الاسم، تعبير الافتراضي أو None)، ...]
+        self.body = body              # تعبير واحد

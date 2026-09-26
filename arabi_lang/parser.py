@@ -8,7 +8,7 @@
 from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
-    Break, Continue, Pass, Try, Raise, Import, ClassDef,
+    Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda,
     Num, Str, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
     Call, Index, Slice, MethodCall, Attribute, This, Super,
 )
@@ -29,6 +29,7 @@ TOKEN_DESC = {
     T.INDENT: 'مسافة بادئة',
     T.DEDENT: 'نهاية الكتلة',
     T.EOF: 'نهاية الملف',
+    T.ARROW: "'=>'",
 }
 
 STMT_KEYWORDS = {
@@ -52,6 +53,17 @@ def tok_desc(tok):
     if tok.type in STMT_KEYWORDS:
         return f"'{tok.value}'"
     return f"'{tok.value}'"
+
+
+def _name_from_path(path, tok):
+    """يستخرج اسم الربط من مسار ملف: 'مكتبة/هندسة.عربي' → 'هندسة'."""
+    base = path.replace('\\', '/').rstrip('/').split('/')[-1]
+    if base.endswith('.عربي'):
+        base = base[:-len('.عربي')]
+    if not base:
+        raise ParseError(
+            f"لا يمكن استنتاج اسم الوحدة من المسار '{path}'", tok.line)
+    return base
 
 
 class Parser:
@@ -146,6 +158,10 @@ class Parser:
             return self.import_stmt()
         if t is T.CLASS:
             return self.class_def()
+        # «من وحدة استورد ...» — 'من' كلمة سياقية في بداية الجملة
+        if (t is T.IDENT and self.cur().value == 'من'
+                and self.peek(1).type in (T.IDENT, T.STRING)):
+            return self.import_stmt()
         return self.expr_stmt()
 
     def block(self):
@@ -170,15 +186,30 @@ class Parser:
     def func_def(self):
         tok = self.advance()                       # دالة
         name = self.expect_ident("متوقع اسم الدالة بعد 'دالة'")
-        self.expect(T.LPAREN, f"متوقع '(' بعد اسم الدالة '{name}'")
-        params = []
-        if not self.check(T.RPAREN):
-            params.append(self.expect_ident('متوقع اسم معامل'))
-            while self.match(T.COMMA):
-                params.append(self.expect_ident('متوقع اسم معامل'))
-        self.expect(T.RPAREN, "متوقع ')' لإغلاق قائمة المعاملات")
+        params = self.parse_params()
         body = self.block()
         return FuncDef(name, params, body, tok.line)
+
+    def parse_params(self):
+        """يقرأ قائمة المعاملات مع الافتراضيات: (أ، ب = ٥)"""
+        self.expect(T.LPAREN, "متوقع '(' لفتح قائمة المعاملات")
+        params = []
+        if not self.check(T.RPAREN):
+            params.append(self.parse_param())
+            while self.match(T.COMMA):
+                if self.check(T.RPAREN):           # فاصلة أخيرة مسموحة
+                    break
+                params.append(self.parse_param())
+        self.expect(T.RPAREN, "متوقع ')' لإغلاق قائمة المعاملات")
+        return params
+
+    def parse_param(self):
+        """معامل واحد: اسم أو اسم = قيمة افتراضية"""
+        name = self.expect_ident('متوقع اسم معامل')
+        default = None
+        if self.match(T.ASSIGN):
+            default = self.expression()
+        return (name, default)
 
     def if_stmt(self):
         tok = self.advance()                       # لو
@@ -240,9 +271,36 @@ class Parser:
         return Raise(self.expression(), tok.line)
 
     def import_stmt(self):
+        """صيغ الاستيراد الثلاث:
+        استورد وحدة
+        استورد "مسار/ملف.عربي"
+        من وحدة استورد اسم، اسم
+        """
+        # صيغة «من ... استورد ...» — 'من' كلمة سياقية
+        if self.check(T.IDENT) and self.cur().value == 'من':
+            tok = self.advance()                   # من
+            if self.check(T.STRING):
+                module = None
+                path = self.advance().value
+                bound = _name_from_path(path, tok)
+            else:
+                module = self.expect_ident("متوقع اسم الوحدة بعد 'من'")
+                path = None
+                bound = module
+            self.expect(T.IMPORT, "متوقع الكلمة 'استورد' في صيغة 'من ... استورد ...'")
+            names = [self.expect_ident('متوقع اسمًا للاستيراد بعد استورد')]
+            while self.match(T.COMMA):
+                if self.check(T.NEWLINE) or self.check(T.EOF):
+                    break
+                names.append(self.expect_ident('متوقع اسمًا للاستيراد'))
+            return Import(module, path, names, bound, tok.line)
+
         tok = self.advance()                       # استورد
+        if self.check(T.STRING):
+            path = self.advance().value
+            return Import(None, path, None, _name_from_path(path, tok), tok.line)
         name = self.expect_ident("متوقع اسم الوحدة بعد 'استورد'")
-        return Import(name, tok.line)
+        return Import(name, None, None, name, tok.line)
 
     def class_def(self):
         tok = self.advance()                       # صنف
@@ -379,15 +437,29 @@ class Parser:
 
     def call(self, func):
         tok = self.advance()                       # (
+        args = self.parse_call_args()
+        return Call(func, args, tok.line)
+
+    def parse_call_args(self):
+        """يقرأ معاملات الاستدعاء: موضعية أو بالاسم (اسم = قيمة)."""
         args = []
         if not self.check(T.RPAREN):
-            args.append(self.expression())
+            args.append(self.parse_arg())
             while self.match(T.COMMA):
                 if self.check(T.RPAREN):           # فاصلة أخيرة مسموحة
                     break
-                args.append(self.expression())
+                args.append(self.parse_arg())
         self.expect(T.RPAREN, "متوقع ')' لإغلاق الاستدعاء")
-        return Call(func, args, tok.line)
+        return args
+
+    def parse_arg(self):
+        """معامل استدعاء واحد: تعبير أو اسم = تعبير (معامل بالاسم)."""
+        if (self.check(T.IDENT) and self.peek(1).type is T.ASSIGN):
+            name_tok = self.advance()
+            self.advance()                         # =
+            value = self.expression()
+            return (name_tok.value, value)
+        return (None, self.expression())
 
     def index(self, obj):
         tok = self.advance()                       # [
@@ -413,15 +485,8 @@ class Parser:
         tok = self.advance()                       # .
         name = self.expect_ident("متوقع اسم خاصية أو طريقة بعد '.'")
         if self.check(T.LPAREN):
-            args = []
             self.advance()
-            if not self.check(T.RPAREN):
-                args.append(self.expression())
-                while self.match(T.COMMA):
-                    if self.check(T.RPAREN):
-                        break
-                    args.append(self.expression())
-            self.expect(T.RPAREN, "متوقع ')' لإغلاق الاستدعاء")
+            args = self.parse_call_args()
             return MethodCall(obj, name, args, tok.line)
         return Attribute(obj, name, tok.line)
 
@@ -452,6 +517,8 @@ class Parser:
         if t is T.IDENT:
             self.advance()
             return Name(tok.value, tok.line)
+        if t is T.DEF and self.peek(1).type is T.LPAREN:
+            return self.lambda_expr()
         if t is T.LPAREN:
             self.advance()
             e = self.expression()
@@ -462,6 +529,16 @@ class Parser:
         if t is T.LBRACE:
             return self.dict_literal()
         self.error('متوقع تعبيرًا')
+
+    def lambda_expr(self):
+        """دالة سهمية: دالة(س، ص) => س + ص"""
+        tok = self.advance()                       # دالة
+        params = self.parse_params()
+        self.expect(T.ARROW, "متوقع '=>' بعد معاملات الدالة السهمية")
+        if self.check(T.NEWLINE) or self.check(T.EOF):
+            self.error('جسم الدالة السهمية يجب أن يكون تعبيرًا واحدًا على نفس السطر')
+        body = self.expression()
+        return Lambda(params, body, tok.line)
 
     def list_literal(self):
         tok = self.advance()                       # [

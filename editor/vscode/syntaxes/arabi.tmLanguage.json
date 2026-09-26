@@ -1,0 +1,198 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "عربي",
+  "scopeName": "source.arabi",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#function-def" },
+    { "include": "#class-def" },
+    { "include": "#compound-keywords" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#modules" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.arabi",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.arabi",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.arabi",
+              "match": "\\\\(u[0-9a-fA-F]{4}|[ntr0abf'\"\\\\])"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.arabi",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.arabi",
+              "match": "\\\\(u[0-9a-fA-F]{4}|[ntr0abf'\"\\\\])"
+            }
+          ]
+        }
+      ]
+    },
+    "function-def": {
+      "match": "(?<![\\u0600-\\u06FF\\w])(دالة)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.function.arabi" },
+        "2": { "name": "entity.name.function.arabi" }
+      }
+    },
+    "class-def": {
+      "match": "(?<![\\u0600-\\u06FF\\w])(صنف)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.class.arabi" },
+        "2": { "name": "entity.name.class.arabi" }
+      }
+    },
+    "compound-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.elif.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])وإلا[ \\t]+إذا(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "constant.language.null.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])ولا[ \\t]+شيء(?![\\u0600-\\u06FF\\w])"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.loop.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(طالما|لكل|كسر|استمر)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.control.conditional.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(لو|وإلا|وإلا إذا|أعد)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.control.exception.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(جرب|باستثناء|اخيرا|ارفع)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.other.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(دالة|أعد|في|و|أو|ليس|تجاهل|صنف|هذا|الأصل|من|استورد)(?![\\u0600-\\u06FF\\w])"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(صح|خطأ)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "constant.language.null.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])ولا شيء(?![\\u0600-\\u06FF\\w])"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(اطبع|طول|مدى|إدخال|عدد|عشري|نص|قائمة|قاموس|جمع|أكبر|أصغر|مطلق|تقريب|عشوائي|نوع|رتّب)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "support.function.module.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(جذر|سقف|أرضية|لوغاريتم|جيب|جيب_التام|ظل|زمن|نوم)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "support.constant.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(بي|نيبير)(?![\\u0600-\\u06FF\\w])"
+        }
+      ]
+    },
+    "modules": {
+      "name": "entity.other.module.arabi",
+      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت)(?![\\u0600-\\u06FF\\w])"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])((\\d|[\u0660-\u0669])+(\\.(\\d|[\u0660-\u0669])+)?)((e|E)(\\+|-)?(\\d|[\u0660-\u0669])+)?(?![\\u0600-\\u06FF\\w])"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.augmented.arabi",
+          "match": "(\\+=|-=|\\*=|/=)"
+        },
+        {
+          "name": "keyword.operator.comparison.arabi",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.arrow.arabi",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.arabi",
+          "match": "(\\*\\*|\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.assignment.arabi",
+          "match": "="
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.arabi",
+          "match": "(،|,)"
+        },
+        {
+          "name": "punctuation.separator.colon.arabi",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.arabi",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.bracket.open.arabi",
+          "match": "(\\(|\\[|\\{)"
+        },
+        {
+          "name": "punctuation.bracket.close.arabi",
+          "match": "(\\)|\\]|\\})"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.arabi",
+          "match": "[\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*"
+        }
+      ]
+    }
+  }
+}
