@@ -12,6 +12,7 @@ from . import nodes as N
 from .errors import ArabiRuntimeError
 from .runtime import (
     Env, ArabiFunc, BuiltinFunc, ModuleValue,
+    ClassValue, InstanceValue, BoundMethod,
     typename, display, install_builtins,
     LIST_METHODS, STR_METHODS, DICT_METHODS,
 )
@@ -158,6 +159,48 @@ class Interpreter:
     def exec_FuncDef(self, node, env):
         env.set(node.name, ArabiFunc(node.name, node.params, node.body, env))
 
+    def exec_ClassDef(self, node, env):
+        """تعريف صنف: يجمع الطرق والثوابت ويربط الصنف بأصله إن وجد."""
+        superclass = None
+        if node.superclass is not None:
+            superclass = env.get(node.superclass, node.line)
+            if not isinstance(superclass, ClassValue):
+                raise ArabiRuntimeError(
+                    f"'{node.superclass}' ليس صنفًا — الوراثة تكون من صنف فقط",
+                    node.line)
+            ancestor = superclass
+            while ancestor is not None:
+                if ancestor.name == node.name:
+                    raise ArabiRuntimeError(
+                        f"وراثة دائرية: الصنف '{node.name}' يرث نفسه",
+                        node.line)
+                ancestor = ancestor.superclass
+        members = {}
+        # نطاق الصنف: تُبحث فيه الأسماء داخل الطرق، ويحمل 'الأصل'
+        class_env = Env(env)
+        class_env.define('الأصل', superclass)
+        for stmt in node.body:
+            if isinstance(stmt, N.FuncDef):
+                if stmt.name in members:
+                    raise ArabiRuntimeError(
+                        f"تكرار تعريف الطريقة '{stmt.name}' في الصنف '{node.name}'",
+                        stmt.line)
+                members[stmt.name] = ArabiFunc(
+                    stmt.name, stmt.params, stmt.body, class_env)
+            elif isinstance(stmt, N.Pass):
+                continue                          # جملة تجاهل مسموحة في جسم الصنف
+            elif (isinstance(stmt, N.Assign) and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], N.Name)):
+                name = stmt.targets[0].name
+                value = self.evaluate(stmt.value, env)
+                members[name] = value              # ثابت صنف
+                class_env.define(name, value)
+            else:
+                raise ArabiRuntimeError(
+                    "داخل 'صنف' لا يُسمح إلا بتعريف دوال وثوابت",
+                    stmt.line)
+        env.set(node.name, ClassValue(node.name, superclass, members, class_env))
+
     def exec_Return(self, node, env):
         value = None if node.value is None else self.evaluate(node.value, env)
         raise ReturnSignal(value)
@@ -230,6 +273,29 @@ class Interpreter:
     def eval_Null(self, node, env):
         return None
 
+    def eval_This(self, node, env):
+        scope = env
+        while scope is not None:
+            if 'هذا' in scope.vars:
+                return scope.vars['هذا']
+            scope = scope.parent
+        raise ArabiRuntimeError(
+            "لا يمكن استخدام 'هذا' إلا داخل طرق صنف", node.line)
+
+    def eval_Super(self, node, env):
+        scope = env
+        while scope is not None:
+            if 'الأصل' in scope.vars:
+                value = scope.vars['الأصل']
+                if value is None:
+                    raise ArabiRuntimeError(
+                        "هذا الصنف لا يرث من صنف آخر — لا يوجد 'الأصل'",
+                        node.line)
+                return value
+            scope = scope.parent
+        raise ArabiRuntimeError(
+            "لا يمكن استخدام 'الأصل' إلا داخل جسم صنف", node.line)
+
     def eval_Name(self, node, env):
         return env.get(node.name, node.line)
 
@@ -299,13 +365,35 @@ class Interpreter:
     def eval_MethodCall(self, node, env):
         obj = self.evaluate(node.obj, env)
         args = [self.evaluate(a, env) for a in node.args]
+        name = node.name
+        line = node.line
+        # كائن من صنف معرف من قبل المستخدم
+        if isinstance(obj, InstanceValue):
+            if name in obj.fields:
+                func = obj.fields[name]
+                if isinstance(func, (ArabiFunc, BuiltinFunc)):
+                    return self._call_value(func, args, line)
+                raise ArabiRuntimeError(
+                    f"'{name}' خاصية من نوع {typename(func)} — لا يمكن استدعاؤها كدالة",
+                    line)
+            return self._call_class_method(obj.cls, obj, name, args, line)
+        # استدعاء غير مرتبط من الصنف نفسه: الأصل.إنشاء(هذا، ...)
+        if isinstance(obj, ClassValue):
+            if not args:
+                raise ArabiRuntimeError(
+                    f"استدعاء '{obj.name}.{name}' يحتاج الكائن كأول معامل", line)
+            this_val = args[0]
+            if not isinstance(this_val, InstanceValue):
+                raise ArabiRuntimeError(
+                    f"أول معامل في '{obj.name}.{name}' يجب أن يكون كائنًا", line)
+            return self._call_class_method(obj, this_val, name, args[1:], line)
         if isinstance(obj, ModuleValue):
-            member = obj.members.get(node.name)
+            member = obj.members.get(name)
             if member is None:
                 raise ArabiRuntimeError(
-                    f"الوحدة '{obj.name}' لا تحتوي على '{node.name}'", node.line)
+                    f"الوحدة '{obj.name}' لا تحتوي على '{name}'", line)
             if isinstance(member, BuiltinFunc):
-                return member.fn(args, node.line)
+                return member.fn(args, line)
             return member
         if isinstance(obj, list):
             table = LIST_METHODS
@@ -315,16 +403,33 @@ class Interpreter:
             table = DICT_METHODS
         else:
             raise ArabiRuntimeError(
-                f"النوع '{typename(obj)}' لا يدعم الطرق — لا توجد طريقة اسمها '{node.name}'",
-                node.line)
-        method = table.get(node.name)
+                f"النوع '{typename(obj)}' لا يدعم الطرق — لا توجد طريقة اسمها '{name}'",
+                line)
+        method = table.get(name)
         if method is None:
             raise ArabiRuntimeError(
-                f"لا توجد طريقة اسمها '{node.name}' للنوع {typename(obj)}", node.line)
-        return method(obj, args, node.line)
+                f"لا توجد طريقة اسمها '{name}' للنوع {typename(obj)}", line)
+        return method(obj, args, line)
 
     def eval_Attribute(self, node, env):
         obj = self.evaluate(node.obj, env)
+        if isinstance(obj, InstanceValue):
+            if node.name in obj.fields:
+                return obj.fields[node.name]
+            member, _owner = self._lookup_member(obj.cls, node.name)
+            if member is None:
+                raise ArabiRuntimeError(
+                    f"الكائن من صنف '{obj.cls.name}' لا يحتوي على '{node.name}'",
+                    node.line)
+            if isinstance(member, ArabiFunc):
+                return BoundMethod(obj, member)
+            return member
+        if isinstance(obj, ClassValue):
+            member, _owner = self._lookup_member(obj, node.name)
+            if member is None:
+                raise ArabiRuntimeError(
+                    f"الصنف '{obj.name}' لا يحتوي على '{node.name}'", node.line)
+            return member
         if isinstance(obj, ModuleValue):
             member = obj.members.get(node.name)
             if member is None:
@@ -348,16 +453,24 @@ class Interpreter:
             obj = self.evaluate(target.obj, env)
             index = self.evaluate(target.index, env)
             self._set_index(obj, index, value, target.line)
+        elif isinstance(target, N.Attribute):
+            obj = self.evaluate(target.obj, env)
+            if isinstance(obj, InstanceValue):
+                obj.fields[target.name] = value
+                return
+            if isinstance(obj, ClassValue):
+                raise ArabiRuntimeError(
+                    "لا يمكن تعديل ثوابت الصنف بعد تعريفه", target.line)
+            raise ArabiRuntimeError(
+                f'لا يمكن تعيين خاصية على {typename(obj)}', target.line)
         else:
             raise ArabiRuntimeError('لا يمكن الإسناد إلى هذا التعبير', target.line)
 
     def _read_target(self, target, env):
         if isinstance(target, N.Name):
             return env.get(target.name, target.line)
-        if isinstance(target, N.Index):
-            obj = self.evaluate(target.obj, env)
-            index = self.evaluate(target.index, env)
-            return self._get_index(obj, index, target.line)
+        if isinstance(target, (N.Index, N.Attribute)):
+            return self.evaluate(target, env)
         raise ArabiRuntimeError('تعبير غير صالح للإسناد المركب', target.line)
 
     def _set_index(self, obj, index, value, line):
@@ -423,8 +536,57 @@ class Interpreter:
             return None
         if isinstance(func, BuiltinFunc):
             return func.fn(args, line)
+        # إنشاء كائن: نقطة(٣، ٤)
+        if isinstance(func, ClassValue):
+            instance = InstanceValue(func)
+            ctor, _owner = self._lookup_member(func, 'إنشاء')
+            if isinstance(ctor, ArabiFunc):
+                self._invoke_bound(ctor, instance, args, line)
+            return instance
+        # طريقة مرتبطة كُلّمت لاحقًا: م = ك.طريقة ثم م()
+        if isinstance(func, BoundMethod):
+            return self._invoke_bound(func.func, func.instance, args, line)
         raise ArabiRuntimeError(
             f"'{display(func)}' من نوع {typename(func)} — لا يمكن استدعاؤها كدالة", line)
+
+    # ================== أدوات الأصناف ==================
+
+    def _lookup_member(self, cls, name):
+        """يبحث عن عضو في سلسلة الصنف ويعيد (العضو، الصنف المالك)."""
+        scope = cls
+        while scope is not None:
+            if name in scope.members:
+                return scope.members[name], scope
+            scope = scope.superclass
+        return None, None
+
+    def _invoke_bound(self, func, this_val, args, line):
+        """ينفذ طريقة مع ربط 'هذا' بالكائن الممرر."""
+        if len(args) != len(func.params):
+            raise ArabiRuntimeError(
+                f"الطريقة '{func.name}' تتوقع {len(func.params)} معاملًا "
+                f'لكنها استلمت {len(args)}', line)
+        local = Env(func.env)
+        local.define('هذا', this_val)
+        for param, arg in zip(func.params, args):
+            local.define(param, arg)
+        try:
+            self.exec_statements(func.body, local)
+        except ReturnSignal as signal:
+            return signal.value
+        return None
+
+    def _call_class_method(self, cls, instance, name, args, line):
+        """يبحث عن الطريقة في سلسلة الصنف وينفذها مرتبطة بالكائن."""
+        func, owner = self._lookup_member(cls, name)
+        if func is None:
+            raise ArabiRuntimeError(
+                f"الصنف '{cls.name}' لا يحتوي على طريقة أو خاصية اسمها '{name}'",
+                line)
+        if not isinstance(func, ArabiFunc):
+            raise ArabiRuntimeError(
+                f"'{name}' في الصنف '{owner.name}' ثابت وليس طريقة", line)
+        return self._invoke_bound(func, instance, args, line)
 
     def _binop(self, op, left, right, line):
         if op == '+':

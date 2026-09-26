@@ -34,6 +34,9 @@ class T(Enum):
     RAISE = auto()     # ارفع
     IMPORT = auto()    # استورد
     PASS = auto()      # تجاهل
+    CLASS = auto()     # صنف
+    THIS = auto()      # هذا
+    SUPER = auto()     # الأصل
 
     # ---- معاملات ----
     PLUS = auto()          # +

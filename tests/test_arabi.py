@@ -333,6 +333,206 @@ class TestSyntaxErrors(unittest.TestCase):
         expect_error('لكل أ من [١]:\n    اطبع(أ)', ParseError, 'في')
 
 
+class TestClasses(unittest.TestCase):
+    """اختبارات البرمجة الكائنية: صنف، هذا، الأصل، والوراثة."""
+
+    def test_class_basic(self):
+        src = '''
+صنف نقطة:
+    دالة إنشاء(س، ص):
+        هذا.س = س
+        هذا.ص = ص
+
+    دالة المجموع():
+        أعد هذا.س + هذا.ص
+
+ن = نقطة(٣، ٤)
+اطبع(ن.س)
+اطبع(ن.المجموع())
+'''.strip()
+        self.assertEqual(run_arabi(src), '3\n7\n')
+
+    def test_method_with_params_and_return(self):
+        src = '''
+صنف آلة_حاسبة:
+    دالة إنشاء():
+        هذا.الذاكرة = 0
+
+    دالة أضف(قيمة):
+        هذا.الذاكرة += قيمة
+        أعد هذا.الذاكرة
+
+ح = آلة_حاسبة()
+ح.أضف(٥)
+ح.أضف(١٠)
+اطبع(ح.الذاكرة)
+'''.strip()
+        self.assertEqual(run_arabi(src), '15\n')
+
+    def test_inheritance(self):
+        src = '''
+صنف حيوان:
+    دالة إنشاء(اسم):
+        هذا.اسم = اسم
+
+    دالة صوت():
+        أعد "..."
+
+صنف قطة من حيوان:
+    دالة صوت():
+        أعد "مياو"
+
+ق = قطة("مشمش")
+اطبع(ق.اسم)
+اطبع(ق.صوت())
+'''.strip()
+        self.assertEqual(run_arabi(src), 'مشمش\nمياو\n')
+
+    def test_inherited_methods_visible(self):
+        src = '''
+صنف أساس:
+    دالة تحية():
+        أعد "مرحبا"
+
+صنف فرع من أساس:
+    تجاهل
+
+ف = فرع()
+اطبع(ف.تحية())
+'''.strip()
+        self.assertEqual(run_arabi(src), 'مرحبا\n')
+
+    def test_super_constructor_chain(self):
+        src = '''
+صنف شخص:
+    دالة إنشاء(اسم):
+        هذا.اسم = اسم
+
+    دالة عرض():
+        أعد "شخص: " + هذا.اسم
+
+صنف موظف من شخص:
+    دالة إنشاء(اسم، راتب):
+        الأصل.إنشاء(هذا، اسم)
+        هذا.راتب = راتب
+
+    دالة عرض():
+        أعد الأصل.عرض(هذا) + " — الراتب: " + نص(هذا.راتب)
+
+م = موظف("ليلى"، 9000)
+اطبع(م.عرض())
+'''.strip()
+        self.assertEqual(run_arabi(src), 'شخص: ليلى — الراتب: 9000\n')
+
+    def test_class_constant(self):
+        src = '''
+صنف إعدادات:
+    الحد = 100
+
+اطبع(إعدادات.الحد)
+ك = إعدادات()
+اطبع(ك.الحد)
+'''.strip()
+        self.assertEqual(run_arabi(src), '100\n100\n')
+
+    def test_bound_method_value(self):
+        src = '''
+صنف صندوق:
+    دالة إنشاء(قيمة):
+        هذا.قيمة = قيمة
+
+    دالة اقرأ():
+        أعد هذا.قيمة
+
+ص = صندوق(42)
+م = ص.اقرأ
+اطبع(م())
+'''.strip()
+        self.assertEqual(run_arabi(src), '42\n')
+
+    def test_augassign_on_attribute(self):
+        src = '''
+صنف عداد:
+    دالة إنشاء():
+        هذا.القيمة = 0
+
+ع = عداد()
+ع.القيمة += 5
+ع.القيمة *= 2
+اطبع(ع.القيمة)
+'''.strip()
+        self.assertEqual(run_arabi(src), '10\n')
+
+    def test_instance_identity(self):
+        src = '''
+صنف غلاف:
+    تجاهل
+
+أ = غلاف()
+ب = غلاف()
+اطبع(أ == أ)
+اطبع(أ == ب)
+'''.strip()
+        self.assertEqual(run_arabi(src), 'صح\nخطأ\n')
+
+    def test_missing_member_error(self):
+        expect_error(
+            'صنف أ:\n    تجاهل\nك = أ()\nك.غير_موجود()',
+            ArabiRuntimeError, 'لا يحتوي')
+
+    def test_this_outside_method(self):
+        expect_error('اطبع(هذا.س)', ArabiRuntimeError, 'هذا')
+
+    def test_super_without_parent(self):
+        src = '''
+صنف أ:
+    دالة ف():
+        أعد الأصل
+'''.strip()
+        expect_error(src + '\nك = أ()\nك.ف()', ArabiRuntimeError, 'الأصل')
+
+    def test_duplicate_method(self):
+        src = '''
+صنف أ:
+    دالة ف():
+        أعد 1
+    دالة ف():
+        أعد 2
+'''.strip()
+        expect_error(src, ArabiRuntimeError, 'تكرار تعريف')
+
+    def test_inherit_from_non_class(self):
+        expect_error(
+            'ب = 5\nصنف أ من ب:\n    تجاهل',
+            ArabiRuntimeError, 'ليس صنفًا')
+
+    def test_constant_not_callable(self):
+        expect_error(
+            'صنف أ:\n    ثابت = 7\nك = أ()\nك.ثابت()',
+            ArabiRuntimeError, 'ثابت وليس طريقة')
+
+    def test_illegal_statements_in_class_body(self):
+        expect_error(
+            'صنف أ:\n    اطبع(1)',
+            ArabiRuntimeError, 'لا يُسمح')
+
+    def test_attribute_write_on_non_instance(self):
+        expect_error(
+            'أ = 5\nأ.خاصية = 3',
+            ArabiRuntimeError, 'لا يمكن تعيين خاصية')
+
+    def test_instance_display(self):
+        src = '''
+صنف طالب:
+    دالة إنشاء(اسم):
+        هذا.اسم = اسم
+
+ك = طالب("سارة")
+اطبع(نوع(ك))
+'''.strip()
+        self.assertEqual(run_arabi(src), 'كائن\n')
+
+
 class TestExamples(unittest.TestCase):
 
     EXAMPLES_DIR = os.path.join(ROOT, 'examples')

@@ -39,6 +39,9 @@ KEYWORDS = {
     'ارفع': T.RAISE,
     'استورد': T.IMPORT,
     'تجاهل': T.PASS,
+    'صنف': T.CLASS,
+    'هذا': T.THIS,
+    'الأصل': T.SUPER,
 }
 
 # كلمات مفتاحية مركبة

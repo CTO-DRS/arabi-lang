@@ -113,6 +113,16 @@ class Import(Node):
         self.name = name
 
 
+class ClassDef(Node):
+    """تعريف صنف: صنف الاسم من الأصل: ..."""
+
+    def __init__(self, name, superclass, body, line=None):
+        super().__init__(line)
+        self.name = name
+        self.superclass = superclass      # اسم الصنف الأصل أو None
+        self.body = body                  # [FuncDef | Assign]
+
+
 # ================== تعبيرات (Expressions) ==================
 
 class Num(Node):
@@ -205,9 +215,17 @@ class MethodCall(Node):
 
 
 class Attribute(Node):
-    """وصول لخاصية بدون استدعاء: الوحدة.الثابت"""
+    """وصول لخاصية بدون استدعاء: الوحدة.الثابت أو الكائن.الخاصية"""
 
     def __init__(self, obj, name, line=None):
         super().__init__(line)
         self.obj = obj
         self.name = name
+
+
+class This(Node):
+    """الكلمة المفتاحية 'هذا' — الكائن الحالي داخل طرق الصنف."""
+
+
+class Super(Node):
+    """الكلمة المفتاحية 'الأصل' — الصنف الأب داخل جسم الصنف."""

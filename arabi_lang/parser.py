@@ -8,9 +8,9 @@
 from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
-    Break, Continue, Pass, Try, Raise, Import,
+    Break, Continue, Pass, Try, Raise, Import, ClassDef,
     Num, Str, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
-    Call, Index, Slice, MethodCall, Attribute,
+    Call, Index, Slice, MethodCall, Attribute, This, Super,
 )
 from .errors import ParseError
 
@@ -38,6 +38,7 @@ STMT_KEYWORDS = {
     T.NONE: 'ولا شيء', T.AND: 'و', T.OR: 'أو', T.NOT: 'ليس',
     T.TRY: 'جرب', T.EXCEPT: 'باستثناء', T.FINALLY: 'اخيرا',
     T.RAISE: 'ارفع', T.IMPORT: 'استورد', T.PASS: 'تجاهل',
+    T.CLASS: 'صنف', T.THIS: 'هذا', T.SUPER: 'الأصل',
 }
 
 
@@ -112,7 +113,7 @@ class Parser:
             return stmt
         # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب) تستهلك DEDENT
         # داخل block()، لذا الجملة التالية تبدأ مباشرة
-        if isinstance(stmt, (If, While, For, FuncDef, Try)):
+        if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef)):
             return stmt
         self.error('متوقع نهاية السطر بعد الجملة')
 
@@ -143,6 +144,8 @@ class Parser:
             return self.raise_stmt()
         if t is T.IMPORT:
             return self.import_stmt()
+        if t is T.CLASS:
+            return self.class_def()
         return self.expr_stmt()
 
     def block(self):
@@ -241,6 +244,17 @@ class Parser:
         name = self.expect_ident("متوقع اسم الوحدة بعد 'استورد'")
         return Import(name, tok.line)
 
+    def class_def(self):
+        tok = self.advance()                       # صنف
+        name = self.expect_ident("متوقع اسم الصنف بعد 'صنف'")
+        superclass = None
+        # الوراثة: صنف ابن من أصل — 'من' كلمة سياقية
+        if self.check(T.IDENT) and self.cur().value == 'من':
+            self.advance()
+            superclass = self.expect_ident("متوقع اسم الصنف الأصل بعد 'من'")
+        body = self.block()
+        return ClassDef(name, superclass, body, tok.line)
+
     def expr_stmt(self):
         tok = self.cur()
         first = self.expression()
@@ -252,8 +266,8 @@ class Parser:
         if self.check(T.ASSIGN):
             self.advance()
             for e in exprs:
-                if not isinstance(e, (Name, Index)):
-                    self.error('الجهة اليمين من الإسناد يجب أن تكون اسمًا أو عنصرًا مفهرسًا')
+                if not isinstance(e, (Name, Index, Attribute)):
+                    self.error('الجهة اليمين من الإسناد يجب أن تكون اسمًا أو عنصرًا مفهرسًا أو خاصية')
             values = [self.expression()]
             while self.check(T.COMMA):
                 self.advance()
@@ -269,7 +283,7 @@ class Parser:
             return Assign(exprs, value, tok.line)
 
         if self.cur().type in AUG_OPS:
-            if len(exprs) != 1 or not isinstance(exprs[0], (Name, Index)):
+            if len(exprs) != 1 or not isinstance(exprs[0], (Name, Index, Attribute)):
                 self.error('الإسناد المركب يحتاج متغيرًا واحدًا على اليمين')
             op = AUG_OPS[self.advance().type]
             value = self.expression()
@@ -429,6 +443,12 @@ class Parser:
         if t is T.NONE:
             self.advance()
             return Null(tok.line)
+        if t is T.THIS:
+            self.advance()
+            return This(tok.line)
+        if t is T.SUPER:
+            self.advance()
+            return Super(tok.line)
         if t is T.IDENT:
             self.advance()
             return Name(tok.value, tok.line)

@@ -85,6 +85,41 @@ class ModuleValue:
         self.members = members
 
 
+class ClassValue:
+    """صنف معرّف من قبل المستخدم — قالب لإنشاء الكائنات.
+
+    members يجمع الطرق (ArabiFunc) وثوابت الصنف.
+    """
+
+    __slots__ = ('name', 'superclass', 'members', 'env')
+
+    def __init__(self, name, superclass, members, env):
+        self.name = name
+        self.superclass = superclass      # ClassValue أو None
+        self.members = members
+        self.env = env
+
+
+class InstanceValue:
+    """كائن (نموذج) منشأ من صنف — يحمل حقوله الخاصة."""
+
+    __slots__ = ('cls', 'fields')
+
+    def __init__(self, cls):
+        self.cls = cls
+        self.fields = {}
+
+
+class BoundMethod:
+    """طريقة مرتبطة بكائن — جاهزة للاستدعاء لاحقًا."""
+
+    __slots__ = ('instance', 'func')
+
+    def __init__(self, instance, func):
+        self.instance = instance
+        self.func = func
+
+
 def typename(v):
     if v is None:
         return 'ولا شيء'
@@ -106,6 +141,12 @@ def typename(v):
         return 'دالة'
     if isinstance(v, ModuleValue):
         return 'وحدة'
+    if isinstance(v, ClassValue):
+        return 'صنف'
+    if isinstance(v, InstanceValue):
+        return 'كائن'
+    if isinstance(v, BoundMethod):
+        return 'طريقة'
     return type(v).__name__
 
 
@@ -130,6 +171,12 @@ def display(v):
         return f'<دالة جاهزة {v.name}>'
     if isinstance(v, ModuleValue):
         return f'<وحدة {v.name}>'
+    if isinstance(v, ClassValue):
+        return f'<صنف {v.name}>'
+    if isinstance(v, InstanceValue):
+        return f'<كائن من صنف {v.cls.name}>'
+    if isinstance(v, BoundMethod):
+        return f'<طريقة {v.func.name}>'
     return str(v)
 
 
