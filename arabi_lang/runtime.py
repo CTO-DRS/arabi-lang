@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import pickle
 import queue
 import re
 import sqlite3
@@ -600,6 +601,206 @@ class PoolValue:
         return job
 
 
+class ProcessValue:
+    """عملية منفصلة من وحدة 'عمليات' (الإصدار 1.17) — نتاج عمليات.شغّل.
+
+    العمل تعمل في معالج مستقل بذاكرة معزولة تمامًا فيتجاوز قفل
+    التفسير العالمي، والنتيجة تعود مرمزة عبر أنبوب (Pipe).
+    - 'انتظر عملية' يوقف السطر حتى تنتهي ويعيد نتيجتها (أو يرفع خطأها).
+    - جاهز() فحص فوري، الخطأ() رسالة الفشل أو 'ولا شيء'، انتظر()
+      انتظار بلا نتيجة، ومعرف() معرف العملية في نظام التشغيل.
+    """
+
+    __slots__ = ('process', 'conn', '_root', '_received', '_outcome')
+
+    def __init__(self, process, conn, root):
+        self.process = process
+        self.conn = conn
+        self._root = root               # جذر الأب لفك ترميز النتيجة
+        self._received = False
+        self._outcome = None
+
+    def _receive(self, line=None):
+        """يستلم النتيجة مرة واحدة (وخزّنها) — ('نهاية'|'خطأ'|'عطل'، بيانات)."""
+        if self._received:
+            return self._outcome
+        if not self.conn.poll(PROCESS_TIMEOUT):
+            raise ArabiRuntimeError(
+                'انتهت مهلة انتظار العملية المنفصلة دون نتيجة — '
+                'ربما علقت في عمل طويل جدًا', line)
+        try:
+            kind, blob = self.conn.recv()
+        except (EOFError, OSError):
+            raise ArabiRuntimeError(
+                'انتهت العملية المنفصلة فجأة دون أن ترسل نتيجة', line)
+        self.process.join()
+        self._received = True
+        self._outcome = (kind, blob)
+        return self._outcome
+
+    def result(self, line=None):
+        """ينتظر انتهاء العملية ويعيد نتيجتها المفكوكة — أو يرفع خطأها."""
+        from .processes import decode_value
+        kind, blob = self._receive(line)
+        if kind == 'نهاية':
+            return decode_value(pickle.loads(blob),
+                                {'root': self._root, 'raw': None,
+                                 'memo': {}})
+        if kind == 'خطأ':
+            from .processes import _error_from_record
+            raise _error_from_record(pickle.loads(blob), self._root)
+        raise ArabiRuntimeError(pickle.loads(blob), line)
+
+    def join(self, line=None):
+        """ينتظر انتهاء العملية دون إعادة النتيجة (يبتلع الخطأ)."""
+        try:
+            self._receive(line)
+        except ArabiError:
+            pass
+
+    def ready(self):
+        """هل انتهت العملية؟ فحص فوري دون انتظار."""
+        if self._received:
+            return True
+        try:
+            return self.conn.poll(0)
+        except (EOFError, OSError):
+            return True
+
+    def pid(self):
+        """معرف العملية في نظام التشغيل (قبل الإطلاق: ولا شيء)."""
+        return self.process.pid
+
+
+class ProcessTaskValue:
+    """مهمة عملية — نتاج قدّم على تجمع العمليات (الإصدار 1.17).
+
+    الواجهة نفسها لمهام الخيوط: نتيجة/الخطأ/جاهز/انتظر — فتعمل مع
+    'انتظر' و'انتظر_الجميع' و'سباق' دون أي فرق في الاستخدام.
+    """
+
+    __slots__ = ('_event', '_lock', '_done', '_error', '_result')
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._done = False
+        self._error = None
+        self._result = None
+
+    def _finish(self, result, error):
+        """يسجل النتيجة أو الخطأ مرة واحدة ويوقظ كل المنتظرين."""
+        with self._lock:
+            if self._done:
+                return
+            self._result = result
+            self._error = error
+            self._done = True
+        self._event.set()
+
+    def result(self, line=None):
+        """ينتظر انتهاء المهمة ويعيد نتيجتها — يعيد رفع خطأها إن فشلت."""
+        self._event.wait()
+        if self._error is not None:
+            self._error.line = self._error.line or line
+            raise self._error
+        return self._result
+
+    def error(self):
+        """ينتظر الانتهاء ويعيد رسالة الخطأ أو 'ولا شيء' إذا نجحت."""
+        self._event.wait()
+        return self._error.message if self._error is not None else None
+
+    def ready(self):
+        """هل انتهت المهمة؟ فحص فوري دون انتظار."""
+        return self._done
+
+
+class ProcessPoolValue:
+    """تجمع عمليات محدود الحجم (الإصدار 1.17) — نتاج عمليات.تجمع(عدد).
+
+    عدد ثابت من العمليات العاملة يُعاد استخدامه لكل المهام المقدَّمة
+    بـ 'قدّم' — كل عملية بمفسّرها المعزول، والنتائج تعود مرمزة عبر
+    طابور مرقّم يوزعه خيط مستقبِل في الأب على مهامها.
+    - قدّم(دالة، معاملات...) تعيد مهمة عملية تنتظرها بـ 'انتظر'.
+    - إنهاء() توقف قبول مهام جديدة وتنتظر تصفية الجاري منها.
+    - حجم() تعيد عدد العمليات العاملة.
+    """
+
+    __slots__ = ('size', '_root', '_ctx', '_job_q', '_result_q', '_procs',
+                 '_closed', '_lock', '_next_id', '_tasks', '_dispatcher')
+
+    def __init__(self, size, ctx, root):
+        self.size = size
+        self._root = root
+        self._ctx = ctx
+        self._job_q = ctx.Queue()
+        self._result_q = ctx.Queue()
+        self._procs = []
+        self._closed = False
+        self._lock = threading.Lock()
+        self._next_id = 0
+        self._tasks = {}
+        for i in range(size):
+            p = ctx.Process(target=_pool_worker_target,
+                            args=(self._job_q, self._result_q),
+                            daemon=True, name=f'تجمع-عمليات-عربي-{i + 1}')
+            p.start()
+            self._procs.append(p)
+        self._dispatcher = threading.Thread(target=self._dispatch,
+                                            daemon=True,
+                                            name='موزع-تجمع-العمليات')
+        self._dispatcher.start()
+
+    def _dispatch(self):
+        """حلقة الموزع في الأب: يسلم كل نتيجة واصلة لمهمتها بالرقم."""
+        while True:
+            item = self._result_q.get()
+            if item is None:            # إشارة إيقاف بعد إنهاء التجمع
+                break
+            job_id, kind, blob = item
+            with self._lock:
+                task = self._tasks.pop(job_id, None)
+            if task is None:
+                continue
+            try:
+                if kind == 'نهاية':
+                    from .processes import decode_value
+                    value = decode_value(
+                        pickle.loads(blob),
+                        {'root': self._root, 'raw': None, 'memo': {}})
+                    task._finish(value, None)
+                elif kind == 'خطأ':
+                    from .processes import _error_from_record
+                    task._finish(None, _error_from_record(
+                        pickle.loads(blob), self._root))
+                else:
+                    task._finish(None, ArabiRuntimeError(
+                        pickle.loads(blob)))
+            except Exception as exc:    # فشل فك الترميز نفسه — لا صمت
+                task._finish(None, ArabiRuntimeError(
+                    f'تعذر فك نتيجة العملية: {exc}'))
+
+    def shutdown(self, line=None):
+        """يغلق التجمع: لا مهام جديدة، والعمليات تخرج بعد تصفية الجاري."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            for _ in self._procs:
+                self._job_q.put(None)   # إشارة إنهاء لكل عملية عاملة
+        for p in self._procs:
+            p.join()
+        self._result_q.put(None)        # أوقف الموزع بعد تصفية النتائج
+        self._dispatcher.join()
+
+
+def _pool_worker_target(job_q, result_q):
+    """غلاف مستوى الوحدة لنقطة دخول العامل — يستوردها التنقيط بالاسم."""
+    from .processes import _pool_worker
+    _pool_worker(job_q, result_q)
+
+
 class DateValue:
     """قيمة تاريخ ووقت — تغلف datetime.datetime (الإصدار 1.9)."""
 
@@ -616,6 +817,11 @@ LOCK_METHODS = {}     # تُملأ بعد تعريف طرق القفل
 QUEUE_METHODS = {}    # تُملأ بعد تعريف طرق الطابور
 TASK_METHODS = {}     # تُملأ بعد تعريف طرق المهام غير المتزامنة (1.15)
 POOL_METHODS = {}     # تُملأ بعد تعريف طرق تجمع الخيوط (1.16)
+PROCESS_METHODS = {}  # تُملأ بعد تعريف طرق العمليات المنفصلة (1.17)
+PROCESS_TASK_METHODS = {}  # تُملأ بعد تعريف طرق مهام العمليات (1.17)
+PROCESS_POOL_METHODS = {}  # تُملأ بعد تعريف طرق تجمع العمليات (1.17)
+
+PROCESS_TIMEOUT = 120  # مهلة انتظار نتيجة العملية الواحدة (ثوانٍ)
 
 
 def typename(v):
@@ -635,6 +841,12 @@ def typename(v):
         return 'قاموس'
     if isinstance(v, range):
         return 'مدى'
+    if isinstance(v, ProcessValue):
+        return 'عملية'
+    if isinstance(v, ProcessTaskValue):
+        return 'مهمة عملية'
+    if isinstance(v, ProcessPoolValue):
+        return 'تجمع عمليات'
     if isinstance(v, (ArabiFunc, BuiltinFunc)):
         if isinstance(v, ArabiFunc) and v.is_async:
             return 'دالة غير متزامنة'
@@ -1328,6 +1540,19 @@ def install_builtins(env):
         'قفل': BuiltinFunc('قفل', _thr_lock),
         'طابور': BuiltinFunc('طابور', _thr_queue),
         'معالجات': BuiltinFunc('معالجات', _thr_cpu_count),
+    }))
+
+    # ============ وحدة العمليات (الإصدار 1.17) ============
+    # الاستيراد هنا (وليس أعلى الملف) تفاديًا للدورانية — processes
+    # يستورد أسماء القيم من runtime، وهو مكتمل قبل أي استدعاء لهذه الدالة.
+
+    from .processes import (_proc_spawn, _ppool_create,
+                            _proc_cpu_count, _proc_pid)
+    env.define('عمليات', ModuleValue('عمليات', {
+        'شغّل': BuiltinFunc('شغّل', _proc_spawn, takes_interp=True),
+        'تجمع': BuiltinFunc('تجمع', _ppool_create, takes_interp=True),
+        'معالجات': BuiltinFunc('معالجات', _proc_cpu_count),
+        'معرفي': BuiltinFunc('معرفي', _proc_pid),
     }))
 
     # ============ وحدة التواريخ (الإصدار 1.9) ============
@@ -2143,15 +2368,21 @@ def _net_download(args, line):
 # ================== المهام غير المتزامنة (الإصدار 1.15) ==================
 
 def _task_list(args, name, line):
-    """يتحقق من معامل قائمة مهام لـ انتظر_الجميع/سباق ويعيدها."""
+    """يتحقق من معامل قائمة مهام لـ انتظر_الجميع/سباق ويعيدها.
+
+    المهام نتاج دوال غير متزامنة أو قدّم على تجمع الخيوط أو تجمع
+    العمليات (1.17) — الثلاثة بواجهة واحدة.
+    """
+    from .processes import ProcessTaskValue
     if len(args) != 1 or not isinstance(args[0], list):
         raise ArabiRuntimeError(
             f"'{name}' تحتاج قائمة مهام — مثال: {name}([م١، م٢])", line)
     for i, t in enumerate(args[0]):
-        if not isinstance(t, TaskValue):
+        if not isinstance(t, (TaskValue, ProcessTaskValue)):
             raise ArabiRuntimeError(
                 f'العنصر رقم {i + 1} ليس مهمة بل {typename(t)} — '
-                'المهام نتاج استدعاء دوال غير متزامنة', line)
+                'المهام نتاج استدعاء دوال غير متزامنة أو قدّم على تجمع',
+                line)
     return args[0]
 
 
@@ -2361,6 +2592,110 @@ def _pool_size(obj, args, line):
 POOL_METHODS.update({
     'إنهاء': _pool_shutdown,
     'حجم': _pool_size,
+})
+
+
+# ================== طرق العمليات المنفصلة (الإصدار 1.17) ==================
+
+def _proc_result(obj, args, line):
+    """عملية.نتيجة() — ينتظر الانتهاء ويعيد النتيجة (أو يرفع الخطأ)."""
+    _require_args('نتيجة', args, 0, 0, line)
+    return obj.result(line)
+
+
+def _proc_ready(obj, args, line):
+    """عملية.جاهز() — هل انتهت العملية؟ فحص فوري بلا انتظار."""
+    _require_args('جاهز', args, 0, 0, line)
+    return obj.ready()
+
+
+def _proc_wait(obj, args, line):
+    """عملية.انتظر() — ينتظر انتهاء العملية دون إعادة النتيجة."""
+    _require_args('انتظر', args, 0, 0, line)
+    try:
+        obj.result(line)
+    except ArabiError:
+        pass                    # يبتلع الخطأ — النتيجة أو الخطأ يجدها صاحبها
+    return None
+
+
+def _proc_pid(obj, args, line):
+    """عملية.معرف() — معرف العملية في نظام التشغيل."""
+    _require_args('معرف', args, 0, 0, line)
+    return obj.pid()
+
+
+def _proc_error_method(obj, args, line):
+    """عملية.الخطأ() — ينتظر الانتهاء ويعيد رسالة الخطأ أو 'ولا شيء'."""
+    _require_args('الخطأ', args, 0, 0, line)
+    try:
+        obj.result(line)
+    except ArabiError as exc:
+        return exc.message
+    return None
+
+
+PROCESS_METHODS.update({
+    'نتيجة': _proc_result,
+    'الخطأ': _proc_error_method,
+    'جاهز': _proc_ready,
+    'انتظر': _proc_wait,
+    'معرف': _proc_pid,
+})
+
+
+def _ptask_result(obj, args, line):
+    """مهمة العملية.نتيجة() — ينتظر ويعيد النتيجة (أو يرفع الخطأ)."""
+    _require_args('نتيجة', args, 0, 0, line)
+    return obj.result(line)
+
+
+def _ptask_error(obj, args, line):
+    """مهمة العملية.الخطأ() — ينتظر ويعيد رسالة الخطأ أو 'ولا شيء'."""
+    _require_args('الخطأ', args, 0, 0, line)
+    return obj.error()
+
+
+def _ptask_ready(obj, args, line):
+    """مهمة العملية.جاهز() — فحص فوري بلا انتظار."""
+    _require_args('جاهز', args, 0, 0, line)
+    return obj.ready()
+
+
+def _ptask_wait(obj, args, line):
+    """مهمة العملية.انتظر() — انتظار بلا إعادة النتيجة."""
+    _require_args('انتظر', args, 0, 0, line)
+    try:
+        obj.result(line)
+    except ArabiError:
+        pass
+    return None
+
+
+PROCESS_TASK_METHODS.update({
+    'نتيجة': _ptask_result,
+    'الخطأ': _ptask_error,
+    'جاهز': _ptask_ready,
+    'انتظر': _ptask_wait,
+})
+
+
+def _ppool_shutdown(obj, args, line):
+    """تجمع العمليات.إنهاء() — يغلق التجمع وينتظر تصفية الجاري منه."""
+    _require_args('إنهاء', args, 0, 0, line)
+    obj.shutdown(line)
+    return None
+
+
+def _ppool_size(obj, args, line):
+    """تجمع العمليات.حجم() — عدد العمليات العاملة."""
+    _require_args('حجم', args, 0, 0, line)
+    return obj.size
+
+
+PROCESS_POOL_METHODS.update({
+    'إنهاء': _ppool_shutdown,
+    'حجم': _ppool_size,
 })
 
 

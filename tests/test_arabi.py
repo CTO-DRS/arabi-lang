@@ -4669,7 +4669,8 @@ class TestStatisticsModule(unittest.TestCase):
     def test_builtin_module_count(self):
         from arabi_lang.interpreter import BUILTIN_MODULES
         self.assertIn('إحصاء', BUILTIN_MODULES)
-        self.assertEqual(len(BUILTIN_MODULES), 17)
+        self.assertIn('عمليات', BUILTIN_MODULES)
+        self.assertEqual(len(BUILTIN_MODULES), 18)
 
 
 
@@ -7868,6 +7869,446 @@ class TestReleaseWorkflow(unittest.TestCase):
         with open(path, encoding='utf-8') as f:
             content = f.read()
         self.assertIn('unittest discover', content)
+
+
+class TestProcessCodec(unittest.TestCase):
+    """ترميز القيم وفكها بين العمليات (1.17) — بلا عمليات حقيقية."""
+
+    def _transfer(self, source, target):
+        """يرمز متغيرًا عالميًا من مفسّر برنامج ويفكه في مفسّر جديد —
+        محاكاة كاملة لرحلة القيمة إلى العملية الابنة وعودتها."""
+        from arabi_lang.processes import (encode_value, decode_value,
+                                          _make_enc_ctx, _encode_root)
+        interp = Interpreter()
+        interp.run(Parser(Lexer(source).tokenize()).parse())
+        root = interp.globals
+        value = root.get(target) if isinstance(target, str) else target
+        enc_ctx = _make_enc_ctx(root)
+        enc = encode_value(value, enc_ctx, None)
+        raw = _encode_root(root, enc_ctx)
+        fresh = Interpreter()
+        ctx = {'root': fresh.globals, 'raw': raw, 'memo': {}}
+        for n, e in raw.items():
+            fresh.globals.define(n, decode_value(e, ctx))
+        return fresh, decode_value(enc, ctx)
+
+    def test_primitives_roundtrip(self):
+        _, v = self._transfer('س = ١', [42, 'نص', 3.5, True, None, False])
+        self.assertEqual(v, [42, 'نص', 3.5, True, None, False])
+
+    def test_collections_roundtrip(self):
+        _, v = self._transfer(
+            'س = ١', {'قائمة': [1, [2, {'عمق': 'ثلاث'}]], 'فارغ': {}})
+        self.assertEqual(v, {'قائمة': [1, [2, {'عمق': 'ثلاث'}]], 'فارغ': {}})
+        self.assertIsInstance(v['فارغ'], dict)
+
+    def test_dict_marker_keys_are_safe(self):
+        # قاموس مستخدم بمفاتيح تشبه العلامات الداخلية يعود قاموسًا عاديًا
+        _, v = self._transfer('س = ١', {'__دالة__': 'وهمي', '__كائن__': 2})
+        self.assertEqual(v, {'__دالة__': 'وهمي', '__كائن__': 2})
+        self.assertNotIsInstance(v, list)
+
+    def test_range_roundtrip(self):
+        _, v = self._transfer('س = ١', range(2, 10, 3))
+        self.assertEqual(list(v), [2, 5, 8])
+
+    def test_function_defaults_and_rest_preserved(self):
+        src = ('دالة تج(أ، ب = ٥، ...البقية):\n'
+               '    أعد [أ، ب، البقية]\n')
+        fresh, f = self._transfer(src, 'تج')
+        result = fresh._call_value(f, [10], {}, None)
+        self.assertEqual(result, [10, 5, []])
+        result = fresh._call_value(f, [1, 2, 3, 4], {}, None)
+        self.assertEqual(result, [1, 2, [3, 4]])
+        # المعامل الإجباري ما زال إجباريًا بعد النقل
+        with self.assertRaises(ArabiRuntimeError):
+            fresh._call_value(f, [], {}, None)
+
+    def test_closure_roundtrip(self):
+        src = ('دالة المُصنع(المعامل):\n'
+               '    دالة الداخلية(س):\n'
+               '        أعد س * المعامل\n'
+               '    أعد الداخلية\n'
+               'ثلاثية = المُصنع(٣)\n')
+        fresh, three = self._transfer(src, 'ثلاثية')
+        # الإغلاق (المعامل = ٣) انتقل مع الدالة
+        self.assertEqual(fresh._call_value(three, [5], {}, None), 15)
+
+    def test_recursive_global_function(self):
+        src = ('دالة مضروب(ن):\n'
+               '    لو ن <= ١:\n'
+               '        أعد ١\n'
+               '    أعد ن * مضروب(ن - ١)\n')
+        fresh, f = self._transfer(src, 'مضروب')
+        # التعاود عبر الاسم العالمي يعمل في المفسّر المستقبِل
+        self.assertEqual(fresh._call_value(f, [6], {}, None), 720)
+
+    def test_class_and_instance_roundtrip(self):
+        src = ('صنف نقطة:\n'
+               '    دالة إنشاء(س، ص):\n'
+               '        هذا.س = س\n'
+               '        هذا.ص = ص\n'
+               '    دالة مجموع_إحداثيات():\n'
+               '        أعد هذا.س + هذا.ص\n'
+               'ك = نقطة(٣، ٤)\n')
+        fresh, inst = self._transfer(src, 'ك')
+        self.assertEqual(inst.cls.name, 'نقطة')
+        self.assertEqual(inst.fields, {'س': 3, 'ص': 4})
+        # الطريقة تعمل على الكائن المعاد بناؤه
+        self.assertEqual(
+            fresh._invoke_bound(inst.cls.members['مجموع_إحداثيات'],
+                                inst, [], {}, None), 7)
+        # وإنشاء كائن جديد من الصنف المنقول ممكن
+        fresh_inst = fresh._call_value(fresh.globals.get('نقطة'),
+                                       [10, 20], {}, None)
+        self.assertEqual(fresh_inst.fields['ص'], 20)
+
+    def test_inherited_error_class_roundtrip(self):
+        src = ('صنف خطأ_دفع من استثناء:\n'
+               '    تجاهل\n'
+               'ك = خطأ_دفع("الرصيد غير كافٍ")\n')
+        fresh, inst = self._transfer(src, 'ك')
+        self.assertEqual(inst.cls.name, 'خطأ_دفع')
+        self.assertEqual(inst.fields['رسالة'], 'الرصيد غير كافٍ')
+        # سلسلة الأصل وصلت لصنف استثناء في المفسّر المستقبِل نفسه
+        from arabi_lang.processes import _is_error_class
+        self.assertTrue(_is_error_class(inst.cls))
+        self.assertIs(inst.cls.superclass, fresh.error_class)
+
+    def test_enum_roundtrip(self):
+        src = ('تعداد لون:\n'
+               '    أحمر\n'
+               '    أخضر\n'
+               'ث = لون.أخضر\n')
+        fresh, member = self._transfer(src, 'ث')
+        self.assertEqual((member.enum_name, member.name), ('لون', 'أخضر'))
+        self.assertEqual(member, fresh.globals.get('لون').members['أخضر'])
+
+    def test_builtin_by_module_location(self):
+        src = 'من عمليات استورد شغّل\n'
+        interp = Interpreter()
+        interp.run(Parser(Lexer(src).tokenize()).parse())
+        from arabi_lang.processes import _make_enc_ctx, encode_value
+        enc = encode_value(interp.globals.get('شغّل'),
+                           _make_enc_ctx(interp.globals))
+        self.assertEqual(enc, {'__جاهزة__': ['عمليات', 'شغّل']})
+
+    def test_live_value_rejected_as_argument(self):
+        from arabi_lang.processes import encode_value, _make_enc_ctx
+        interp = Interpreter()
+        interp.run(Parser(Lexer('س = ١').tokenize()).parse())
+        from arabi_lang.runtime import ThreadValue
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            encode_value(ThreadValue(), _make_enc_ctx(interp.globals))
+        self.assertIn('عملية منفصلة', str(caught.exception))
+
+    def test_bound_method_roundtrip(self):
+        src = ('صنف عداد:\n'
+               '    دالة إنشاء(بداية):\n'
+               '        هذا.قيمة = بداية\n'
+               '    دالة زد(مقدار):\n'
+               '        هذا.قيمة = هذا.قيمة + مقدار\n'
+               '        أعد هذا.قيمة\n'
+               'ع = عداد(١٠)\n'
+               'ط = ع.زد\n')
+        fresh, bound = self._transfer(src, 'ط')
+        from arabi_lang.runtime import BoundMethod
+        self.assertIsInstance(bound, BoundMethod)
+        self.assertEqual(fresh._call_value(bound, [5], {}, None), 15)
+
+    def test_error_record_rebuilds_identity(self):
+        from arabi_lang.processes import _encode_error, _error_from_record
+        src = ('صنف خطأ_شبكة من استثناء:\n'
+               '    تجاهل\n'
+               'ارفع خطأ_شبكة("انقطع الاتصال")\n')
+        try:
+            run_code(src)
+        except ArabiRuntimeError as exc:
+            user_err = exc
+        rec = _encode_error(user_err)
+        self.assertEqual(rec['صنف'], 'خطأ_شبكة')
+        interp = Interpreter()
+        interp.run(Parser(Lexer('صنف خطأ_شبكة من استثناء:\n    تجاهل\n')
+                          .tokenize()).parse())
+        rebuilt = _error_from_record(rec, interp.globals)
+        self.assertIsInstance(rebuilt, ArabiRuntimeError)
+        self.assertEqual(rebuilt.instance.cls.name, 'خطأ_شبكة')
+        self.assertEqual(rebuilt.instance.fields['رسالة'],
+                         'انقطع الاتصال')
+
+
+class TestProcessSpawn(unittest.TestCase):
+    """عمليات.شغّل — عمليات منفصلة حقيقية عبر multiprocessing."""
+
+    def _run(self, source):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            Interpreter().run(
+                Parser(Lexer(source).tokenize()).parse())
+        return out.getvalue()
+
+    def test_spawn_and_await_result(self):
+        src = ('من عمليات استورد شغّل\n'
+               'دالة مربع(ن):\n'
+               '    أعد ن * ن\n'
+               'ع = شغّل(مربع، ١٢)\n'
+               'اطبع(انتظر ع)\n')
+        self.assertEqual(self._run(src), '144\n')
+
+    def test_spawn_collections_cross_boundary(self):
+        src = ('من عمليات استورد شغّل\n'
+               'دالة لخّص(ق):\n'
+               '    أعد {"المجموع": ق[٠] + ق[١]، "الاسم": ق[٢]}\n'
+               'ع = شغّل(لخّص، [١٠، ٣٢، "مبيعات"])\n'
+               'ن = انتظر ع\n'
+               'اطبع(ن["الاسم"] + ": " + نص(ن["المجموع"]))\n')
+        self.assertEqual(self._run(src), 'مبيعات: 42\n')
+
+    def test_spawn_recursive_global_function(self):
+        src = ('من عمليات استورد شغّل\n'
+               'دالة مضروب(ن):\n'
+               '    لو ن <= ١:\n'
+               '        أعد ١\n'
+               '    أعد ن * مضروب(ن - ١)\n'
+               'اطبع(انتظر شغّل(مضروب، ١٥))\n')
+        self.assertEqual(self._run(src), '1307674368000\n')
+
+    def test_spawn_methods(self):
+        src = ('من عمليات استورد شغّل\n'
+               'دالة ضعف(ن):\n'
+               '    أعد ن * ٢\n'
+               'ع = شغّل(ضعف، ٢١)\n'
+               'اطبع(ع.نتيجة())\n'
+               'اطبع(ع.الخطأ())\n'
+               'اطبع(ع.جاهز())\n'
+               'ع.انتظر()\n'
+               'اطبع(ع.معرف() > ٠)\n')
+        self.assertEqual(self._run(src),
+                         '42\nولا شيء\nصح\nصح\n')
+
+    def test_spawn_pid_differs_from_parent(self):
+        src = ('من عمليات استورد شغّل، معرفي\n'
+               'دالة معرفي_ابن():\n'
+               '    أعد معرفي()\n'
+               'اطبع(معرفي() != انتظر شغّل(معرفي_ابن))\n')
+        self.assertEqual(self._run(src), 'صح\n')
+
+    def test_spawn_error_message_and_line(self):
+        src = ('من عمليات استورد شغّل\n'
+               'دالة انقسام(ن):\n'
+               '    أعد ن / ٠\n'
+               'ع = شغّل(انقسام، ٥)\n'
+               'انتظر ع\n')
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._run(src)
+        text = str(caught.exception)
+        self.assertIn('صفر', text)
+        self.assertIn('السطر 3', text)      # سطر الخطأ في الابن محفوظ
+
+    def test_spawn_custom_error_identity(self):
+        src = ('من عمليات استورد شغّل\n'
+               'صنف خطأ_حساب من استثناء:\n'
+               '    تجاهل\n'
+               'دالة قسمة(أ، ب):\n'
+               '    لو ب == ٠:\n'
+               '        ارفع خطأ_حساب("القسمة على صفر ممنوعة")\n'
+               '    أعد أ / ب\n'
+               'جرب:\n'
+               '    انتظر شغّل(قسمة، ١٠، ٠)\n'
+               'باستثناء هـ:\n'
+               '    اطبع("التُقطت: " + هـ.رسالة)\n')
+        self.assertEqual(self._run(src),
+                         'التُقطت: القسمة على صفر ممنوعة\n')
+
+    def test_spawn_instance_return(self):
+        src = ('من عمليات استورد شغّل\n'
+               'صنف نتيجة:\n'
+               '    دالة إنشاء(الاسم، القيمة):\n'
+               '        هذا.الاسم = الاسم\n'
+               '        هذا.القيمة = القيمة\n'
+               '    دالة عرض():\n'
+               '        أعد هذا.الاسم + "=" + نص(هذا.القيمة)\n'
+               'دالة احسب(ن):\n'
+               '    أعد نتيجة("مجموع"، ن * (ن + 1) / 2)\n'
+               'ك = انتظر شغّل(احسب، ١٠٠)\n'
+               'اطبع(ك.عرض())\n')
+        self.assertEqual(self._run(src), 'مجموع=5050\n')
+
+    def test_spawn_async_function_wrapped(self):
+        src = ('من عمليات استورد شغّل\n'
+               'غير متزامنة دالة بطيئة(س):\n'
+               '    انتظر_زمن(٠.٠١)\n'
+               '    أعد س * ٢\n'
+               'اطبع(انتظر شغّل(بطيئة، ٢١))\n')
+        self.assertEqual(self._run(src), '42\n')
+
+    def test_spawn_rejections(self):
+        self.assertIn('دالة أو صنفًا',
+                      str(expect_error(
+                          'من عمليات استورد شغّل\nشغّل(٥)',
+                          ArabiRuntimeError, 'دالة أو صنفًا')))
+        self.assertIn('مولدات',
+                      str(expect_error(
+                          'من عمليات استورد شغّل\n'
+                          'دالة مولّد(ن):\n'
+                          '    أنتج ن\n'
+                          'شغّل(مولّد، ١)',
+                          ArabiRuntimeError, 'مولدات')))
+
+    def test_vm_ast_equivalence(self):
+        src = ('من عمليات استورد شغّل، تجمع\n'
+               'دالة مجموع_مربعات(ن):\n'
+               '    م = ٠\n'
+               '    لكل س في مدى(ن):\n'
+               '        م = م + س * س\n'
+               '    أعد م\n'
+               'اطبع(انتظر شغّل(مجموع_مربعات، ١٠٠٠))\n'
+               'تج = تجمع(٢)\n'
+               'م1 = تج.قدّم(مجموع_مربعات، ٥٠)\n'
+               'م2 = تج.قدّم(مجموع_مربعات، ١٠٠)\n'
+               'اطبع(انتظر_الجميع([م1، م2]))\n'
+               'تج.إنهاء()\n')
+        outs = []
+        for use_vm in (True, False):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                Interpreter(use_vm=use_vm).run(
+                    Parser(Lexer(src).tokenize()).parse())
+            outs.append(out.getvalue())
+        self.assertEqual(outs[0], outs[1])
+        self.assertIn('332833500', outs[0].split('\n')[0])
+
+
+class TestProcessPool(unittest.TestCase):
+    """عمليات.تجمع — تجمع عمليات محدود الحجم."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.interp = Interpreter()
+        from arabi_lang.processes import _ppool_create
+        cls.pool = _ppool_create(cls.interp, [2], None)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.pool.shutdown()
+
+    def test_create_and_size(self):
+        self.assertEqual(self.pool.size, 2)
+        from arabi_lang.runtime import PROCESS_POOL_METHODS
+        self.assertEqual(PROCESS_POOL_METHODS['حجم'](self.pool, [], None), 2)
+
+    def test_create_validation(self):
+        from arabi_lang.processes import _ppool_create
+        for bad, keyword in ((['٠'], 'عددًا صحيحًا'),
+                             ([0], 'موجبًا'),
+                             ([True], 'عددًا صحيحًا'),
+                             ([65], 'الحد الأعلى'),
+                             ([], 'معاملًا واحدًا')):
+            with self.assertRaises(ArabiRuntimeError) as caught:
+                _ppool_create(self.interp, bad, None)
+            self.assertIn(keyword, str(caught.exception))
+
+    def test_submit_result_and_methods(self):
+        from arabi_lang.processes import _ppool_submit
+        func = self._func('دالة مضاعف(ن):\n    أعد ن * ٣\n')
+        task = _ppool_submit(self.pool, [func, 7], {}, None)
+        self.assertEqual(task.result(), 21)
+        self.assertTrue(task.ready())
+        self.assertIsNone(task.error())
+
+    def test_submit_order_with_wait_all(self):
+        # النتائج تعود بترتيب التقديم بغض النظر عن ترتيب الإنجاز
+        func = self._func('دالة سبْة(ن):\n'
+                          '    لو ن == ١٠٠:\n'
+                          '        انتظر_زمن(٠.٣)\n'
+                          '    أعد ن * ٢\n')
+        from arabi_lang.processes import _ppool_submit
+        tasks = [_ppool_submit(self.pool, [func, 10], {}, None),
+                 _ppool_submit(self.pool, [func, 100], {}, None)]
+        self.assertEqual(self.interp._call_value(
+            self.interp.globals.get('انتظر_الجميع'), [tasks], {}, None),
+            [20, 200])
+
+    def test_submit_kwargs(self):
+        func = self._func('دالة قوة(أساس، أس = ٢):\n    أعد أساس ** أس\n')
+        from arabi_lang.processes import _ppool_submit
+        task = _ppool_submit(self.pool, [func, 3], {'أس': 4}, None)
+        self.assertEqual(task.result(), 81)
+
+    def test_submit_bound_method(self):
+        setup = ('صنف عداد:\n'
+                 '    دالة إنشاء(بداية):\n'
+                 '        هذا.قيمة = بداية\n'
+                 '    دالة زد(مقدار):\n'
+                 '        هذا.قيمة = هذا.قيمة + مقدار\n'
+                 '        أعد هذا.قيمة\n'
+                 'ع = عداد(١٠٠)\n')
+        self.interp.run(Parser(Lexer(setup).tokenize()).parse())
+        from arabi_lang.processes import _ppool_submit
+        from arabi_lang.runtime import BoundMethod
+        counter = self.interp.globals.get('ع')
+        b = BoundMethod(counter, counter.cls.members['زد'])
+        task = _ppool_submit(self.pool, [b, 5], {}, None)
+        self.assertEqual(task.result(), 105)
+
+    def test_submit_builtin(self):
+        self.interp.run(Parser(Lexer(
+            'من رياضيات استورد جذر\n').tokenize()).parse())
+        from arabi_lang.processes import _ppool_submit
+        task = _ppool_submit(self.pool,
+                             [self.interp.globals.get('جذر'), 16],
+                             {}, None)
+        self.assertEqual(task.result(), 4.0)
+
+    def test_submit_error_identity(self):
+        setup = ('صنف خطأ_حد من استثناء:\n'
+                 '    تجاهل\n'
+                 'دالة رصد(ن):\n'
+                 '    لو ن > ١٠:\n'
+                 '        ارفع خطأ_حد("تجاوز الحد المسموح")\n'
+                 '    أعد ن\n')
+        self.interp.run(Parser(Lexer(setup).tokenize()).parse())
+        func = self.interp.globals.get('رصد')
+        from arabi_lang.processes import _ppool_submit
+        task = _ppool_submit(self.pool, [func, 99], {}, None)
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            task.result()
+        self.assertEqual(caught.exception.instance.cls.name, 'خطأ_حد')
+
+    def test_race_with_process_tasks(self):
+        func = self._func('دالة سريعة():\n    أعد "فازت"\n'
+                          'دالة بطيئة():\n'
+                          '    انتظر_زمن(٠.٥)\n'
+                          '    أعد "متأخرة"\n')
+        from arabi_lang.processes import _ppool_submit
+        slow = self._func('دالة بطيئة2():\n'
+                          '    انتظر_زمن(٠.٥)\n'
+                          '    أعد "متأخرة"\n')
+        tasks = [_ppool_submit(self.pool, [func], {}, None),
+                 _ppool_submit(self.pool, [slow], {}, None)]
+        winner = self.interp._call_value(
+            self.interp.globals.get('سباق'), [tasks], {}, None)
+        self.assertEqual(winner.result(), 'فازت')
+
+    def test_shutdown_rejects_and_double_safe(self):
+        from arabi_lang.processes import _ppool_create, _ppool_submit
+        pool = _ppool_create(self.interp, [1], None)
+        func = self._func('دالة هوية(ن):\n    أعد ن\n')
+        task = _ppool_submit(pool, [func, 5], {}, None)
+        self.assertEqual(task.result(), 5)
+        pool.shutdown()
+        pool.shutdown()          # ثنائي آمن
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            _ppool_submit(pool, [func, 6], {}, None)
+        self.assertIn('مغلق', str(caught.exception))
+
+    # ---------- أدوات ----------
+
+    def _func(self, src):
+        """يعرف دالة عربية في مفسّر الصنف ويعيد قيمتها."""
+        self.interp.run(Parser(Lexer(src).tokenize()).parse())
+        name = src.split('(')[0].replace('دالة ', '')
+        return self.interp.globals.get(name)
 
 
 if __name__ == '__main__':

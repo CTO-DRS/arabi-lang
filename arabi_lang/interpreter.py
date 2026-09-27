@@ -29,8 +29,11 @@ from .runtime import (
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
     GENERATOR_METHODS, DB_METHODS,
     THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS, TASK_METHODS,
-    POOL_METHODS, _pool_submit,
+    POOL_METHODS, PROCESS_METHODS, PROCESS_TASK_METHODS,
+    PROCESS_POOL_METHODS, _pool_submit,
 )
+from .processes import _ppool_submit
+from .runtime import ProcessValue, ProcessTaskValue, ProcessPoolValue
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
 sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
@@ -45,7 +48,8 @@ CATCHABLE = (
 # الوحدات الجاهزة المدمجة في اللغة
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
                    'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم',
-                   'قاعدة', 'ترميز', 'جداول', 'خيوط', 'تواريخ', 'إحصاء')
+                   'قاعدة', 'ترميز', 'جداول', 'خيوط', 'تواريخ', 'إحصاء',
+                   'عمليات')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -1221,6 +1225,15 @@ class Interpreter:
             if name == 'قدّم':
                 return _pool_submit(obj, args, kwargs, line)
             table = POOL_METHODS
+        elif isinstance(obj, ProcessValue):
+            table = PROCESS_METHODS
+        elif isinstance(obj, ProcessTaskValue):
+            table = PROCESS_TASK_METHODS
+        elif isinstance(obj, ProcessPoolValue):
+            # قدّم مسار خاص كذلك: الترميز يحدث في الأب لحظة التقديم
+            if name == 'قدّم':
+                return _ppool_submit(obj, args, kwargs, line)
+            table = PROCESS_POOL_METHODS
         elif isinstance(obj, LockValue):
             table = LOCK_METHODS
         elif isinstance(obj, QueueValue):
@@ -1633,12 +1646,16 @@ class Interpreter:
         value = self.evaluate(node.operand, env)
         if isinstance(value, TaskValue):
             return value.result(node.line)
-        if isinstance(value, ThreadValue):
-            # 'انتظر' تعمل على خيوط وحدة 'خيوط' أيضًا — توحيد للانتظار
+        if isinstance(value, (ThreadValue, ProcessValue)):
+            # 'انتظر' تعمل على خيوط وحدة 'خيوط' وعلى العمليات المنفصلة
+            # أيضًا (1.17) — توحيد للانتظار
+            return value.result(node.line)
+        if isinstance(value, ProcessTaskValue):
             return value.result(node.line)
         raise ArabiRuntimeError(
-            f"'انتظر' تتوقع مهمة (نتاج دالة غير متزامنة) أو خيطًا لكن "
-            f'استلمت {typename(value)}', node.line)
+            f"'انتظر' تتوقع مهمة (نتاج دالة غير متزامنة أو قدّم على "
+            f"تجمع) أو خيطًا أو عملية لكن استلمت {typename(value)}",
+            node.line)
 
     def _run_func(self, func, env):
         """ينفذ جسم دالة: عبر الدولاب الافتراضي إن ترجم، وإلا الممسح الشجري.

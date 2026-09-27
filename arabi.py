@@ -23,6 +23,7 @@
 
 import io
 import json
+import multiprocessing
 import sys
 import os
 import contextlib
@@ -565,6 +566,10 @@ python -m arabi بدل python arabi.py — كل الأدوات تعمل كما �
 
 
 def main():
+    # دعم وحدة 'عمليات' في التنفيذي المجمد (PyInstaller): يجب أن يكون
+    # أول ما يُستدعى حتى تُعالج حزم إقلاع العمليات الابنة فورًا وتخرج —
+    # في التشغيل العادي من المصدر لا أثر له إطلاقًا.
+    multiprocessing.freeze_support()
     args = sys.argv[1:]
     if not args:
         repl()
