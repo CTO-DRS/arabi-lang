@@ -1667,6 +1667,26 @@ def install_builtins(env):
         'عامل': BuiltinFunc('عامل', _dist_worker, takes_interp=True),
     }))
 
+    # ============ وحدة التشفير (الإصدار 1.19) ============
+    # استيراد آمن: crypto لا يستورد من runtime فلا دورانية أبدًا
+
+    from .crypto import (_crypto_hash, _crypto_hash512, _crypto_hmac,
+                         _crypto_compare, _crypto_key, _crypto_token,
+                         _crypto_rand, _crypto_pw_hash, _crypto_pw_verify,
+                         _crypto_derive)
+    env.define('تشفير', ModuleValue('تشفير', {
+        'هش': BuiltinFunc('هش', _crypto_hash),
+        'هش512': BuiltinFunc('هش512', _crypto_hash512),
+        'هوماك': BuiltinFunc('هوماك', _crypto_hmac),
+        'مقارنة_آمنة': BuiltinFunc('مقارنة_آمنة', _crypto_compare),
+        'مفتاح_آمن': BuiltinFunc('مفتاح_آمن', _crypto_key),
+        'رمز_آمن': BuiltinFunc('رمز_آمن', _crypto_token),
+        'عدد_آمن': BuiltinFunc('عدد_آمن', _crypto_rand),
+        'شفر_كلمة': BuiltinFunc('شفر_كلمة', _crypto_pw_hash),
+        'تحقق_كلمة': BuiltinFunc('تحقق_كلمة', _crypto_pw_verify),
+        'مشتق': BuiltinFunc('مشتق', _crypto_derive),
+    }))
+
     # ============ وحدة التواريخ (الإصدار 1.9) ============
 
     env.define('تواريخ', ModuleValue('تواريخ', {

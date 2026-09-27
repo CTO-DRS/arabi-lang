@@ -4671,7 +4671,8 @@ class TestStatisticsModule(unittest.TestCase):
         self.assertIn('إحصاء', BUILTIN_MODULES)
         self.assertIn('عمليات', BUILTIN_MODULES)
         self.assertIn('موزعة', BUILTIN_MODULES)
-        self.assertEqual(len(BUILTIN_MODULES), 19)
+        self.assertIn('تشفير', BUILTIN_MODULES)
+        self.assertEqual(len(BUILTIN_MODULES), 20)
 
 
 
@@ -8407,8 +8408,19 @@ class TestDispatcher(unittest.TestCase):
 
     def test_error_too_many_args(self):
         with self.assertRaises(ArabiRuntimeError) as caught:
+            self.create([1, '127.0.0.1', 'س', 'ص'])
+        self.assertIn('ثلاثة معاملات على الأكثر', str(caught.exception))
+
+    def test_error_key_not_str(self):
+        # المفتاح (1.19) نص غير فارغ — غير ذلك رفض واضح
+        with self.assertRaises(ArabiRuntimeError) as caught:
             self.create([1, '127.0.0.1', 5])
-        self.assertIn('معاملين على الأكثر', str(caught.exception))
+        self.assertIn('مفتاحًا نصيًا غير فارغ', str(caught.exception))
+
+    def test_error_key_empty(self):
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self.create([1, '127.0.0.1', ''])
+        self.assertIn('مفتاحًا نصيًا غير فارغ', str(caught.exception))
 
     def test_error_host_not_str(self):
         with self.assertRaises(ArabiRuntimeError):
@@ -8700,6 +8712,10 @@ class TestDistributedEndToEnd(unittest.TestCase):
         fake = _socket.create_connection(
             ('127.0.0.1', self.disp.port()), timeout=10)
         send_frame(fake, ('مرحبا', -1, 'مزيّف'))
+        # المصافحة الجديدة (1.19): الموزع الحر يعلن بلا_مفتاح أولًا —
+        # نقرأ الإعلان ونكمل التسجيل كأنه عامل حر عادي
+        first = recv_frame(fake)
+        self.assertEqual(first, ('بلا_مفتاح',))
         self._wait_workers()
         task = self._submit('دالة جمع(أ، ب):\n    أعد أ + ب\n', 1, 2)
         # انتظر وصول العمل للعامل المزيّف (تقديم يضخ فورًا لعامل معطل)
@@ -8763,6 +8779,298 @@ class TestDistributedEndToEnd(unittest.TestCase):
         return buf.getvalue()
 
 
+class TestCrypto(unittest.TestCase):
+    """وحدة التشفير (1.19) — بصمات وتوقيعات ومفاتيح آمنة وكلمات مرور."""
+
+    def setUp(self):
+        self.interp = Interpreter(use_vm=False)
+        self.interp.run(Parser(Lexer('استورد تشفير\n').tokenize()).parse())
+        self.mod = self.interp.globals.get('تشفير')
+
+    def _call(self, name, *args):
+        fn = self.mod.members[name]
+        return self.interp._call_value(fn, list(args), {}, None)
+
+    # ---------- البصمات ----------
+
+    def test_hash_sha256_matches_legacy(self):
+        # توافق مع ترميز.هش256 التاريخية — نفس الخوارزمية نفس الناتج
+        from hashlib import sha256
+        self.assertEqual(
+            self._call('هش', 'مرحبا بالعالم'),
+            sha256('مرحبا بالعالم'.encode('utf-8')).hexdigest())
+        self.interp.run(Parser(Lexer(
+            'ب = تشفير.هش("مرحبا بالعالم")\n').tokenize()).parse())
+        legacy = self.interp.globals.get('ترميز').members['هش256']
+        self.assertEqual(self.interp.globals.get('ب'),
+                         legacy.fn(['مرحبا بالعالم'], None))
+
+    def test_hash_algorithms(self):
+        from hashlib import md5, sha1
+        self.assertEqual(len(self._call('هش512', 'x')), 128)
+        self.assertEqual(self._call('هش', 'x', 'sha512'),
+                         self._call('هش512', 'x'))
+        self.assertEqual(self._call('هش', 'x', 'sha1'),
+                         sha1(b'x').hexdigest())
+        self.assertEqual(self._call('هش', 'x', 'md5'),
+                         md5(b'x').hexdigest())
+        self.assertEqual(len(self._call('هش', 'x', 'sha384')), 96)
+        self.assertEqual(len(self._call('هش', 'x', 'sha224')), 56)
+
+    def test_hash_errors(self):
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._call('هش', 'x', 'sha3')
+        self.assertIn('غير مدعومة', str(caught.exception))
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('هش', 42)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('هش', 'س', 'sha256', 'زائد')
+
+    # ---------- توقيع الرسائل ----------
+
+    def test_hmac_signs_and_distinguishes(self):
+        from hashlib import sha256
+        import hmac as _hmac
+        expected = _hmac.new('مفتاح'.encode('utf-8'),
+                             'رسالة'.encode('utf-8'), sha256).hexdigest()
+        self.assertEqual(self._call('هوماك', 'رسالة', 'مفتاح'), expected)
+        self.assertEqual(self._call('هوماك', 'رسالة', 'مفتاح', 'sha256'),
+                         expected)
+        self.assertNotEqual(self._call('هوماك', 'رسالة', 'مفتاح_آخر'),
+                            expected)
+        self.assertNotEqual(self._call('هوماك', 'رسالة_مغشوشة', 'مفتاح'),
+                            expected)
+
+    def test_safe_compare(self):
+        self.assertTrue(self._call('مقارنة_آمنة', 'أب', 'أب'))
+        self.assertFalse(self._call('مقارنة_آمنة', 'أب', 'أج'))
+        self.assertFalse(self._call('مقارنة_آمنة', 'أ', ''))
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مقارنة_آمنة', 'أ', 5)
+
+    # ---------- العشوائية الآمنة ----------
+
+    def test_secure_key(self):
+        default = self._call('مفتاح_آمن')
+        self.assertEqual(len(default), 64)          # 32 بايتًا = 64 حرفًا
+        self.assertTrue(all(c in '0123456789abcdef' for c in default))
+        self.assertEqual(len(self._call('مفتاح_آمن', 16)), 32)
+        self.assertNotEqual(default, self._call('مفتاح_آمن'))
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مفتاح_آمن', 0)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مفتاح_آمن', 1025)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مفتاح_آمن', True)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مفتاح_آمن', 1, 2)
+
+    def test_secure_token(self):
+        import base64
+        token = self._call('رمز_آمن', 16)
+        base64.urlsafe_b64decode(token + '=' * (-len(token) % 4))
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('رمز_آمن', 0)
+
+    def test_secure_number(self):
+        for _ in range(50):
+            n = self._call('عدد_آمن', 100)
+            self.assertTrue(0 <= n < 100)
+            m = self._call('عدد_آمن', 5, 10)
+            self.assertTrue(5 <= m < 10)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('عدد_آمن', 0)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('عدد_آمن', 10, 10)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('عدد_آمن', 2.5)
+
+    # ---------- كلمات المرور ----------
+
+    def test_password_record_structure(self):
+        record = self._call('شفر_كلمة', 'سر_فريق_2025', 1000)
+        self.assertEqual(record['الخوارزمية'], 'pbkdf2_sha256')
+        self.assertEqual(record['الجولات'], 1000)
+        self.assertEqual(len(record['الملح']), 32)     # 16 بايتًا
+        self.assertEqual(len(record['البصمة']), 64)
+        # الملح عشوائي جديد في كل نداء — السجلات لا تتكرر أبدًا
+        record2 = self._call('شفر_كلمة', 'سر_فريق_2025', 1000)
+        self.assertNotEqual(record['الملح'], record2['الملح'])
+        self.assertNotEqual(record['البصمة'], record2['البصمة'])
+
+    def test_password_verify(self):
+        record = self._call('شفر_كلمة', 'كلمة_سر', 1000)
+        self.assertTrue(self._call('تحقق_كلمة', 'كلمة_سر', record))
+        self.assertFalse(self._call('تحقق_كلمة', 'خطأ', record))
+        # سجل فاسد: حقول ناقصة أو خوارزمية غريبة أو ستر فاسد
+        for broken in ({'الخوارزمية': 'x', 'الجولات': 1000,
+                        'الملح': 'aa', 'البصمة': 'bb'},
+                       {'الخوارزمية': 'pbkdf2_sha256', 'الجولات': 1000,
+                        'الملح': '!!', 'البصمة': 'bb'},
+                       dict(record, الملح='zz')):
+            with self.assertRaises(ArabiRuntimeError):
+                self._call('تحقق_كلمة', 'كلمة_سر', broken)
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('تحقق_كلمة', 'كلمة_سر', 'ليس_قاموسًا')
+
+    def test_password_rounds_validation(self):
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفر_كلمة', 'س', 999)           # أدنى من الحد
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفر_كلمة', 'س', 10_000_001)    # فوق السقف
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفر_كلمة', 'س', True)
+
+    # ---------- اشتقاق المفاتيح ----------
+
+    def test_derive_deterministic(self):
+        a = self._call('مشتق', 'سر الفريق', 'منفذ-7700', 32)
+        b = self._call('مشتق', 'سر الفريق', 'منفذ-7700', 32)
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 64)
+        self.assertEqual(len(self._call('مشتق', 'س', 'م', 16, 1000)), 32)
+        # تغيير حرف واحد يغير المفتاح كله
+        self.assertNotEqual(
+            a, self._call('مشتق', 'سر الفريق ', 'منفذ-7700', 32))
+        self.assertNotEqual(
+            a, self._call('مشتق', 'سر الفريق', 'منفذ-7701', 32))
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مشتق', 'سر')                   # الملح ناقص
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('مشتق', 'س', 'م', 0)
+
+    # ---------- التوقيع الداخلي للشبكة ----------
+
+    def test_sign_challenge_roundtrip(self):
+        from arabi_lang.crypto import sign_challenge, verify_challenge
+        import os as _os
+        nonce = _os.urandom(32)
+        sig = sign_challenge('سر مشترك', nonce)
+        self.assertTrue(verify_challenge('سر مشترك', nonce, sig))
+        self.assertFalse(verify_challenge('سر آخر', nonce, sig))
+        self.assertFalse(verify_challenge('سر مشترك',
+                                          _os.urandom(32), sig))
+        self.assertFalse(verify_challenge('سر مشترك', nonce, 'خ' * 64))
+        self.assertFalse(verify_challenge('سر مشترك', nonce, None))
+        # التوقيع حتمي بنفس المدخلات ومتغير بغيرها
+        self.assertEqual(sig, sign_challenge('سر مشترك', nonce))
+
+
+class TestDistributedAuth(unittest.TestCase):
+    """مصادقة الشبكة الموزعة بالمفتاح السري (1.19) — مصافحة حقيقية."""
+
+    def setUp(self):
+        import threading
+        self.threading = threading
+        from arabi_lang.distributed import _dist_create, run_worker
+        self._dist_create = _dist_create
+        self._run_worker = run_worker
+        self.interp = Interpreter(use_vm=False)
+        self.interp.run(Parser(Lexer(
+            'دالة جمع(أ، ب):\n    أعد أ + ب\n').tokenize()).parse())
+        self.func = self.interp.globals.get('جمع')
+        self.threads = []
+        self.disps = []
+
+    def tearDown(self):
+        for d in self.disps:
+            d.shutdown()
+        for t in self.threads:
+            t.join(timeout=10)
+
+    def _spawn(self, disp, key=None):
+        t = self.threading.Thread(
+            target=self._run_worker,
+            args=('127.0.0.1', disp.port()), kwargs={'key': key},
+            daemon=True)
+        t.start()
+        self.threads.append(t)
+        return t
+
+    def _spawn_capture(self, disp, key=None):
+        """يشغل عاملًا ويلتقط خطأه — الخيوط تبتلع الاستثناءات بصمت."""
+        from arabi_lang.errors import ArabiError
+        result = {}
+
+        def target():
+            try:
+                self._run_worker('127.0.0.1', disp.port(), key=key)
+                result['error'] = None
+            except ArabiError as exc:
+                result['error'] = exc
+
+        t = self.threading.Thread(target=target, daemon=True)
+        t.start()
+        self.threads.append(t)
+        return t, result
+
+    def _make(self, args):
+        d = self._dist_create(self.interp, args, None)
+        self.disps.append(d)
+        return d
+
+    def _submit(self, *args):
+        return self.disps[0]._server.submit(
+            self.func, [self.func, *args], {}, None)
+
+    def test_keyed_end_to_end(self):
+        disp = self._make([0, '127.0.0.1', 'سر_الفريق_١٩'])
+        self._spawn(disp, key='سر_الفريق_١٩')
+        disp._server.wait_workers(1, 30, None)
+        task = self._submit(20, 22)
+        self.assertEqual(task.result(), 42)
+        self.assertEqual(disp.workers(), 1)
+
+    def test_wrong_key_rejected(self):
+        disp = self._make([0, '127.0.0.1', 'السر_الحقيقي'])
+        t, result = self._spawn_capture(disp, key='سر_خاطئ')
+        t.join(timeout=30)
+        self.assertFalse(t.is_alive(), 'العامل عالق بدل أن يُرفض')
+        self.assertIsNotNone(result['error'])
+        self.assertIn('رفض الموزع ربط العامل', str(result['error']))
+        self.assertIn('المفتاح المرسل غير صحيح', str(result['error']))
+        # الموزع لم يتأثر — عامل بالمفتاح الصحيح يُسجّل ويعمل
+        self._spawn(disp, key='السر_الحقيقي')
+        disp._server.wait_workers(1, 30, None)
+        self.assertEqual(self._submit(1, 2).result(), 3)
+
+    def test_keyed_worker_free_dispatcher(self):
+        disp = self._make([0])                     # موزع حر
+        t, result = self._spawn_capture(disp, key='سر')  # عامل مفتاحي
+        t.join(timeout=30)
+        self.assertFalse(t.is_alive(), 'العامل المفتاحي عالق عند موزع حر')
+        self.assertIsNotNone(result['error'])
+        self.assertIn('الموزع لا يستخدم مفتاحًا', str(result['error']))
+        self.assertEqual(disp.workers(), 0)        # لم يُسجّل أبدًا
+
+    def test_free_worker_keyed_dispatcher(self):
+        disp = self._make([0, '127.0.0.1', 'س'])
+        t, result = self._spawn_capture(disp, key=None)   # عامل حر
+        t.join(timeout=30)
+        self.assertFalse(t.is_alive(), 'العامل الحر عالق عند موزع مفتاحي')
+        self.assertIsNotNone(result['error'])
+        # العامل الحر تلقى التحدي فعرف فورًا أن الموزع مفتاحي
+        self.assertIn('الموزع يتطلب مفتاحًا', str(result['error']))
+        self.assertEqual(disp.workers(), 0)        # الرفض ليس تسجيلًا
+
+    def test_unkeyed_compatibility(self):
+        # المسار الحر كله كما في 1.18 تمامًا رغم إعلان بلا_مفتاح
+        disp = self._make([0])
+        self._spawn(disp, key=None)
+        disp._server.wait_workers(1, 30, None)
+        self.assertEqual(self._submit(2, 3).result(), 5)
+
+    def test_worker_key_validation(self):
+        from arabi_lang.distributed import _dist_worker
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            _dist_worker(self.interp, ['h', 7700, 5], None)
+        self.assertIn('مفتاحًا نصيًا غير فارغ', str(caught.exception))
+        with self.assertRaises(ArabiRuntimeError):
+            _dist_worker(self.interp, ['h', 7700, ''], None)
+        with self.assertRaises(ArabiRuntimeError):
+            _dist_worker(self.interp, ['h', 7700, 'س', 'زائد'], None)
+
+
 class TestDistributedCliWorker(unittest.TestCase):
     """العامل من سطر الأوامر: --عامل المضيف:منفذ (الإصدار 1.18)."""
 
@@ -8783,6 +9091,38 @@ class TestDistributedCliWorker(unittest.TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
             disp._server.wait_workers(1, 30, None)
             task = disp._server.submit(func, [func, 41], {}, None)
+            self.assertEqual(task.result(), 42)
+        finally:
+            disp.shutdown()
+            if proc is not None:
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        self.assertEqual(proc.returncode, 0)
+
+    def test_cli_worker_with_key(self):
+        # --عامل المضيف:المنفذ --مفتاح السر (1.19): العامل يوقع التحدي
+        # بالمفتاح ويُقبل — والموزع المفتاحي يرفض أي غيره
+        import subprocess
+        import sys as _sys
+        from arabi_lang.distributed import _dist_create
+        interp = Interpreter(use_vm=False)
+        interp.run(Parser(Lexer(
+            'دالة حسب(س):\n    أعد س * ٢\n').tokenize()).parse())
+        func = interp.globals.get('حسب')
+        disp = _dist_create(interp, [0, '127.0.0.1', 'سر_سطر_الأوامر'],
+                            None)
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [_sys.executable, os.path.join(ROOT, 'arabi.py'),
+                 '--عامل', f'127.0.0.1:{disp.port()}',
+                 '--مفتاح', 'سر_سطر_الأوامر'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+            disp._server.wait_workers(1, 30, None)
+            task = disp._server.submit(func, [func, 21], {}, None)
             self.assertEqual(task.result(), 42)
         finally:
             disp.shutdown()

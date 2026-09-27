@@ -16,9 +16,14 @@
   حالة الموزع محروسة بقفل واحد: طابور مهام مرتّب، وعمالة معطلة
   تُسحب منها الحزم فورًا، وانقطاع عامل يعيد أعماله الطائرة إلى الطابور
   فتخدمها عمالة أخرى — لا تضيع مهمة إلا إذا أغلق الموزع نفسه.
-- الأمان: البروتوكول بلا توثيق (كما في multiprocessing القياسية
-  ذاتها) — شغّل الموزع على شبكة موثوقة فقط، والربط الافتراضي محلي
-  127.0.0.1 وللشبكة العامة مرر العنوان '0.0.0.0' صراحةً بوعي كامل.
+- الأمان (1.19): مصادقة عمالة اختيارية بمفتاح سري مشترك — مرر
+  المفتاح معاملًا ثالثًا لـ 'موزع' و 'عامل' معًا فيصبح لا عامل يُسجّل
+  إلا بتوقيع HMAC-SHA256 على تحدٍّ عشوائي (nonce) يرسله الموزع لحظة
+  الاتصال، والتحقق بمقارنة زمن ثابت فلا يكشف التوقيت شيئًا — والموزع
+  بلا مفتاح يعمل كالسابق (توافق كامل مع 1.18) مع رسالة ترحيب
+  بلا_مفتاح تخبر العامل المفتاحي فورًا أن التكوين غير متوافق. شغّل
+  الموزع المفتاحي على شبكة موثوقة كذلك — المصادقة تمنع العمالة
+  الأجنبية، لا تشفير البيانات العابرة.
 
 هذا الملف يحمّل أسماء القيم من runtime فقط — وruntime لا يستورد
 هذا الملف إلا داخل دالة التثبيت (بعد اكتمال تعريفه) تفاديًا للدورانية.
@@ -26,6 +31,7 @@
 
 import os
 import pickle
+import secrets as _secrets
 import socket
 import struct
 import threading
@@ -33,6 +39,7 @@ import time
 from collections import deque
 
 from .errors import ArabiError, ArabiRuntimeError
+from .crypto import sign_challenge, verify_challenge
 from .processes import (
     _run_job, _encode_error, _validate_callable,
     encode_value, decode_value, _make_enc_ctx, _encode_root,
@@ -42,7 +49,8 @@ DEFAULT_PORT = 7700        # المنفذ الافتراضي للموزع وال
 DISPATCH_TIMEOUT = 120     # مهلة انتظار نتيجة المهمة الموزعة (ثوانٍ)
 SHUTDOWN_GRACE = 30        # مهلة تصفية المهام عند إنهاء الموزع (ثوانٍ)
 WORKER_TIMEOUT = 30        # دورة استطلاع العامل (يتحقق بعدها من الإيقاف)
-CONNECT_TIMEOUT = 10       # مهلة الاتصال الأولي بالعامل
+CONNECT_TIMEOUT = 10       # مهلة الاتصال الأولي والعمالة المفتاحية
+NONCE_BYTES = 32           # طول تحدي المصادقة العشوائي (بايتات)
 POLL_INTERVAL = 0.01       # نبضة استطلاع حلقات الانتظار (ثوانٍ)
 MAX_FRAME = 256 * 1024 * 1024   # الحد الأعلى لحجم الإطار الواحد (256 م.ب)
 
@@ -89,24 +97,54 @@ def recv_frame(sock):
 
 # ================== العامل ==================
 
-def run_worker(host, port, stop_event=None):
+def run_worker(host, port, stop_event=None, key=None):
     """يربط عاملاً بالموزع ويخدمه حتى إغلاق الموزع — يحجب الاستدعاء.
 
     كل عمل يُنفذ في مفسّر نظيف كامل (بنفس دلالات عمليات.شغّل)،
     والنتيجة تعود مرمزة بالهوية: نتيجة ناجحة أو خطأ عربي أو عطل داخلي.
     يعيد 'ولا شيء' عند إغلاق الموزع بنظافة (رسالة وداع) — ويرفع خطأً
-    عربيًا إذا فشل الاتصال أو انقطع فجأة دون وداع.
+    عربيًا إذا فشل الاتصال أو انقطع فجأة أو رفضه الموزع مفتاحًا.
+
+    المفتاح (1.19): إذا مرر فينتظر العامل تحدي الموزع ويوقعه
+    HMAC-SHA256 بالمفتاح المشترك — والموزع بلا مفتاح (أو بمفتاح
+    آخر) يرسل رفضًا واضحًا فلا جدال صامت في أي اتجاه.
     """
+    _check_key(key)
     try:
         sock = socket.create_connection((host, port),
                                         timeout=CONNECT_TIMEOUT)
     except OSError as exc:
         raise ArabiRuntimeError(
             f'تعذر الاتصال بالموزع {host}:{port} — {exc}')
-    sock.settimeout(WORKER_TIMEOUT)
+    sock.settimeout(CONNECT_TIMEOUT)      # مهلة المصافحة ثم استطلاع طويل
     try:
-        # التسجيل: الوصف (معرف العملية واسم الجهاز) للتوثيق والتشخيص
-        send_frame(sock, ('مرحبا', os.getpid(), socket.gethostname()))
+        if key is not None:
+            # العامل المفتاحي ينتظر تحدي الموزع أولًا ثم يوقع
+            try:
+                msg = recv_frame(sock)
+            except socket.timeout:
+                raise ArabiRuntimeError(
+                    'انتهت مهلة مصافحة المفتاح — الموزع لا يستخدم '
+                    'مفتاحًا أو لا يفهم البروتوكول')
+            except (ConnectionError, OSError):
+                raise ArabiRuntimeError(
+                    'انقطع الاتصال بالموزع أثناء المصافحة')
+            if isinstance(msg, tuple) and msg and msg[0] == 'بلا_مفتاح':
+                raise ArabiRuntimeError(
+                    'الموزع لا يستخدم مفتاحًا — أعد تشغيله بالمفتاح '
+                    'نفسه أو اربط العامل بلا مفتاح')
+            if not (isinstance(msg, tuple) and len(msg) == 2
+                    and msg[0] == 'تحدٍ'):
+                raise ArabiRuntimeError(
+                    'أول رسالة من الموزع ليست تحدي مصافحة — '
+                    'البروتوكولان غير متوافقين')
+            signature = sign_challenge(key, msg[1])
+            send_frame(sock, ('مرحبا', os.getpid(),
+                              socket.gethostname(), signature))
+        else:
+            # التسجيل: الوصف (معرف العملية واسم الجهاز) للتوثيق والتشخيص
+            send_frame(sock, ('مرحبا', os.getpid(), socket.gethostname()))
+        sock.settimeout(WORKER_TIMEOUT)
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
@@ -122,6 +160,13 @@ def run_worker(host, port, stop_event=None):
             kind = msg[0]
             if kind == 'وداع':
                 break             # الموزع أغلق بنظافة
+            if kind == 'رفض':
+                reason = msg[1] if len(msg) > 1 else 'غير معلوم'
+                raise ArabiRuntimeError(f'رفض الموزع ربط العامل — {reason}')
+            if kind == 'تحدٍ':
+                raise ArabiRuntimeError(
+                    'الموزع يتطلب مفتاحًا — مرر المفتاح نفسه معاملًا '
+                    'ثالثًا لعامل()')
             if kind == 'عمل':
                 job_id, blob = msg[1], msg[2]
                 try:
@@ -147,16 +192,31 @@ def run_worker(host, port, stop_event=None):
             pass
 
 
-def run_worker_cli(target):
+def run_worker_cli(target, key=None):
     """نقطة دخول العامل من سطر الأوامر: --عامل المضيف:منفذ — تُطبع
     حالة الاتصال بالعربية وتُغلق بهدوء عند وداع الموزع."""
     host, port = parse_target(target)
     try:
-        run_worker(host, port)
+        run_worker(host, port, key=key)
     except ArabiError as exc:
         print(f'خطأ: {exc.message}', flush=True)
         return 1
     return 0
+
+
+def _check_key(key):
+    """يتحقق من صحة المفتاح السري المشترك — نص غير فارغ."""
+    if key is None:
+        return None
+    if not isinstance(key, str):
+        raise ArabiRuntimeError(
+            f'المفتاح السري للموزع والعامل نصًا لكنه استلم '
+            f'{type(key).__name__}')
+    if not key:
+        raise ArabiRuntimeError(
+            'المفتاح السري لا يكون فارغًا — مرر نصًا يحمل السر أو '
+            'اترك المعامل حاضرًا تمامًا للربط بلا مصادقة')
+    return key
 
 
 def parse_target(target):
@@ -197,9 +257,10 @@ class _Server:
     اقتطاع المهمة لعميلها) فلا يعلن عامل بطيء التوزيع كله.
     """
 
-    def __init__(self, host, port, interp):
+    def __init__(self, host, port, interp, key=None):
         self._interp = interp
         self._root = interp.globals
+        self._key = _check_key(key)
         self._lock = threading.RLock()
         self._stopping = False
         self._closed = False
@@ -259,14 +320,48 @@ class _Server:
                              name='موزع-عربي-عامل').start()
 
     def _reader_loop(self, sock, addr):
-        """يدير اتصال عامل واحد: تسجيل ثم قراءة النتائج حتى انقطاعه."""
+        """يدير اتصال عامل واحد: مصافحة ثم تسجيل ثم قراءة النتائج.
+
+        الموزع المفتاحي (1.19) يرسل تحديًا عشوائيًا أولًا ولا يسجّل
+        إلا عاملًا وقّعه بالمفتاح المشترك — والباقي يرفض برسالة عربية
+        واضحة. الموزع الحر يرسل إعلان بلا_مفتاح فيعرف العامل المفتاحي
+        فورًا أن التكوين غير متوافق بلا أي انتظار.
+        """
+        if self._key is not None:
+            nonce = _secrets.token_bytes(NONCE_BYTES)
+            try:
+                send_frame(sock, ('تحدٍ', nonce))
+            except OSError:
+                self._close_quietly(sock)
+                return
+        else:
+            nonce = None
+            try:
+                send_frame(sock, ('بلا_مفتاح',))
+            except OSError:
+                self._close_quietly(sock)
+                return
         try:
             msg = recv_frame(sock)
         except Exception:
             self._close_quietly(sock)
             return
-        if not (isinstance(msg, tuple) and msg and msg[0] == 'مرحبا'):
-            self._close_quietly(sock)     # أول رسالة ليست تسجيلًا
+        hello_ok = (isinstance(msg, tuple) and msg
+                    and msg[0] == 'مرحبا')
+        if hello_ok and self._key is not None:
+            hello_ok = (len(msg) == 4
+                        and verify_challenge(self._key, nonce, msg[3]))
+            if not hello_ok:
+                try:
+                    send_frame(sock, ('رفض',
+                                      'المفتاح المرسل غير صحيح — '
+                                      'مرر المفتاح نفسه للعامل وللموزع'))
+                except OSError:
+                    pass
+                self._close_quietly(sock)
+                return
+        if not hello_ok:
+            self._close_quietly(sock)     # أول رسالة ليست تسجيلًا صالحًا
             return
         with self._lock:
             if self._stopping:
@@ -278,7 +373,7 @@ class _Server:
                 return
             self._worker_seq += 1
             wid = self._worker_seq
-            self._workers[wid] = _WorkerConn(sock, addr, msg[1:])
+            self._workers[wid] = _WorkerConn(sock, addr, msg[1:3])
             self._idle.append(wid)
         self._pump()
         while True:
@@ -492,18 +587,21 @@ class _Server:
 # ================== الجاهزات: موزع / عامل / قدّم ==================
 
 def _dist_create(interp, args, line):
-    """موزعة.موزع(منفذ؟، عنوان؟) — يبدأ خادم توزيع ويعيد قيمته.
+    """موزعة.موزع(منفذ؟، عنوان؟، مفتاح؟) — يبدأ خادم توزيع ويعيد قيمته.
 
     المنفذ الافتراضي 7700 والصفر يعني اختيارًا تلقائيًا من النظام
     (مفيد للاختبارات والبرامج المتعددة)، والعنوان الافتراضي 127.0.0.1
-    (محلي فقط) — للشبكة العامة مرر '0.0.0.0' بوعي كامل.
+    (محلي فقط) — للشبكة العامة مرر '0.0.0.0' بوعي كامل. المفتاح
+    الثالث (1.19) يشغل المصادقة: لا عامل يُسجّل إلا بتوقيع HMAC على
+    تحدي عشوائي بمفتاحه — أنشئه بتشفير.مفتاح_آمن() وشاركه سرًا.
     """
     port = DEFAULT_PORT
     host = '127.0.0.1'
-    if len(args) > 2:
+    key = None
+    if len(args) > 3:
         raise ArabiRuntimeError(
-            f"'موزع' تأخذ معاملين على الأكثر (المنفذ ثم العنوان) لكنها "
-            f'استلمت {len(args)}', line)
+            f"'موزع' تأخذ ثلاثة معاملات على الأكثر (المنفذ ثم العنوان "
+            f'ثم المفتاح) لكنها استلمت {len(args)}', line)
     if len(args) >= 1:
         port = args[0]
         if isinstance(port, bool) or not isinstance(port, int):
@@ -519,15 +617,23 @@ def _dist_create(interp, args, line):
             raise ArabiRuntimeError(
                 f"'موزع' تتوقع عنوانًا نصيًا لكنها استلمت "
                 f'{type(host).__name__}', line)
+    if len(args) == 3:
+        key = args[2]
+        if not isinstance(key, str) or not key:
+            raise ArabiRuntimeError(
+                f"'موزع' تتوقع مفتاحًا نصيًا غير فارغ في المعامل الثالث "
+                f'— أنشئه بتشفير.مفتاح_آمن()', line)
     from .runtime import DispatcherValue
-    return DispatcherValue(_Server(host, port, interp))
+    return DispatcherValue(_Server(host, port, interp, key))
 
 
 def _dist_worker(interp, args, line):
-    """موزعة.عامل(المضيف، منفذ؟) — يربط عاملاً بالموزع ويخدمه.
+    """موزعة.عامل(المضيف، منفذ؟، مفتاح؟) — يربط عاملاً بالموزع ويخدمه.
 
     الاستدعاء يحجب حتى إغلاق الموزع (يعيد ولا شيء) — شغّله بخيط
     'خيوط.شغّل' أو في برنامج مستقل بالأمر: --عامل المضيف:منفذ.
+    المفتاح الثالث (1.19) يوقّع تحدي الموزع بالمفتاح المشترك —
+    والناقص أو المخالف يرفض برسالة عربية واضحة.
     """
     if not args:
         raise ArabiRuntimeError(
@@ -539,11 +645,12 @@ def _dist_worker(interp, args, line):
             f"'عامل' تتوقع عنوان الموزع نصًا لكنها استلمت "
             f'{type(host).__name__}', line)
     port = DEFAULT_PORT
-    if len(args) > 2:
+    key = None
+    if len(args) > 3:
         raise ArabiRuntimeError(
-            f"'عامل' تأخذ معاملين على الأكثر (المضيف ثم المنفذ) لكنها "
-            f'استلمت {len(args)}', line)
-    if len(args) == 2:
+            f"'عامل' تأخذ ثلاثة معاملات على الأكثر (المضيف ثم المنفذ "
+            f'ثم المفتاح) لكنها استلمت {len(args)}', line)
+    if len(args) >= 2:
         port = args[1]
         if isinstance(port, bool) or not isinstance(port, int):
             raise ArabiRuntimeError(
@@ -552,7 +659,13 @@ def _dist_worker(interp, args, line):
         if not 0 <= port <= 65535:
             raise ArabiRuntimeError(
                 f'المنفذ {port} خارج المدى المسموح (٠ إلى ٦٥٥٣٥)', line)
-    return run_worker(host, port)
+    if len(args) == 3:
+        key = args[2]
+        if not isinstance(key, str) or not key:
+            raise ArabiRuntimeError(
+                f"'عامل' تتوقع مفتاحًا نصيًا غير فارغ في المعامل الثالث "
+                f'— المفتاح نفسه الذي مرر للموزع', line)
+    return run_worker(host, port, key=key)
 
 
 def _dist_submit(obj, args, kwargs, line):
