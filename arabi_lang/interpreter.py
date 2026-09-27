@@ -62,7 +62,7 @@ class ReturnSignal(Exception):
 
 
 class Interpreter:
-    def __init__(self, script_dir=None):
+    def __init__(self, script_dir=None, use_bytecode=True):
         self.globals = Env()
         install_builtins(self.globals)
         # الصنف المدمج 'استثناء' — أصله لأخطاء المستخدم المخصصة
@@ -72,6 +72,8 @@ class Interpreter:
         self.globals.define('استثناء', self.error_class)
         # مجلد البرنامج الرئيسي (أساس البحث عن الوحدات)
         self.script_dir = script_dir or os.getcwd()
+        # الكود الوسيط: تحميل الوحدات من ذاكرة __بايت__ عند صلاحيتها
+        self.use_bytecode = use_bytecode
         # كومة مجلدات الوحدات قيد التحميل (للاستيراد المتداخل)
         self._module_stack = []
         # ذاكرة الوحدات المحمّلة: مسار ← ModuleValue
@@ -767,8 +769,12 @@ class Interpreter:
 
         self._loading.add(path)
         try:
-            tokens = Lexer(source).tokenize()
-            tree = Parser(tokens).parse()
+            # الكود الوسيط: الذاكرة الصالحة توفر التحليل اللفظي والنحوي
+            if self.use_bytecode:
+                from .bytecode import read_program
+                tree, _from_cache = read_program(path, source)
+            else:
+                tree = Parser(Lexer(source).tokenize()).parse()
             module_env = Env()
             install_builtins(module_env)
             builtin_names = set(module_env.vars)
@@ -941,6 +947,90 @@ class Interpreter:
                     'مفتاح القاموس يجب أن يكون نصًا أو عددًا', key_node.line)
             result[key] = self.evaluate(value_node, env)
         return result
+
+    # ---------- فهم القوائم والقواميس (الإصدار 1.11) ----------
+
+    def eval_ListComp(self, node, env):
+        """[تعبير لكل س في متتالية إن شرط لكل ص في أخرى] — نطاق خاص به.
+
+        متغيرات العبارات تُعرَّف في نطاق فهم مستقل فلا تسرّب للنطاق الخارجي،
+        وعبارة 'لكل' التالية ترى متغيرات العبارة السابقة (دلالات بايثون 3).
+        """
+        comp_env = Env(env)
+        result = []
+        self._comp_loop(node.clauses, 0, comp_env, node,
+                        lambda: result.append(
+                            self.evaluate(node.elt, comp_env)))
+        return result
+
+    def eval_DictComp(self, node, env):
+        """{مفتاح: قيمة لكل س في متتالية إن شرط} — المفتاح الأخير يغلب عند التكرار."""
+        comp_env = Env(env)
+        result = {}
+
+        def _add():
+            key = self.evaluate(node.key, comp_env)
+            if isinstance(key, (list, dict)):
+                raise ArabiRuntimeError(
+                    'مفتاح القاموس يجب أن يكون نصًا أو عددًا', node.key.line)
+            result[key] = self.evaluate(node.value, comp_env)
+
+        self._comp_loop(node.clauses, 0, comp_env, node, _add)
+        return result
+
+    def _comp_loop(self, clauses, i, comp_env, node, action):
+        """يشغّل عبارات 'لكل' المتتالية تعاوديًا ثم ينفذ الإجراء الناتج."""
+        targets, iterable_expr, cond = clauses[i]
+        iterable = self.evaluate(iterable_expr, comp_env)
+        for item in self._iter_items(iterable, node.line):
+            self._comp_bind(targets, item, node.line, comp_env)
+            if cond is not None and not self._truthy(
+                    self.evaluate(cond, comp_env)):
+                continue
+            if i + 1 < len(clauses):
+                self._comp_loop(clauses, i + 1, comp_env, node, action)
+            else:
+                action()
+
+    def _comp_bind(self, targets, item, line, comp_env):
+        """يربط عنصر فهم بمتغير/متغيرات التفكيك في نطاق الفهم (تعريف لا تعيين)."""
+        if len(targets) == 1:
+            comp_env.define(targets[0], item)
+            return
+        if not isinstance(item, (list, tuple)) or len(item) != len(targets):
+            raise ArabiRuntimeError(
+                f'لا يمكن تفكيك العنصر {display(item)} على '
+                f'{len(targets)} متغيرات', line)
+        for target, part in zip(targets, item):
+            comp_env.define(target, part)
+
+    def _iter_items(self, value, line):
+        """يوّلّد قائمة عناصر من أي قيمة قابلة للتكرار (لفهم القوائم)."""
+        if isinstance(value, dict):
+            return list(value.keys())
+        if isinstance(value, (list, range, str)):
+            return list(value)
+        if isinstance(value, GeneratorValue):
+            items = []
+            while True:
+                ok, item = value._next_pair()
+                if not ok:
+                    break
+                items.append(item)
+            return items
+        if isinstance(value, InstanceValue):
+            # بروتوكول التكرار المخصص: تالٍ/أول كما في حلقات لكل
+            iterator, next_func = self._custom_iterator(value, line)
+            items = []
+            while True:
+                item = self._invoke_bound(next_func, iterator, [], {}, line)
+                if item is None:
+                    break
+                items.append(item)
+            return items
+        raise ArabiRuntimeError(
+            f'لا يمكن التكرار على {typename(value)} — استخدم قائمة أو نصًا '
+            'أو مدى أو صنفًا يعرّف طريقة تالٍ', line)
 
     def eval_BinOp(self, node, env):
         op = node.op

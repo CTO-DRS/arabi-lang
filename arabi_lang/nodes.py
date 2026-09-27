@@ -328,6 +328,26 @@ class DictLit(Node):
         self.values = values
 
 
+class ListComp(Node):
+    """فهم قائمة: [تعبير لكل س في متتالية إن شرط لكل ص في أخرى].
+
+    clauses: [(targets, iterable, cond)، ...] — شرط كل عبارة اختياري (None).
+    """
+    def __init__(self, elt, clauses, line=None):
+        super().__init__(line)
+        self.elt = elt              # تعبير العنصر
+        self.clauses = clauses
+
+
+class DictComp(Node):
+    """فهم قاموس: {مفتاح: قيمة لكل س في متتالية إن شرط}."""
+    def __init__(self, key, value, clauses, line=None):
+        super().__init__(line)
+        self.key = key              # تعبير المفتاح
+        self.value = value          # تعبير القيمة
+        self.clauses = clauses
+
+
 class BinOp(Node):
     def __init__(self, op, left, right, line=None):
         super().__init__(line)

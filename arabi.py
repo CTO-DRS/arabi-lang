@@ -29,6 +29,7 @@ from arabi_lang.parser import Parser
 from arabi_lang.interpreter import Interpreter
 from arabi_lang.errors import ArabiError
 from arabi_lang import tools
+from arabi_lang import bytecode
 from arabi_lang import lsp as lsp_module
 
 BANNER = rf"""
@@ -189,7 +190,7 @@ def list_packages():
         print(f'  - {pkg[:-len(".عربي")]}')
 
 
-def run_file(path):
+def run_file(path, use_bytecode=True):
     try:
         with open(path, encoding='utf-8') as f:
             source = f.read()
@@ -205,13 +206,35 @@ def run_file(path):
 
     lines = source.splitlines()
     try:
-        tokens = Lexer(source).tokenize()
-        tree = Parser(tokens).parse()
+        # الكود الوسيط: الذاكرة الصالحة توفّر التحليل اللفظي والنحوي
+        if use_bytecode:
+            from arabi_lang.bytecode import read_program
+            tree, _from_cache = read_program(path, source)
+        else:
+            tokens = Lexer(source).tokenize()
+            tree = Parser(tokens).parse()
         # مجلد الملف هو أساس البحث عن الوحدات المستوردة
         script_dir = os.path.dirname(os.path.abspath(path))
-        Interpreter(script_dir=script_dir).run(tree)
+        Interpreter(script_dir=script_dir,
+                    use_bytecode=use_bytecode).run(tree)
     except ArabiError as error:
         print_error(error, lines)
+        sys.exit(1)
+
+
+def compile_files(paths):
+    """يترجم الملفات إلى كود وسيط دون تنفيذ — يطبع مسار كل ذاكرة."""
+    failed = False
+    for path in paths:
+        source = _read_source(path)
+        try:
+            cpath = bytecode.compile_file(path)
+            size = os.path.getsize(cpath)
+            print(f'✓ {path} → {cpath} ({size} بايت)')
+        except ArabiError as error:
+            print_error(error, source.splitlines())
+            failed = True
+    if failed:
         sys.exit(1)
 
 
@@ -352,6 +375,8 @@ def show_help():
     python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
     python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
     python arabi.py --حزم           عرض المكتبات المثبتة
+    python arabi.py --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
+    python arabi.py --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
     python arabi.py --نسخة | -v     عرض الإصدار
     python arabi.py --مساعدة | -h   عرض هذه المساعدة
 
@@ -403,6 +428,18 @@ def main():
     elif first in ('--لغة', '--lsp'):
         # خادم اللغة: يتواصل عبر القنوات القياسية بلا أي مخرجات أخرى
         lsp_module.main()
+    elif first in ('--بايت', '--bytecode'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--بايت' يحتاج مسار ملف واحد على الأقل بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        compile_files(args[1:])
+    elif first in ('--لا-بايت', '--no-bytecode'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--لا-بايت' يحتاج مسار ملف بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        run_file(args[1], use_bytecode=False)
     elif first in ('-c', '--كود', '--تنفيذ'):
         if len(args) < 2:
             print("خطأ: الخيار '-c' يحتاج كودًا بعده", file=sys.stderr)

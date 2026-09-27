@@ -600,6 +600,23 @@ class _Linter:
             if expr.rest is not None:
                 child.define(expr.rest, expr.line, 'معامل')
             self._walk_expr(expr.body, child)
+        elif isinstance(expr, (N.ListComp, N.DictComp)):
+            # فهم قائمة/قاموس: أهداف العبارات نطاق مستقل لا يسرّب للخارج
+            child = _Scope(parent=scope, kind='block')
+            self.scopes.append(child)
+            for targets, iterable, cond in expr.clauses:
+                # المتتالية قبل تعريف الأهداف (لا رؤية ذاتية) —
+                # وعبارات 'لكل' التالية ترى أهداف العبارة السابقة
+                self._walk_expr(iterable, child)
+                for t in targets:
+                    child.define(t, expr.line, 'متغير')
+                if cond is not None:
+                    self._walk_expr(cond, child)
+            if isinstance(expr, N.ListComp):
+                self._walk_expr(expr.elt, child)
+            else:
+                self._walk_expr(expr.key, child)
+                self._walk_expr(expr.value, child)
         # Num / Str / Bool / Null / This / Super: لا شيء
 
     # ---------- تقرير غير المستخدم ----------

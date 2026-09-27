@@ -12,6 +12,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT)
 
 from arabi import run_code                                  # noqa: E402
+from arabi_lang.interpreter import Interpreter              # noqa: E402
 from arabi_lang.lexer import Lexer                           # noqa: E402
 from arabi_lang.tokens import T                              # noqa: E402
 from arabi_lang.parser import Parser                         # noqa: E402
@@ -5272,3 +5273,499 @@ class TestCustomIteration(unittest.TestCase):
 اطبع(مجموع)
 '''
         self.assertEqual(run_arabi(code).strip(), '123أبج234')
+
+
+# ============================================================
+# فهم القوائم والقواميس (الإصدار 1.11)
+# ============================================================
+
+class TestComprehensions(unittest.TestCase):
+    """[تعبير لكل س في متتالية إن شرط] و {م: ق لكل س في متتالية}."""
+
+    def test_basic_list_comp(self):
+        self.assertEqual(run_arabi('اطبع([س * س لكل س في مدى(5)])').strip(),
+                         '[0، 1، 4، 9، 16]')
+
+    def test_with_condition(self):
+        out = run_arabi('اطبع([س لكل س في مدى(10) إن س % 2 == 0])')
+        self.assertEqual(out.strip(), '[0، 2، 4، 6، 8]')
+
+    def test_condition_filters_all(self):
+        self.assertEqual(run_arabi('اطبع([س لكل س في [1، 3] إن س > 10])').strip(),
+                         '[]')
+
+    def test_transform_strings(self):
+        out = run_arabi('اطبع([طول(ن) لكل ن في ["علي"، "خالد"]])')
+        self.assertEqual(out.strip(), '[3، 4]')
+
+    def test_destructuring_pairs(self):
+        out = run_arabi('اطبع([أ + ب لكل أ، ب في [[1، 2]، [3، 4]]])')
+        self.assertEqual(out.strip(), '[3، 7]')
+
+    def test_dict_comp_basic(self):
+        out = run_arabi('اطبع({ن: طول(ن) لكل ن في ["أ"، "أب"]})')
+        self.assertEqual(out.strip(), '{أ: 1، أب: 2}')
+
+    def test_dict_comp_numeric_keys(self):
+        out = run_arabi('اطبع({س: س * س لكل س في مدى(4)})')
+        self.assertEqual(out.strip(), '{0: 0، 1: 1، 2: 4، 3: 9}')
+
+    def test_dict_comp_quoted_constant_key(self):
+        # المفتاح المقتبس ثابت — آخر قيمة تغلب
+        out = run_arabi('اطبع({"ثابت": س لكل س في [1، 2]})')
+        self.assertEqual(out.strip(), '{ثابت: 2}')
+
+    def test_dict_comp_duplicate_keys_last_wins(self):
+        out = run_arabi('اطبع({س % 2: س لكل س في [1، 2، 3، 4]})')
+        self.assertEqual(out.strip(), '{1: 3، 0: 4}')
+
+    def test_multiple_for_clauses(self):
+        out = run_arabi('اطبع([أ * ب لكل أ في [1، 2] لكل ب في [10، 20]])')
+        self.assertEqual(out.strip(), '[10، 20، 20، 40]')
+
+    def test_multiple_for_clauses_with_condition(self):
+        out = run_arabi(
+            'اطبع([أ * ب لكل أ في [1، 2، 3] لكل ب في [1، 2] إن ب >= أ])')
+        self.assertEqual(out.strip(), '[1، 2، 4]')
+
+    def test_second_clause_sees_first_vars(self):
+        out = run_arabi('اطبع([ص + س لكل س في [10، 20] لكل ص في مدى(س، س + 1)])')
+        self.assertEqual(out.strip(), '[20، 40]')
+
+    def test_no_variable_leak(self):
+        exc = expect_error(
+            'اطبع([س لكل س في مدى(3)])\nاطبع(س)', ArabiRuntimeError, 'س')
+        self.assertIn('غير معرّف', str(exc))
+
+    def test_outer_variable_not_clobbered(self):
+        out = run_arabi('س = 99\nاطبع([س لكل س في مدى(3)])\nاطبع(س)')
+        self.assertEqual(out.splitlines()[1], '99')
+
+    def test_over_string_chars(self):
+        out = run_arabi('اطبع([ح + ح لكل ح في "أب"])')
+        self.assertEqual(out.strip(), '[أأ، بب]')
+
+    def test_over_dict_yields_keys(self):
+        out = run_arabi('اطبع([م لكل م في {"أ": 1، "ب": 2}])')
+        self.assertEqual(out.strip(), '[أ، ب]')
+
+    def test_over_generator(self):
+        code = ('دالة أرقام():\n'
+                '  لكل س في [1، 2، 3]:\n'
+                '    أنتج س\n'
+                'اطبع([س * 2 لكل س في أرقام()])')
+        self.assertEqual(run_arabi(code).strip(), '[2، 4، 6]')
+
+    def test_over_custom_instance(self):
+        code = ('صنف عداد:\n'
+                '  دالة إنشاء(ن):\n'
+                '    هذا.ن = ن\n'
+                '  دالة تالٍ():\n'
+                '    هذا.ن = هذا.ن - 1\n'
+                '    لو هذا.ن >= 0:\n'
+                '      أعد هذا.ن\n'
+                '    أعد ولا شيء\n'
+                'اطبع([ق لكل ق في عداد(3)])')
+        self.assertEqual(run_arabi(code).strip(), '[2، 1، 0]')
+
+    def test_ternary_in_element(self):
+        out = run_arabi(
+            'اطبع([لو س % 2 == 0: "زوج" وإلا "فرد" لكل س في [1، 2، 3]])')
+        self.assertEqual(out.strip(), '[فرد، زوج، فرد]')
+
+    def test_nested_comprehension(self):
+        out = run_arabi('اطبع([[ص * 2 لكل ص في مدى(3)] لكل س في مدى(2)])')
+        self.assertEqual(out.strip(), '[[0، 2، 4]، [0، 2، 4]]')
+
+    def test_condition_uses_outer_variable(self):
+        out = run_arabi('حد = 2\nاطبع([س لكل س في مدى(5) إن س <= حد])')
+        self.assertEqual(out.strip(), '[0، 1، 2]')
+
+    def test_inside_function_uses_param(self):
+        code = ('دالة مربعات(ل):\n'
+                '  أعد [س * س لكل س في ل]\n'
+                'اطبع(مربعات([1، 2، 3]))')
+        self.assertEqual(run_arabi(code).strip(), '[1، 4، 9]')
+
+    def test_empty_iterable(self):
+        self.assertEqual(run_arabi('اطبع([س لكل س في []])').strip(), '[]')
+
+    def test_map_filter_equivalence(self):
+        a = run_arabi('اطبع(خريطة(دالة(س) => س * 2، [1، 2، 3]))').strip()
+        b = run_arabi('اطبع([س * 2 لكل س في [1، 2، 3]])').strip()
+        self.assertEqual(a, b)
+        a = run_arabi('اطبع(مرشّح(دالة(س) => س > 1، [1، 2، 3]))').strip()
+        b = run_arabi('اطبع([س لكل س في [1، 2، 3] إن س > 1])').strip()
+        self.assertEqual(a, b)
+
+    def test_arabic_digits(self):
+        out = run_arabi('اطبع([س * ٢ لكل س في [١، ٢، ٣]])')
+        self.assertEqual(out.strip(), '[2، 4، 6]')
+
+    def test_in_fstring(self):
+        out = run_arabi('اطبع(ق"النتيجة: {[س * 10 لكل س في [1، 2]]}")')
+        self.assertEqual(out.strip(), 'النتيجة: [10، 20]')
+
+    def test_element_with_method_call(self):
+        out = run_arabi('اطبع([ن + "!" لكل ن في ["أ"، "ب"]])')
+        self.assertEqual(out.strip(), '[أ!، ب!]')
+
+    def test_parse_error_missing_in(self):
+        expect_error('اطبع([س لكل س مدى(3)])', ParseError, 'في')
+
+    def test_parse_error_bad_target(self):
+        expect_error('اطبع([س لكل 5 في مدى(3)])', ParseError, 'اسم')
+
+    def test_parse_error_unclosed_element(self):
+        # عنصر مفقود — المحلل النحوي يرفع (القوس المغلق يكشفه اللفظي)
+        expect_error('اطبع([لكل س في مدى(3)])', ParseError, 'تعبير')
+
+    def test_lexer_error_unclosed_bracket(self):
+        expect_error('اطبع([س لكل س في مدى(3)', LexerError, 'مفتوحًا')
+
+    def test_parse_error_spread_in_element(self):
+        expect_error('ل = [1]\nاطبع([...ل لكل س في ل])', ParseError)
+
+    def test_runtime_error_not_iterable(self):
+        expect_error('اطبع([س لكل س في 5])', ArabiRuntimeError, 'التكرار')
+
+    def test_runtime_error_destructure_mismatch(self):
+        expect_error(
+            'اطبع([أ + ب لكل أ، ب في [[1، 2، 3]]])',
+            ArabiRuntimeError, 'تفكيك')
+
+    def test_linter_clean_on_comprehension(self):
+        issues = lint_source('ل = [1، 2، 3]\n'
+                             'اطبع([س * س لكل س في ل إن س > 1])')
+        self.assertEqual(issues, [])
+
+    def test_linter_warns_undefined_in_iterable(self):
+        issues = lint_source('اطبع([س لكل س في مجهول])')
+        self.assertTrue(any('مجهول' in msg for _, _, msg in issues))
+
+
+# ============================================================
+# الكود الوسيط Bytecode (الإصدار 1.11)
+# ============================================================
+
+from arabi_lang import bytecode as _bc  # noqa: E402
+
+FEATURE_RICH_SOURCE = '''# برنامج يغطي ميزات كثيرة لاختبار التسلسل
+ق = [ق"مربع {س}" لكل س في [1، 2]]
+اطبع(ق)
+ش = {الاسم: "أحمد"، العمر: 30}
+دالة فحص(ش):
+  طابق ش
+  حالة {الاسم: أ، العمر: ع} إن ع > 20:
+    أعد أ + " بالغ"
+  غير ذلك:
+    أعد "صغير"
+اطبع(فحص(ش))
+دالة جمع(أ، ب، زائد=1):
+  أعد أ * زائد + ب
+اطبع(جمع(2، 3، زائد = 10))
+صنف نقط:
+  دالة إنشاء(س، ص):
+    هذا.س = س
+    هذا.ص = ص
+  دالة نص():
+    أعد ق"({هذا.س}، {هذا.ص})"
+اطبع(نقط(1، 2).نص())
+ق2 = {س: س * س لكل س في مدى(4)}
+اطبع(ق2)
+'''
+
+
+def _run_tree(tree):
+    out = io.StringIO()
+    with redirect_stdout(out):
+        Interpreter().run(tree)
+    return out.getvalue()
+
+
+class TestBytecodeRoundTrip(unittest.TestCase):
+    """تسلسل الشجرة وإعادتها بلا فقد — نفس المخرجات تمامًا."""
+
+    def _round_trip(self, source):
+        tree = Parser(Lexer(source).tokenize()).parse()
+        return _run_tree(tree), _run_tree(_bc.dict_to_ast(_bc.ast_to_dict(tree)))
+
+    def test_simple_program(self):
+        a, b = self._round_trip('اطبع(1 + 2)\nاطبع("مرحبا")')
+        self.assertEqual(a, b)
+
+    def test_feature_rich_program(self):
+        a, b = self._round_trip(FEATURE_RICH_SOURCE)
+        self.assertEqual(a, b)
+        self.assertIn('أحمد بالغ', a)
+
+    def test_named_args_tuples_preserved(self):
+        a, b = self._round_trip(
+            'دالة قيمة(أ، ب = 5):\n  أعد أ + ب\nاطبع(قيمة(1، ب = 2))')
+        self.assertEqual(a, b)
+        self.assertEqual(a.strip(), '3')
+
+    def test_comprehensions_preserved(self):
+        a, b = self._round_trip(
+            'اطبع([س * س لكل س في مدى(4) إن س > 1])\n'
+            'اطبع({ن: طول(ن) لكل ن في ["أب"]})')
+        self.assertEqual(a, b)
+
+    def test_match_patterns_preserved(self):
+        a, b = self._round_trip(
+            'دالة ف(ق):\n  طابق ق\n  حالة [أ، ...البقية]:\n    أعد أ\n'
+            '  غير ذلك:\n    أعد "لا"\nاطبع(ف([1، 2، 3]))')
+        self.assertEqual(a, b)
+
+    def test_generators_preserved(self):
+        a, b = self._round_trip(
+            'دالة ت():\n  أنتج 1\n  أنتج 2\nاطبع([س لكل س في ت()])')
+        self.assertEqual(a, b)
+
+    def test_enum_interface_preserved(self):
+        src = ('واجهة شكل:\n  دالة مساحة()\n'
+               'صنف مربع من شكل:\n'
+               '  دالة إنشاء(ض):\n    هذا.ض = ض\n'
+               '  دالة مساحة():\n    أعد هذا.ض * هذا.ض\n'
+               'اطبع(مربع(3).مساحة())')
+        a, b = self._round_trip(src)
+        self.assertEqual(a, b)
+
+    def test_line_numbers_preserved(self):
+        src = 'اطبع(1)\n\n\nاطبع(مفقود)'
+        tree = Parser(Lexer(src).tokenize()).parse()
+        tree2 = _bc.dict_to_ast(_bc.ast_to_dict(tree))
+        # نفس رسالة الخطأ وبنفس رقم السطر
+        with self.assertRaises(ArabiRuntimeError) as cm1:
+            _run_tree(tree)
+        with self.assertRaises(ArabiRuntimeError) as cm2:
+            _run_tree(tree2)
+        self.assertEqual(cm1.exception.line, cm2.exception.line)
+        self.assertEqual(cm1.exception.line, 4)
+
+    def test_ast_to_dict_rejects_unknown_value(self):
+        tree = Parser(Lexer('اطبع(1)').tokenize()).parse()
+        tree.statements.append(object())
+        with self.assertRaises(ArabiError):
+            _bc.ast_to_dict(tree)
+
+    def test_dict_to_ast_rejects_unknown_node(self):
+        with self.assertRaises(ArabiError):
+            _bc.dict_to_ast({'عقدة': 'مجهول_تماما', 'حقول': {}})
+
+
+class TestBytecodeCache(unittest.TestCase):
+    """الذاكرة المؤقتة: الكتابة والتحميل والإبطال التلقائي."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.path = os.path.join(self.dir, 'برنامج.عربي')
+        with open(self.path, 'w', encoding='utf-8') as f:
+            f.write('اطبع(40 + 2)\n')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, content):
+        with open(self.path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+    def cache_path(self):
+        return _bc.cache_path_for(self.path)
+
+    def test_cache_path_layout(self):
+        self.assertEqual(os.path.basename(self.cache_path()), 'برنامج.بيت')
+        self.assertEqual(os.path.basename(os.path.dirname(self.cache_path())),
+                         '__بايت__')
+
+    def test_first_read_compiles_second_from_cache(self):
+        t1, cached1 = _bc.read_program(self.path)
+        self.assertFalse(cached1)
+        self.assertTrue(os.path.exists(self.cache_path()))
+        t2, cached2 = _bc.read_program(self.path)
+        self.assertTrue(cached2)
+        self.assertEqual(_run_tree(t1).strip(), '42')
+        self.assertEqual(_run_tree(t2).strip(), '42')
+
+    def test_cache_dir_auto_created(self):
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '__بايت__')))
+        _bc.read_program(self.path)
+        self.assertTrue(os.path.isdir(os.path.join(self.dir, '__بايت__')))
+
+    def test_modification_invalidates_cache(self):
+        _bc.read_program(self.path)
+        self.write('اطبع("جديد")\n')
+        tree, cached = _bc.read_program(self.path)
+        self.assertFalse(cached)
+        self.assertEqual(_run_tree(tree).strip(), 'جديد')
+
+    def test_touch_same_size_invalidates(self):
+        # نفس الحجم — تعديل زمن التعديل فقط يجب أن يُبطل الذاكرة
+        _bc.read_program(self.path)
+        st = os.stat(self.path)
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        _tree, cached = _bc.read_program(self.path)
+        self.assertFalse(cached)
+
+    def test_version_mismatch_invalidates(self):
+        _bc.read_program(self.path)
+        import pickle
+        with open(self.cache_path(), 'rb') as f:
+            payload = pickle.load(f)
+        payload = (payload[0], '0.0.1', payload[2], payload[3], payload[4])
+        with open(self.cache_path(), 'wb') as f:
+            pickle.dump(payload, f)
+        _tree, cached = _bc.read_program(self.path)
+        self.assertFalse(cached)
+
+    def test_corrupt_cache_recovers(self):
+        _bc.read_program(self.path)
+        with open(self.cache_path(), 'wb') as f:
+            f.write(b'\x00\x01\x02 corrupt \xff\xfe data')
+        tree, cached = _bc.read_program(self.path)
+        self.assertFalse(cached)
+        self.assertEqual(_run_tree(tree).strip(), '42')
+
+    def test_cache_written_after_recovery(self):
+        _bc.read_program(self.path)
+        with open(self.cache_path(), 'wb') as f:
+            f.write(b'talif')
+        _bc.read_program(self.path)
+        t2, cached = _bc.read_program(self.path)
+        self.assertTrue(cached)
+        self.assertEqual(_run_tree(t2).strip(), '42')
+
+    def test_no_temp_file_left(self):
+        _bc.read_program(self.path)
+        leftovers = [n for n in os.listdir(os.path.join(self.dir, '__بايت__'))
+                     if n.endswith('.مؤقت')]
+        self.assertEqual(leftovers, [])
+
+    def test_source_param_avoids_reread(self):
+        src = 'اطبع("ممرر")\n'
+        tree, cached = _bc.read_program(self.path, src)
+        self.assertFalse(cached)
+        self.assertEqual(_run_tree(tree).strip(), 'ممرر')
+
+    def test_compile_file_writes_without_executing(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cpath = _bc.compile_file(self.path)
+        self.assertEqual(cpath, self.cache_path())
+        self.assertEqual(out.getvalue(), '')          # لا تنفيذ
+        self.assertTrue(os.path.exists(cpath))
+
+    def test_compile_file_syntax_error_no_cache(self):
+        self.write('اطبع(إغلاق غير مغلق')
+        with self.assertRaises(ArabiError):   # لفظي (قوس) أو نحوي
+            _bc.compile_file(self.path)
+        self.assertFalse(os.path.exists(self.cache_path()))
+
+    def test_ast_to_dict_dict_to_ast_public_api(self):
+        tree = Parser(Lexer('اطبع([1، 2])').tokenize()).parse()
+        rebuilt = _bc.dict_to_ast(_bc.ast_to_dict(tree))
+        self.assertEqual(type(rebuilt).__name__, 'Program')
+
+
+class TestBytecodeModules(unittest.TestCase):
+    """الكود الوسيط مع الوحدات المستوردة من ملفات .عربي."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, relpath, content):
+        path = os.path.join(self.dir, relpath)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return path
+
+    def test_module_import_creates_cache(self):
+        mod = self.write('مساعد.عربي', 'دالة ضعف(س):\n  أعد س * 2\n')
+        main = self.write('رئيسي.عربي',
+                          'من مساعد استورد ضعف\n'
+                          'اطبع([ضعف(س) لكل س في [1، 2، 3]])\n')
+        tree, _ = _bc.read_program(main)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            Interpreter(script_dir=self.dir).run(tree)
+        self.assertEqual(out.getvalue().strip(), '[2، 4، 6]')
+        # ذاكرة الوحدة كُتبت أثناء تحميلها بالمفسّر
+        self.assertTrue(os.path.exists(_bc.cache_path_for(mod)))
+
+    def test_module_reload_from_cache(self):
+        main = self.write('رئيسي.عربي', 'استورد مساعد\n')
+        self.write('مساعد.عربي', 'قيمة = ١\n')
+        tree, _ = _bc.read_program(main)
+        Interpreter(script_dir=self.dir).run(tree)
+        tree2, cached = _bc.read_program(main)
+        self.assertTrue(cached)
+        Interpreter(script_dir=self.dir).run(tree2)
+
+    def test_use_bytecode_false_skips_cache(self):
+        self.write('مساعد.عربي', 'قيمة = ١\n')
+        main = self.write('رئيسي.عربي', 'استورد مساعد\nاطبع(مساعد.قيمة)\n')
+        tree = Parser(Lexer(open(main, encoding='utf-8').read()).tokenize()).parse()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            Interpreter(script_dir=self.dir, use_bytecode=False).run(tree)
+        self.assertEqual(out.getvalue().strip(), '1')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '__بايت__')))
+
+
+class TestBytecodeCLI(unittest.TestCase):
+    """أعلام سطر الأوامر --بايت و --لا-بايت."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.path = os.path.join(self.dir, 'برنامج.عربي')
+        with open(self.path, 'w', encoding='utf-8') as f:
+            f.write('اطبع("من CLI")\n')
+        self.env_marker = os.path.join(self.dir, 'نفذ')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _cli(self, *args):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'arabi.py'), *args],
+            capture_output=True, text=True, cwd=self.dir)
+
+    def test_byte_flag_compiles_only(self):
+        r = self._cli('--بايت', self.path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('برنامج.بيت', r.stdout)
+        self.assertNotIn('من CLI', r.stdout)      # لم يُنفذ
+        self.assertTrue(os.path.exists(
+            os.path.join(self.dir, '__بايت__', 'برنامج.بيت')))
+
+    def test_byte_flag_syntax_error(self):
+        with open(self.path, 'w', encoding='utf-8') as f:
+            f.write('اطبع(')
+        r = self._cli('--بايت', self.path)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('خطأ', r.stderr)
+
+    def test_no_bytecode_flag_runs(self):
+        r = self._cli('--لا-بايت', self.path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('من CLI', r.stdout)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.dir, '__بايت__')))
+
+    def test_normal_run_creates_cache_and_uses_it(self):
+        r = self._cli(self.path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('من CLI', r.stdout)
+        cpath = os.path.join(self.dir, '__بايت__', 'برنامج.بيت')
+        self.assertTrue(os.path.exists(cpath))
+        # تشغيل ثاني — لا يزال صحيحًا عبر الذاكرة
+        r2 = self._cli(self.path)
+        self.assertEqual(r2.returncode, 0)
+        self.assertIn('من CLI', r2.stdout)

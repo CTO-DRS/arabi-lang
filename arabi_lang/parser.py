@@ -11,9 +11,9 @@ from .nodes import (
     Break, Continue, Pass, Try, Raise, Import, ClassDef, InterfaceDef,
     Lambda, Switch, EnumDef, PropertyDef, Global, Assert, Delete, Yield,
     Match, PLiteral, PCapture, POr, PList, PDict,
-    Num, Str, FString, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
-    Call, Index, Slice, MethodCall, Attribute, This, Super, Ternary,
-    SpreadArg,
+    Num, Str, FString, Bool, Null, Name, ListLit, DictLit, ListComp, DictComp,
+    BinOp, UnaryOp, Call, Index, Slice, MethodCall, Attribute, This, Super,
+    Ternary, SpreadArg,
 )
 from .errors import ParseError
 
@@ -637,7 +637,8 @@ class Parser:
         patterns = []
         if not self.check(T.RBRACE):
             while True:
-                keys.append(self._dict_key())
+                key_node, _ = self._dict_key()
+                keys.append(key_node)
                 self.expect(T.COLON, "متوقع ':' بين مفتاح النمط وقيمته")
                 patterns.append(self._parse_pattern())
                 if self.match(T.COMMA):
@@ -955,15 +956,45 @@ class Parser:
 
     def list_literal(self):
         tok = self.advance()                       # [
-        items = []
-        if not self.check(T.RBRACKET):
+        if self.check(T.RBRACKET):
+            self.advance()
+            return ListLit([], tok.line)
+        first = self._list_item()
+        if self.check(T.FOR):                      # فهم قائمة: [... لكل س في ل]
+            return self._list_comp(first, tok)
+        items = [first]
+        while self.match(T.COMMA):
+            if self.check(T.RBRACKET):             # فاصلة أخيرة مسموحة
+                break
             items.append(self._list_item())
-            while self.match(T.COMMA):
-                if self.check(T.RBRACKET):
-                    break
-                items.append(self._list_item())
         self.expect(T.RBRACKET, "متوقع ']' لإغلاق القائمة")
         return ListLit(items, tok.line)
+
+    def _list_comp(self, first, tok):
+        """يكمل تحليل فهم القائمة بعد أول عنصر + كلمة 'لكل'."""
+        if isinstance(first, SpreadArg):
+            self.error(
+                "التوسيع '...' غير مسموح في عنصر الفهم — عنصر الفهم تعبير "
+                'يحسب لكل تكرار، والتفكيك يتم بأهداف العبارة (لكل أ، ب في …)')
+        clauses = [self._comp_clause()]
+        while self.check(T.FOR):                   # عبارات لكل متتالية
+            clauses.append(self._comp_clause())
+        self.expect(T.RBRACKET, "متوقع ']' لإغلاق فهم القائمة")
+        return ListComp(first, clauses, tok.line)
+
+    def _comp_clause(self):
+        """عبارة 'لكل أ، ب في متتالية إن شرط' — الشرط اختياري."""
+        self.advance()                             # لكل
+        targets = [self.expect_ident("متوقع اسم متغير بعد 'لكل' في الفهم")]
+        while self.match(T.COMMA):
+            targets.append(self.expect_ident('متوقع اسم متغير في التفكيك'))
+        self.expect(T.IN, "متوقع الكلمة المفتاحية 'في' في فهم القائمة")
+        iterable = self.expression()
+        cond = None
+        if self.check(T.IDENT) and self.cur().value == 'إن':
+            self.advance()                         # إن كلمة سياقية مثل حرّاس طابق
+            cond = self.expression()
+        return (targets, iterable, cond)
 
     def _list_item(self):
         """عنصر قائمة: تعبير أو ...تعبير (تفكيك)."""
@@ -974,27 +1005,51 @@ class Parser:
 
     def dict_literal(self):
         tok = self.advance()                       # {
-        keys = []
-        values = []
         if not self.check(T.RBRACE):
-            keys.append(self._dict_key())
+            first_key, bare_name = self._dict_key()
             self.expect(T.COLON, "متوقع ':' بين مفتاح القاموس وقيمته")
-            values.append(self.expression())
+            first_val = self.expression()
+            if self.check(T.FOR):                  # فهم قاموس: {م: ق لكل س في ل}
+                return self._dict_comp(first_key, first_val, tok, bare_name)
+            keys = [first_key]
+            values = [first_val]
             while self.match(T.COMMA):
                 if self.check(T.RBRACE):
                     break
-                keys.append(self._dict_key())
+                key_node, _ = self._dict_key()
+                keys.append(key_node)
                 self.expect(T.COLON, "متوقع ':' بين مفتاح القاموس وقيمته")
                 values.append(self.expression())
-        self.expect(T.RBRACE, "متوقع '}' لإغلاق القاموس")
-        return DictLit(keys, values, tok.line)
+            self.expect(T.RBRACE, "متوقع '}' لإغلاق القاموس")
+            return DictLit(keys, values, tok.line)
+        self.advance()
+        return DictLit([], [], tok.line)
+
+    def _dict_comp(self, first_key, first_val, tok, bare_name=None):
+        """يكمل تحليل فهم القاموس بعد مفتاح:قيمة + كلمة 'لكل'.
+
+        المفتاح المعرّف المجرّد (ن) يعامل كمتغير يُقيّم كل تكرار —
+        ولتعريف مفتاح ثابت يُقتبس: {"ثابت": ق}.
+        """
+        if bare_name is not None:
+            first_key = Name(bare_name, tok.line)
+        clauses = [self._comp_clause()]
+        while self.check(T.FOR):
+            clauses.append(self._comp_clause())
+        self.expect(T.RBRACE, "متوقع '}' لإغلاق فهم القاموس")
+        return DictComp(first_key, first_val, clauses, tok.line)
 
     def _dict_key(self):
-        """مفتاح القاموس: معرّف بلا اقتباس يعامل كنص — {الحالة: 200} ≡ {"الحالة": 200}."""
-        if self.check(T.IDENT):
+        """مفتاح القاموس: معرّف بلا اقتباس يعامل كنص — {الحالة: 200} ≡ {"الحالة": 200}.
+
+        يعيد (العقدة، الاسم_المجرّد) — الاسم_المجرّد ليُستبدل بمتغير في فهم القاموس.
+        المعرّف المجرّد يُقبل فقط إذا تلاه ':' مباشرة، وإلا فهو بداية
+        تعبير محسوب كـ {س % 2: س}.
+        """
+        if self.check(T.IDENT) and self.peek(1).type is T.COLON:
             tok = self.advance()
-            return Str(tok.value, tok.line)
-        return self.expression()
+            return Str(tok.value, tok.line), tok.value
+        return self.expression(), None
 
     # ---------- أدوات ----------
 
