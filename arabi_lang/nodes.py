@@ -69,7 +69,7 @@ class For(Node):
 
 class FuncDef(Node):
     def __init__(self, name, params, body, line=None, decorators=None,
-                 is_generator=False, rest=None):
+                 is_generator=False, rest=None, is_async=False):
         super().__init__(line)
         self.name = name
         self.params = params      # [(الاسم، تعبير الافتراضي أو None)، ...]
@@ -77,6 +77,7 @@ class FuncDef(Node):
         self.decorators = decorators or []   # [تعبير، ...] بترتيب الكتابة
         self.is_generator = is_generator     # صح إذا يحوي 'أنتج'
         self.rest = rest          # اسم المعامل المتغير ... أو None
+        self.is_async = is_async  # صح إذا سبقها 'غير متزامنة' (الإصدار 1.15)
 
 
 class Return(Node):
@@ -429,6 +430,17 @@ class SpreadArg(Node):
     def __init__(self, expr, line=None):
         super().__init__(line)
         self.expr = expr
+
+
+class Await(Node):
+    """انتظر مهمة — يوقف السطر الحالي حتى تنتهي المهمة ويعيد نتيجتها.
+
+    المعامل يجب أن يكون قيمة 'مهمة' (نتيجة استدعاء دالة غير متزامنة).
+    """
+
+    def __init__(self, operand, line=None):
+        super().__init__(line)
+        self.operand = operand
 
 
 class Lambda(Node):

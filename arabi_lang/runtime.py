@@ -137,13 +137,15 @@ class ArabiFunc:
     تُقيّم الافتراضات مرة واحدة عند التعريف (كما في بايثون).
     is_generator صح إذا يحوي الجسم 'أنتج' — استدعاؤها يعيد مولدًا.
     rest اسم المعامل المتغير (...الاسم) الذي يجمع ما زاد من الوسائط.
+    is_async صح للدوال غير المتزامنة (الإصدار 1.15) — استدعاؤها
+    يشغّلها في خيط مستقل فورًا ويعيد 'مهمة' تنتظر نتيجتها بـ 'انتظر'.
     """
 
     __slots__ = ('name', 'params', 'body', 'env', 'is_lambda',
-                 'is_generator', 'rest', 'vm_code')
+                 'is_generator', 'rest', 'is_async', 'vm_code')
 
     def __init__(self, name, params, body, env, is_lambda=False,
-                 is_generator=False, rest=None):
+                 is_generator=False, rest=None, is_async=False):
         self.name = name
         self.params = params
         self.body = body
@@ -151,6 +153,7 @@ class ArabiFunc:
         self.is_lambda = is_lambda
         self.is_generator = is_generator
         self.rest = rest
+        self.is_async = is_async
         self.vm_code = _VM_PENDING       # الدولاب الافتراضي: ترجمة عند الطلب
 
 
@@ -479,6 +482,57 @@ class QueueValue:
         self.q = queue.Queue()
 
 
+class TaskValue:
+    """مهمة غير متزامنة (الإصدار 1.15) — نتيجة استدعاء دالة غير متزامنة.
+
+    الاستدعاء يشغّل الدالة في خيط مستقل فورًا ويعيد هذه المهمة.
+    - 'انتظر مهمة' يوقف السطر حتى تنتهي المهمة ويعيد نتيجتها
+      (أو يعيد رفع خطأها إن فشلت).
+    - جاهز() تفحص الانتهاء دون انتظار، الخطأ() يعيد رسالة فشل
+      المهمة بعد انتهائها أو 'ولا شيء'، وانتظر() تنتظر بلا نتيجة.
+    """
+
+    __slots__ = ('thread', '_event', '_lock', '_done', '_error', '_result')
+
+    def __init__(self):
+        self.thread = None
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._done = False
+        self._error = None
+        self._result = None
+
+    def _finish(self, result, error):
+        """يسجل النتيجة أو الخطأ مرة واحدة ويوقظ كل المنتظرين."""
+        with self._lock:
+            if self._done:
+                return
+            self._result = result
+            self._error = error
+            self._done = True
+        self._event.set()
+
+    def result(self, line=None):
+        """ينتظر انتهاء المهمة ويعيد نتيجتها — يعيد رفع خطأها إن فشلت.
+
+        الخطأ يُرفع بكائنه الأصلي (بخطأه وأصله) كي تحفظ دلالات 'جرب'
+        وترابط الأخطاء المخصصة كما لو حدثت في السطر نفسه.
+        """
+        self._event.wait()
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+    def error(self):
+        """ينتظر انتهاء المهمة ويعيد رسالة الخطأ أو 'ولا شيء' إذا نجحت."""
+        self._event.wait()
+        return self._error.message if self._error is not None else None
+
+    def ready(self):
+        """هل انتهت المهمة؟ فحص فوري دون انتظار."""
+        return self._done
+
+
 class DateValue:
     """قيمة تاريخ ووقت — تغلف datetime.datetime (الإصدار 1.9)."""
 
@@ -493,6 +547,7 @@ GENERATOR_METHODS = {}  # تُملأ بعد تعريف طرق المولدات
 THREAD_METHODS = {}   # تُملأ بعد تعريف طرق الخيوط
 LOCK_METHODS = {}     # تُملأ بعد تعريف طرق القفل
 QUEUE_METHODS = {}    # تُملأ بعد تعريف طرق الطابور
+TASK_METHODS = {}     # تُملأ بعد تعريف طرق المهام غير المتزامنة (1.15)
 
 
 def typename(v):
@@ -513,6 +568,8 @@ def typename(v):
     if isinstance(v, range):
         return 'مدى'
     if isinstance(v, (ArabiFunc, BuiltinFunc)):
+        if isinstance(v, ArabiFunc) and v.is_async:
+            return 'دالة غير متزامنة'
         return 'دالة'
     if isinstance(v, ModuleValue):
         return 'وحدة'
@@ -534,6 +591,8 @@ def typename(v):
         return 'الأصل'
     if isinstance(v, ThreadValue):
         return 'خيط'
+    if isinstance(v, TaskValue):
+        return 'مهمة'
     if isinstance(v, LockValue):
         return 'قفل'
     if isinstance(v, QueueValue):
@@ -561,6 +620,8 @@ def display(v):
     if isinstance(v, ArabiFunc):
         if v.is_lambda:
             return '<دالة سهمية>'
+        if v.is_async:
+            return f'<دالة غير متزامنة {v.name}>'
         return f'<دالة {v.name}>'
     if isinstance(v, BuiltinFunc):
         return f'<دالة جاهزة {v.name}>'
@@ -584,6 +645,8 @@ def display(v):
         return f'<الأصل {v.cls.name}>'
     if isinstance(v, ThreadValue):
         return '<خيط>'
+    if isinstance(v, TaskValue):
+        return '<مهمة>'
     if isinstance(v, LockValue):
         return '<قفل>'
     if isinstance(v, QueueValue):
@@ -1064,6 +1127,10 @@ def install_builtins(env):
         ('خريطة', BuiltinFunc('خريطة', _hi_map, takes_interp=True)),
         ('مرشّح', BuiltinFunc('مرشّح', _hi_filter, takes_interp=True)),
         ('اختزل', BuiltinFunc('اختزل', _hi_reduce, takes_interp=True)),
+        # غير المتزامن (الإصدار 1.15)
+        ('انتظر_الجميع', _async_wait_all),
+        ('سباق', _async_race),
+        ('انتظر_زمن', _async_sleep),
     ]
     for name, fn in builtins_list:
         if isinstance(fn, BuiltinFunc):          # دوال جاهزة مغلفة مسبقًا
@@ -1145,6 +1212,7 @@ def install_builtins(env):
     env.define('شبكة', ModuleValue('شبكة', {
         'اطلب': BuiltinFunc('اطلب', _net_request),
         'نص_الصفحة': BuiltinFunc('نص_الصفحة', _net_text),
+        'تنزيل': BuiltinFunc('تنزيل', _net_download),
     }))
 
     env.define('تحويل', ModuleValue('تحويل', {
@@ -1951,6 +2019,160 @@ def _net_text(args, line):
     return _net_request([args[0]], line)['النص']
 
 
+def _net_download(args, line):
+    """تنزيل(رابط، مسار، مهلة؟) — ينزّل محتوى الرابط إلى ملف (ثنائي آمن)
+    ويعيد عدد البايتات المكتوبة. يشارك 'اطلب' نفس قواعد الروابط والمهلة.
+    (الإصدار 1.15)
+    """
+    if not 2 <= len(args) <= 3:
+        raise ArabiRuntimeError(
+            f"'تنزيل' تقبل رابطًا ومسارًا ومهلة اختيارية لكنها استلمت "
+            f'{len(args)} معاملات', line)
+    url = args[0]
+    if not isinstance(url, str):
+        raise ArabiRuntimeError(
+            f"'تنزيل' تحتاج رابطًا نصيًا لكن استلمت {typename(url)}", line)
+    path = args[1]
+    if not isinstance(path, str):
+        raise ArabiRuntimeError(
+            f"مسار التنزيل يجب أن يكون نصًا لكن استلم {typename(path)}", line)
+    timeout = 10.0
+    if len(args) == 3:
+        timeout = _num_check(args[2], "مهلة 'تنزيل'", line)
+        if timeout <= 0:
+            raise ArabiRuntimeError('المهلة يجب أن تكون عددًا موجبًا', line)
+    import urllib.request
+    import urllib.error
+    if not url.startswith(('http://', 'https://')):
+        raise ArabiRuntimeError(
+            f"الرابط يجب أن يبدأ بـ http:// أو https:// — استلمت '{url}'", line)
+    url = url.replace('؟', '?')
+    url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise ArabiRuntimeError(
+            f"فشل تنزيل '{url}': رمز الحالة {exc.code}", line)
+    except Exception as exc:
+        raise ArabiRuntimeError(
+            f"فشل تنزيل '{url}': {exc}", line)
+    try:
+        with open(path, 'wb') as f:
+            f.write(data)
+    except OSError as exc:
+        raise ArabiRuntimeError(
+            f"تعذّرت كتابة ملف التنزيل '{path}': {exc}", line)
+    return len(data)
+
+
+# ================== المهام غير المتزامنة (الإصدار 1.15) ==================
+
+def _task_list(args, name, line):
+    """يتحقق من معامل قائمة مهام لـ انتظر_الجميع/سباق ويعيدها."""
+    if len(args) != 1 or not isinstance(args[0], list):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج قائمة مهام — مثال: {name}([م١، م٢])", line)
+    for i, t in enumerate(args[0]):
+        if not isinstance(t, TaskValue):
+            raise ArabiRuntimeError(
+                f'العنصر رقم {i + 1} ليس مهمة بل {typename(t)} — '
+                'المهام نتاج استدعاء دوال غير متزامنة', line)
+    return args[0]
+
+
+def _async_wait_all(args, line):
+    """انتظر_الجميع([م١، م٢، ...]) — ينتظر كل المهام ويعيد قائمة النتائج
+    بترتيبها الأصلي. يرفع خطأ أول مهمة فشلت (بعد انتظار الجميع)."""
+    tasks = _task_list(args, 'انتظر_الجميع', line)
+    results = []
+    first_error = None
+    for t in tasks:
+        try:
+            results.append(t.result(line))
+        except ArabiRuntimeError as exc:
+            if first_error is None:
+                first_error = exc
+            results.append(None)
+    if first_error is not None:
+        raise first_error
+    return results
+
+
+def _async_race(args, line):
+    """سباق([م١، م٢، ...]) — يعيد أول مهمة تنتهي (نجحت أو فشلت)،
+    والبقية تواصل عملها في الخلفية حتى النهاية.
+    انتظر النتيجة: نتيجة = انتظر سباق([م١، م٢])."""
+    tasks = _task_list(args, 'سباق', line)
+    if not tasks:
+        raise ArabiRuntimeError(
+            "'سباق' تحتاج مهمة واحدة على الأقل في القائمة", line)
+    done_q = queue.Queue()
+
+    def _watch(task):
+        try:
+            task.result()            # ينتظر الانتهاء (الخطأ يُبتلع هنا)
+        except ArabiError:
+            pass
+        done_q.put(task)
+
+    for t in tasks:
+        watcher = threading.Thread(target=_watch, args=(t,), daemon=True,
+                                   name='سباق-عربي')
+        watcher.start()
+    return done_q.get()
+
+
+def _async_sleep(args, line):
+    """انتظر_زمن(ثوان) — يوقف المهمة الحالية (أو البرنامج) مدة محددة.
+    داخل دالة غير متزامنة يوقف هذه المهمة وحدها دون غيرها."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'انتظر_زمن' تتوقع معاملًا واحدًا (عدد الثواني) لكنها استلمت "
+            f'{len(args)}', line)
+    seconds = _num_check(args[0], "'انتظر_زمن'", line)
+    if seconds < 0:
+        raise ArabiRuntimeError('عدد الثواني يجب أن يكون موجبًا', line)
+    time.sleep(seconds)
+    return None
+
+
+def _task_result(obj, args, line):
+    """مهمة.نتيجة() — ينتظر الانتهاء ويعيد النتيجة (أو يرفع الخطأ)."""
+    _require_args('نتيجة', args, 0, 0, line)
+    return obj.result(line)
+
+
+def _task_error(obj, args, line):
+    """مهمة.الخطأ() — ينتظر الانتهاء ويعيد رسالة الخطأ أو 'ولا شيء'."""
+    _require_args('الخطأ', args, 0, 0, line)
+    return obj.error()
+
+
+def _task_ready(obj, args, line):
+    """مهمة.جاهز() — هل انتهت المهمة؟ فحص فوري بلا انتظار."""
+    _require_args('جاهز', args, 0, 0, line)
+    return obj.ready()
+
+
+def _task_wait(obj, args, line):
+    """مهمة.انتظر() — ينتظر انتهاء المهمة دون إعادة النتيجة."""
+    _require_args('انتظر', args, 0, 0, line)
+    try:
+        obj.result(line)
+    except ArabiError:
+        pass                        # يبتلع الخطأ — من يريد النتيجة أو الخطأ يجدها بطريقته
+    return None
+
+
+TASK_METHODS.update({
+    'نتيجة': _task_result,
+    'الخطأ': _task_error,
+    'جاهز': _task_ready,
+    'انتظر': _task_wait,
+})
+
+
 # ================== وحدة تحويل (الأرقام العربية) ==================
 
 EN2AR = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
@@ -2355,7 +2577,11 @@ def _csv_text(args, line):
 # ================== وحدة خيوط (الإصدار 1.8) ==================
 
 def _thr_spawn(interp, args, line):
-    """شغّل(دالة، وسائط...) — يشغل دالة عربية في خيط مستقل ويعيد خيطًا."""
+    """شغّل(دالة، وسائط...) — يشغل دالة عربية في خيط مستقل ويعيد خيطًا.
+
+    لو كانت الدالة غير متزامنة (1.15) يعيد مهمتها مباشرة — فالاستدعاء
+    نفسه يشغّلها في خيط، ولا معنى لخيط ينتظر مهمة.
+    """
     if not args:
         raise ArabiRuntimeError(
             "'شغّل' تحتاج الدالة المراد تشغيلها كمعامل أول", line)
@@ -2365,6 +2591,8 @@ def _thr_spawn(interp, args, line):
             f"المعامل الأول لـ 'شغّل' يجب أن يكون دالة لكنه "
             f'{typename(func)}', line)
     rest_args = list(args[1:])
+    if isinstance(func, ArabiFunc) and func.is_async:
+        return interp._call_value(func, rest_args, {}, line)
     tv = ThreadValue()
 
     def _worker():

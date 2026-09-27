@@ -6974,5 +6974,503 @@ class TestExecutablePackaging(unittest.TestCase):
         self.assertIn('dist/', content)
 
 
+# ================== غير المتزامن (الإصدار 1.15) ==================
+
+import http.server                                           # noqa: E402
+import threading                                             # noqa: E402
+import time                                                  # noqa: E402
+
+from arabi_lang.nodes import Await, FuncDef, BinOp, Num, Name, MethodCall  # noqa: E402
+
+
+def _run_vm(source, use_vm):
+    """ينفذ كودًا في وضع دولاب محدد ويعيد المخرجات — لتكافؤ الوضعين."""
+    out = io.StringIO()
+    with redirect_stdout(out):
+        tree = Parser(Lexer(source).tokenize()).parse()
+        Interpreter(use_vm=use_vm).run(tree)
+    return out.getvalue()
+
+
+class TestAsyncParsing(unittest.TestCase):
+    """تحليل 'دالة غير متزامنة' و'انتظر' ككلمات سياقية."""
+
+    def test_async_def_flag(self):
+        tree = Parser(Lexer('غير متزامنة دالة جلب(رابط):\n    أعد ١\n').tokenize()).parse()
+        fn = tree.statements[0]
+        self.assertIsInstance(fn, FuncDef)
+        self.assertTrue(fn.is_async)
+        self.assertFalse(fn.is_generator)
+
+    def test_sync_def_flag_unchanged(self):
+        tree = Parser(Lexer('دالة عادية():\n    أعد ١\n').tokenize()).parse()
+        self.assertFalse(tree.statements[0].is_async)
+
+    def test_async_masculine_spelling_accepted(self):
+        tree = Parser(Lexer('غير متزامن دالة ج():\n    أعد ١\n').tokenize()).parse()
+        self.assertTrue(tree.statements[0].is_async)
+
+    def test_async_generator_rejected(self):
+        with self.assertRaises(ParseError):
+            Parser(Lexer('غير متزامنة دالة م():\n    أنتج ١\n').tokenize()).parse()
+
+    def test_async_inside_class(self):
+        src = ('صنف خ:\n'
+               '    غير متزامنة دالة ش(س):\n'
+               '        أعد س\n')
+        tree = Parser(Lexer(src).tokenize()).parse()
+        self.assertTrue(tree.statements[0].body[0].is_async)
+
+    def test_await_node_precedence(self):
+        """انتظر م + ١ تعني (انتظر م) + ١ — أضيق من العمليات الثنائية."""
+        tree = Parser(Lexer('س = انتظر م + ١\n').tokenize()).parse()
+        expr = tree.statements[0].value
+        self.assertIsInstance(expr, BinOp)
+        self.assertEqual(expr.op, '+')
+        self.assertIsInstance(expr.left, Await)
+        self.assertIsInstance(expr.left.operand, Name)
+        self.assertIsInstance(expr.right, Num)
+
+    def test_await_postfix_inside(self):
+        """انتظر م.نتيجة() — سلسلة اللاحقة تدخل ضمن المعامل."""
+        tree = Parser(Lexer('س = انتظر م.نتيجة()\n').tokenize()).parse()
+        operand = tree.statements[0].value.operand
+        self.assertIsInstance(operand, MethodCall)
+        self.assertEqual(operand.name, 'نتيجة')
+
+    def test_intizar_is_contextual_not_reserved(self):
+        """انتظر تظل قابلة للاستخدام كاسم عادي عندما لا يتبعها تعبير."""
+        out = run_code('انتظر = ٧\nاطبع(انتظر)\n')
+        self.assertIn('7', out)
+
+    def test_intizar_method_call_unaffected(self):
+        """الطرق المسماه انتظر (مثل مهمة.انتظر()) تعمل كما كانت."""
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ٥\n'
+            'م = ع()\n'
+            'م.انتظر()\n'
+            'اطبع(م.نتيجة())\n')
+        self.assertIn('5', out)
+
+
+class TestAsyncSemantics(unittest.TestCase):
+    """دلالات المهام: الانتظار والتجميع والسباق والأخطاء والدولاب."""
+
+    def test_call_returns_task(self):
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ٤٢\n'
+            'م = ع()\n'
+            'اطبع(نوع(م))\n'
+            'انتظر م\n')
+        self.assertIn('مهمة', out)
+
+    def test_await_returns_result(self):
+        out = run_code(
+            'غير متزامنة دالة جمع(أ، ب):\n    أعد أ + ب\n'
+            'اطبع(انتظر جمع(٢، ٣))\n')
+        self.assertIn('5', out)
+
+    def test_task_not_ready_immediately(self):
+        out = run_code(
+            'غير متزامنة دالة بطيئة():\n'
+            '    انتظر_زمن(0.05)\n'
+            '    أعد ١\n'
+            'م = بطيئة()\n'
+            'اطبع(م.جاهز())\n'
+            'انتظر م\n')
+        self.assertIn('خطأ', out.splitlines()[0])
+
+    def test_task_ready_after_completion(self):
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ٩\n'
+            'م = ع()\n'
+            'انتظر م\n'
+            'اطبع(م.جاهز())\n')
+        self.assertIn('صح', out)
+
+    def test_wait_all_preserves_order(self):
+        out = run_code(
+            'غير متزامنة دالة مؤجلة(ث، قيمة):\n'
+            '    انتظر_زمن(ث)\n'
+            '    أعد قيمة\n'
+            'أ = مؤجلة(0.06، "بطيئة")\n'
+            'ب = مؤجلة(0.01، "سريعة")\n'
+            'نتائج = انتظر_الجميع([أ، ب])\n'
+            'اطبع(نتائج[0])\n'
+            'اطبع(نتائج[1])\n')
+        lines = out.splitlines()
+        self.assertEqual(lines[0], 'بطيئة')
+        self.assertEqual(lines[1], 'سريعة')
+
+    def test_wait_all_empty(self):
+        out = run_code('اطبع(انتظر_الجميع([]))\n')
+        self.assertIn('[]', out)
+
+    def test_wait_all_rejects_non_task(self):
+        try:
+            run_code('انتظر_الجميع([٥])\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('ليس مهمة', str(exc))
+
+    def test_wait_all_requires_list(self):
+        try:
+            run_code('انتظر_الجميع(٥)\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('قائمة مهام', str(exc))
+
+    def test_race_returns_first_done(self):
+        out = run_code(
+            'غير متزامنة دالة مؤجلة(ث، قيمة):\n'
+            '    انتظر_زمن(ث)\n'
+            '    أعد قيمة\n'
+            'فائز = سباق([مؤجلة(0.08، "أ")، مؤجلة(0.01، "ب")])\n'
+            'اطبع(انتظر فائز)\n')
+        self.assertIn('ب', out)
+
+    def test_race_returns_task_value(self):
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ١\n'
+            'فائز = سباق([ع()])\n'
+            'اطبع(نوع(فائز))\n'
+            'انتظر فائز\n')
+        self.assertIn('مهمة', out)
+
+    def test_race_needs_at_least_one(self):
+        try:
+            run_code('سباق([])\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('مهمة واحدة على الأقل', str(exc))
+
+    def test_task_error_method_success_case(self):
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ١\n'
+            'م = ع()\n'
+            'اطبع(م.الخطأ())\n')
+        self.assertIn('ولا شيء', out)
+
+    def test_task_error_method_failure_case(self):
+        out = run_code(
+            'غير متزامنة دالة ف():\n'
+            '    ارفع استثناء("انفجرت")\n'
+            'م = ف()\n'
+            'اطبع(م.الخطأ())\n')
+        self.assertIn('انفجرت', out)
+
+    def test_task_wait_method_swallows_error(self):
+        out = run_code(
+            'غير متزامنة دالة ف():\n'
+            '    ارفع استثناء("انفجرت")\n'
+            'م = ف()\n'
+            'م.انتظر()\n'
+            'اطبع("وصلنا")\n')
+        self.assertIn('وصلنا', out)
+
+    def test_await_reraises_task_error(self):
+        try:
+            run_code(
+                'غير متزامنة دالة ف():\n'
+                '    ارفع استثناء("كارثة")\n'
+                'م = ف()\n'
+                'انتظر م\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('كارثة', str(exc))
+
+    def test_custom_error_instance_preserved(self):
+        """خطأ مخصص مرفوع في مهمة يصل لجرب كائنًا كاملًا (كما في المسار المتزامن)."""
+        out = run_code(
+            'صنف خطأ_شبكة من استثناء:\n'
+            '    دالة إنشاء(الرمز):\n'
+            '        هذا.الرمز = الرمز\n'
+            '        هذا.رسالة = "فشل " + الرمز\n'
+            'غير متزامنة دالة ف():\n'
+            '    ارفع خطأ_شبكة("٤٠٤")\n'
+            'م = ف()\n'
+            'جرب:\n'
+            '    انتظر م\n'
+            'باستثناء ه:\n'
+            '    اطبع(ه.الرمز)\n')
+        self.assertIn('٤٠٤', out)
+
+    def test_await_rejects_non_task(self):
+        try:
+            run_code('انتظر ٥\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn("'انتظر' تتوقع مهمة", str(exc))
+
+    def test_async_typename_and_display(self):
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ١\n'
+            'اطبع(نوع(ع))\n'
+            'اطبع(ع)\n')
+        self.assertIn('دالة غير متزامنة', out)
+        self.assertIn('<دالة غير متزامنة ع>', out)
+
+    def test_async_method_with_this(self):
+        out = run_code(
+            'صنف خادم:\n'
+            '    دالة إنشاء(الاسم):\n'
+            '        هذا.الاسم = الاسم\n'
+            '    غير متزامنة دالة اعالج(رقم):\n'
+            '        انتظر_زمن(0.01)\n'
+            '        أعد هذا.الاسم + ":" + نص(رقم)\n'
+            'ه = خادم("رئيسي")\n'
+            'اطبع(انتظر ه.اعالج(٣))\n')
+        self.assertIn('رئيسي:3', out)
+
+    def test_nested_await_inside_async(self):
+        out = run_code(
+            'غير متزامنة دالة داخلية(س):\n'
+            '    انتظر_زمن(0.01)\n'
+            '    أعد س * ٢\n'
+            'غير متزامنة دالة خارجية(س):\n'
+            '    جزء = انتظر داخلية(س)\n'
+            '    أعد جزء + ١٠٠\n'
+            'اطبع(انتظر خارجية(٥))\n')
+        self.assertIn('110', out)
+
+    def test_async_recursion_with_wait_all(self):
+        out = run_code(
+            'غير متزامنة دالة فيبو(ن):\n'
+            '    لو ن < ٢:\n'
+            '        أعد ن\n'
+            '    أ، ب = انتظر_الجميع([فيبو(ن-١)، فيبو(ن-٢)])\n'
+            '    أعد أ + ب\n'
+            'اطبع(انتظر فيبو(١٠))\n')
+        self.assertIn('55', out)
+
+    def test_parallel_tasks_faster_than_sequential(self):
+        """أربع مهام نائمة معًا تنتهي أسرع من تنفيذها تتابعيًا."""
+        src = (
+            'غير متزامنة دالة نوم(ث):\n'
+            '    انتظر_زمن(ث)\n'
+            '    أعد ١\n'
+        )
+        t0 = time.perf_counter()
+        run_code(src + 'انتظر_الجميع([نوم(0.12)، نوم(0.12)، نوم(0.12)، نوم(0.12)])\n')
+        parallel = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        run_code(src + 'انتظر نوم(0.12)\nانتظر نوم(0.12)\nانتظر نوم(0.12)\nانتظر نوم(0.12)\n')
+        sequential = time.perf_counter() - t0
+        self.assertLess(parallel, sequential * 0.75,
+                        f'المتوازي {parallel:.3f}ث ليس أسرع من التتابعي {sequential:.3f}ث')
+
+    def test_intizar_zaman_negative_rejected(self):
+        try:
+            run_code('انتظر_زمن(-١)\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('موجبًا', str(exc))
+
+    def test_intizar_zaman_returns_nothing(self):
+        out = run_code('اطبع(انتظر_زمن(0))\n')
+        self.assertIn('ولا شيء', out)
+
+    def test_async_default_and_named_params(self):
+        out = run_code(
+            'غير متزامنة دالة تحية(الاسم، تحية = "مرحبا"):\n'
+            '    انتظر_زمن(0.01)\n'
+            '    أعد تحية + " " + الاسم\n'
+            'اطبع(انتظر تحية("سارة"))\n'
+            'اطبع(انتظر تحية("عمر"، تحية = "أهلا"))\n')
+        self.assertIn('مرحبا سارة', out)
+        self.assertIn('أهلا عمر', out)
+
+    def test_async_rest_param(self):
+        out = run_code(
+            'غير متزامنة دالة مجموع(...أعداد):\n'
+            '    مجموع_كلي = ٠\n'
+            '    لكل ع في أعداد:\n'
+            '        مجموع_كلي += ع\n'
+            '    أعد مجموع_كلي\n'
+            'اطبع(انتظر مجموع(١، ٢، ٣، ٤))\n')
+        self.assertIn('10', out)
+
+    def test_async_closure(self):
+        out = run_code(
+            'دالة مصنّع(البادئة):\n'
+            '    غير متزامنة دالة مؤهلة(نص):\n'
+            '        أعد البادئة + نص\n'
+            '    أعد مؤهلة\n'
+            'ع = مصنّع("[")\n'
+            'اطبع(انتظر ع("مغلق]"))\n')
+        self.assertIn('[مغلق]', out)
+
+    def test_thread_spawn_on_async_func_returns_task(self):
+        """خيوط.شغّل على دالة غير متزامنة يعيد مهمة صالحة للانتظار مباشرة."""
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ٧\n'
+            'حاصل = خيوط.شغّل(ع)\n'
+            'اطبع(نوع(حاصل))\n'
+            'اطبع(انتظر حاصل)\n')
+        self.assertIn('مهمة', out)
+        self.assertIn('7', out)
+
+    # ---------- الدولاب الافتراضي ----------
+
+    def test_vm_and_ast_parity_async(self):
+        src = (
+            'غير متزامنة دالة مؤجلة(ث، قيمة):\n'
+            '    انتظر_زمن(ث)\n'
+            '    أعد قيمة\n'
+            'غير متزامنة دالة خارجية(س):\n'
+            '    جزء = انتظر مؤجلة(0.01، س)\n'
+            '    أعد جزء * ١٠\n'
+            'أ = مؤجلة(0.02، "سريعة")\n'
+            'ب = مؤجلة(0.01، "أسرع")\n'
+            'اطبع(انتظر خارجية(٧))\n'
+            'نتائج = انتظر_الجميع([أ، ب])\n'
+            'اطبع(نتائج)\n'
+            'فائز = سباق([أ، ب])\n'
+            'اطبع(نوع(فائز))\n'
+            'غير متزامنة دالة تفشل():\n'
+            '    ارفع استثناء("بوم")\n'
+            'ف = تفشل()\n'
+            'اطبع(ف.الخطأ())\n'
+            'م = مؤجلة(0.01، ٩)\n'
+            'م.انتظر()\n'
+            'اطبع(م.جاهز())\n')
+        self.assertEqual(_run_vm(src, True), _run_vm(src, False))
+
+    def test_async_call_from_vm_compiled_function(self):
+        """استدعاء دالة غير متزامنة من داخل دالة مترجمة بالدولاب."""
+        out = run_code(
+            'غير متزامنة دالة ع():\n    أعد ١٥\n'
+            'دالة غلاف():\n'
+            '    م = ع()\n'
+            '    أعد انتظر م\n'
+            'اطبع(غلاف())\n')
+        self.assertIn('15', out)
+
+
+# ================== شبكة: تنزيل (الإصدار 1.15) ==================
+
+class _StaticHandler(http.server.BaseHTTPRequestHandler):
+    """خادم ثابت مصغر للاختبارات: /ملف.txt يعيد نصًا، وغيره 404."""
+
+    def do_GET(self):
+        from urllib.parse import unquote
+        if unquote(self.path) == '/ملف.txt':
+            body = 'محتوى التنزيل التجريبي ١٢٣'.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+
+class TestNetworkDownload(unittest.TestCase):
+    """شبكة.تنزيل — ينزّل ملفًا من خادم محلي ويعيد عدد البايتات."""
+
+    def setUp(self):
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0),
+                                                      _StaticHandler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dest = os.path.join(self.tmp.name, 'ناتج.txt')
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def test_download_success(self):
+        out = run_code(
+            f'عدد = شبكة.تنزيل("http://127.0.0.1:{self.port}/ملف.txt"، '
+            f'"{self.dest}")\n'
+            'اطبع(عدد > ٠)\n')
+        self.assertIn('صح', out)
+        with open(self.dest, encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'محتوى التنزيل التجريبي ١٢٣')
+
+    def test_download_with_timeout(self):
+        out = run_code(
+            f'عدد = شبكة.تنزيل("http://127.0.0.1:{self.port}/ملف.txt"، '
+            f'"{self.dest}"، 5)\n'
+            'اطبع(نوع(عدد))\n')
+        self.assertIn('عدد صحيح', out)
+
+    def test_download_parallel_tasks(self):
+        """تنزيلات غير متزامنة متوازية من نفس الخادم المحلي."""
+        d1 = os.path.join(self.tmp.name, 'واحد.txt')
+        d2 = os.path.join(self.tmp.name, 'اثنان.txt')
+        out = run_code(
+            'غير متزامنة دالة انزل(رابط، مسار):\n'
+            '    أعد شبكة.تنزيل(رابط، مسار)\n'
+            f'م١ = انزل("http://127.0.0.1:{self.port}/ملف.txt"، "{d1}")\n'
+            f'م٢ = انزل("http://127.0.0.1:{self.port}/ملف.txt"، "{d2}")\n'
+            'نتائج = انتظر_الجميع([م١، م٢])\n'
+            'اطبع(نتائج[0] == نتائج[1] و نتائج[0] > ٠)\n')
+        self.assertIn('صح', out)
+
+    def test_download_requires_http_url(self):
+        try:
+            run_code(f'شبكة.تنزيل("ftp://مثال/ملف"، "{self.dest}")\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('http://', str(exc))
+
+    def test_download_404_error(self):
+        try:
+            run_code(f'شبكة.تنزيل("http://127.0.0.1:{self.port}/غير_موجود"، '
+                     f'"{self.dest}")\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('404', str(exc))
+
+    def test_download_bad_write_path(self):
+        bad = os.path.join(self.tmp.name, 'مجلد_غير_موجود', 'ملف.txt')
+        try:
+            run_code(f'شبكة.تنزيل("http://127.0.0.1:{self.port}/ملف.txt"، '
+                     f'"{bad}")\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('تعذّرت كتابة', str(exc))
+
+    def test_download_url_must_be_string(self):
+        try:
+            run_code(f'شبكة.تنزيل(٥، "{self.dest}")\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('رابطًا نصيًا', str(exc))
+
+    def test_download_path_must_be_string(self):
+        try:
+            run_code(f'شبكة.تنزيل("http://127.0.0.1:{self.port}/ملف.txt"، ٥)\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('نصًا', str(exc))
+
+    def test_download_zero_timeout_rejected(self):
+        try:
+            run_code(f'شبكة.تنزيل("http://127.0.0.1:{self.port}/ملف.txt"، '
+                     f'"{self.dest}"، 0)\n')
+            self.fail('المفروض يرفع خطأ')
+        except ArabiError as exc:
+            self.assertIn('موجبًا', str(exc))
+
+    def test_request_module_unaffected(self):
+        """اطلب تظل تعمل بعد إضافة تنزيل — الحالة 200 والترويسات."""
+        out = run_code(
+            f'ن = شبكة.اطلب("http://127.0.0.1:{self.port}/ملف.txt")\n'
+            'اطبع(ن.الحالة)\n'
+            'اطبع("الترويسات" في ن)\n')
+        self.assertIn('200', out)
+        self.assertIn('صح', out)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

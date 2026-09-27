@@ -14,7 +14,7 @@ import threading
 
 from . import nodes as N
 from . import vm as _vm
-from .errors import ArabiRuntimeError, ArabiUserError
+from .errors import ArabiError, ArabiRuntimeError, ArabiUserError
 from .lexer import Lexer
 from .parser import Parser
 from .runtime import (
@@ -22,13 +22,13 @@ from .runtime import (
     ClassValue, InstanceValue, BoundMethod,
     EnumValue, EnumMember, Property, NativeCtor,
     GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
-    ThreadValue, LockValue, QueueValue, DateValue,
+    ThreadValue, LockValue, QueueValue, DateValue, TaskValue,
     typename, display, install_builtins, NO_DEFAULT,
     BreakSignal, ContinueSignal, ReturnSignal,
     _VM_PENDING, _VM_NO,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
     GENERATOR_METHODS, DB_METHODS,
-    THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS,
+    THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS, TASK_METHODS,
 )
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
@@ -332,7 +332,8 @@ class Interpreter:
         params = [(name, self._eval_default(default, env))
                   for name, default in node.params]
         value = ArabiFunc(node.name, params, node.body, env,
-                          is_generator=node.is_generator, rest=node.rest)
+                          is_generator=node.is_generator, rest=node.rest,
+                          is_async=node.is_async)
         # تطبيق المزخرفات من الأسفل إلى الأعلى (كما في بايثون)
         for dec in reversed(node.decorators):
             func_value = self.evaluate(dec, env)
@@ -385,7 +386,7 @@ class Interpreter:
                           for name, default in stmt.params]
                 method = ArabiFunc(stmt.name, params, stmt.body, class_env,
                                    is_generator=stmt.is_generator,
-                                   rest=stmt.rest)
+                                   rest=stmt.rest, is_async=stmt.is_async)
                 # تطبيق مزخرفات الطرق إن وجدت
                 for dec in reversed(stmt.decorators):
                     func_value = self.evaluate(dec, env)
@@ -1212,6 +1213,8 @@ class Interpreter:
             table = DB_METHODS
         elif isinstance(obj, ThreadValue):
             table = THREAD_METHODS
+        elif isinstance(obj, TaskValue):
+            table = TASK_METHODS
         elif isinstance(obj, LockValue):
             table = LOCK_METHODS
         elif isinstance(obj, QueueValue):
@@ -1412,6 +1415,13 @@ class Interpreter:
     def _call_value(self, func, args, kwargs, line):
         if isinstance(func, ArabiFunc):
             local = self._bind_call_args(func, args, kwargs, line)
+            # غير المتزامنة (1.15): تشغيل فوري في خيط مستقل ونتيجة مهمة
+            if func.is_async:
+                if func.is_generator:
+                    raise ArabiRuntimeError(
+                        f"الدالة '{func.name}' غير متزامنة ومولدة معًا — "
+                        "لا يمكن دمج 'أنتج' مع 'غير متزامنة'", line)
+                return self._spawn_task(func, local, None, line)
             if func.is_generator:
                 return GeneratorValue(self, func, local)
             return self._run_func(func, local)
@@ -1559,6 +1569,9 @@ class Interpreter:
         """
         local = self._bind_call_args(func, args, kwargs, line)
         local.define('هذا', this_val)
+        # الطرق غير المتزامنة (1.15): خيط مستقل يرى 'هذا' على مكدسه هو
+        if func.is_async:
+            return self._spawn_task(func, local, this_val, line)
         stack = getattr(self._tls, 'this_stack', None)
         if stack is None:
             stack = []
@@ -1570,6 +1583,56 @@ class Interpreter:
             return self._run_func(func, local)
         finally:
             stack.pop()
+
+    def _spawn_task(self, func, local, this_val, line):
+        """يشغّل دالة غير متزامنة في خيط مستقل ويعيد مهمة تنتظر نتيجتها.
+
+        الخيط العامل يرى بيئة المعاملات الجاهزة، ويدفع 'هذا' على مكدس
+        الخيط الحالي (هو) كي يصل للطرق المستدعاة منه (الإصدار 1.15).
+        """
+        task = TaskValue()
+        interp = self
+
+        def _worker():
+            stack = None
+            try:
+                if this_val is not None:
+                    stack = getattr(interp._tls, 'this_stack', None)
+                    if stack is None:
+                        stack = []
+                        interp._tls.this_stack = stack
+                    stack.append(this_val)
+                try:
+                    result = interp._run_func(func, local)
+                finally:
+                    if stack is not None:
+                        stack.pop()
+                task._finish(result, None)
+            except ArabiError as exc:
+                task._finish(None, exc)
+            except Exception as exc:      # شبكة أمان — لا تموت المهمة بصمت
+                task._finish(None, ArabiRuntimeError(
+                    f'خطأ داخل المهمة: {exc}'))
+
+        task.thread = threading.Thread(target=_worker, daemon=True,
+                                       name='مهمة-عربي')
+        task.thread.start()
+        return task
+
+    def eval_Await(self, node, env):
+        """انتظر مهمة (أو خيطًا) — يوقف السطر حتى ينتهي ويعيد نتيجته.
+
+        يعيد رفع خطأ العمل الخلفي إن فشل، على سطر 'انتظر' نفسه.
+        """
+        value = self.evaluate(node.operand, env)
+        if isinstance(value, TaskValue):
+            return value.result(node.line)
+        if isinstance(value, ThreadValue):
+            # 'انتظر' تعمل على خيوط وحدة 'خيوط' أيضًا — توحيد للانتظار
+            return value.result(node.line)
+        raise ArabiRuntimeError(
+            f"'انتظر' تتوقع مهمة (نتاج دالة غير متزامنة) أو خيطًا لكن "
+            f'استلمت {typename(value)}', node.line)
 
     def _run_func(self, func, env):
         """ينفذ جسم دالة: عبر الدولاب الافتراضي إن ترجم، وإلا الممسح الشجري.

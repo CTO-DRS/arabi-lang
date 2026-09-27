@@ -13,7 +13,7 @@ from .nodes import (
     Match, PLiteral, PCapture, POr, PList, PDict,
     Num, Str, FString, Bool, Null, Name, ListLit, DictLit, ListComp, DictComp,
     BinOp, UnaryOp, Call, Index, Slice, MethodCall, Attribute, This, Super,
-    Ternary, SpreadArg,
+    Ternary, SpreadArg, Await,
 )
 from .errors import ParseError
 
@@ -53,6 +53,15 @@ STMT_KEYWORDS = {
 # كلمات مفتاحية يُسمح بظهورها كأسماء خصائص/طرق بعد النقطة
 # (مثل ق["م"].احذف("مفتاح")) لعدم كسر طرق الأنواع المدمجة
 KEYWORD_AS_NAME = {T.ENUM, T.PROPERTY, T.GLOBAL, T.ASSERT, T.DELETE}
+
+# "انتظر" كلمة سياقية (الإصدار 1.15): تُعد تعبير انتظار إذا جاء بعدها
+# رمز يمكن أن يبدأ تعبيرًا، وإلا تُعامل كاسم عادي — فلا تُكسر طرق مثل
+# خيط.انتظر() وخادم.انتظر() ولا أي معرف يحمل الاسم نفسه.
+_AWAIT_START = frozenset({
+    T.INT, T.FLOAT, T.STRING, T.FSTRING, T.TRUE, T.FALSE, T.NONE,
+    T.THIS, T.SUPER, T.IF, T.IDENT, T.DEF, T.LPAREN, T.LBRACKET,
+    T.LBRACE, T.MINUS, T.NOT,
+})
 
 
 def tok_desc(tok):
@@ -200,6 +209,12 @@ class Parser:
         if (t is T.IDENT and self.cur().value == 'من'
                 and self.peek(1).type in (T.IDENT, T.STRING)):
             return self.import_stmt()
+        # «غير متزامنة دالة ...» — كلمتان سياقيتان في بداية الجملة (1.15)
+        if (t is T.IDENT and self.cur().value == 'غير'
+                and self.peek(1).type is T.IDENT
+                and self.peek(1).value in ('متزامنة', 'متزامن')
+                and self.peek(2).type is T.DEF):
+            return self.func_def()
         return self.expr_stmt()
 
     def block(self):
@@ -222,16 +237,38 @@ class Parser:
         return statements
 
     def func_def(self):
-        tok = self.advance()                       # دالة
-        name = self.expect_ident("متوقع اسم الدالة بعد 'دالة'")
+        """تعريف دالة: دالة اسم(...) — أو 'غير متزامنة دالة اسم(...)' (1.15).
+
+        يُستدعى من موضعين: الرمز الحالي 'دالة'، أو بداية الجملة 'غير'
+        (الكلمتان السياقيتان غير + متزامنة/متزامن قبل 'دالة').
+        """
+        tok = self.cur()
+        # "دالة غير متزامنة" — كلمتان سياقيتان بعد 'دالة' (الإصدار 1.15):
+        # الدالة تعمل في خيط مستقل عند استدعائها ويعيد استدعاؤها مهمة.
+        is_async = False
+        if (self.check(T.IDENT) and self.cur().value == 'غير'
+                and self.peek(1).type is T.IDENT
+                and self.peek(1).value in ('متزامنة', 'متزامن')
+                and self.peek(2).type is T.DEF):
+            self.advance()                         # غير
+            self.advance()                         # متزامنة
+            is_async = True
+        self.expect(T.DEF, "متوقع كلمة 'دالة'")
+        name = self.expect_ident("متوقع اسم الدالة بعد 'دالة'"
+                                 + (" (بعد 'غير متزامنة')" if is_async else ''))
         params, rest = self.parse_params()
         self._yield_scopes.append(False)
         try:
             body = self.block()
         finally:
             is_generator = self._yield_scopes.pop()
+        if is_async and is_generator:
+            raise ParseError(
+                f"الدالة '{name}' لا يمكن أن تكون غير متزامنة ومولدة معًا "
+                "— لا تدمج 'أنتج' مع 'غير متزامنة'", tok.line)
         return FuncDef(name, params, body, tok.line,
-                       is_generator=is_generator, rest=rest)
+                       is_generator=is_generator, rest=rest,
+                       is_async=is_async)
 
     def decorated_def(self):
         """مزخرفات فوق الدالة:
@@ -796,6 +833,12 @@ class Parser:
         return e
 
     def unary(self):
+        # "انتظر مهمة" — كلمة سياقية بأولوية أحادي التعبير (الإصدار 1.15):
+        # ترتبط أضيق من العمليات الثنائية: انتظر م + ١ تعني (انتظر م) + ١
+        if (self.check(T.IDENT) and self.cur().value == 'انتظر'
+                and self.peek(1).type in _AWAIT_START):
+            tok = self.advance()
+            return Await(self.unary(), tok.line)
         if self.check(T.MINUS):
             tok = self.advance()
             return UnaryOp('-', self.unary(), tok.line)

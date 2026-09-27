@@ -556,6 +556,8 @@ class _Linter:
             self._walk_expr(expr.right, scope)
         elif isinstance(expr, N.UnaryOp):
             self._walk_expr(expr.operand, scope)
+        elif isinstance(expr, N.Await):
+            self._walk_expr(expr.operand, scope)
         elif isinstance(expr, N.Call):
             self._walk_expr(expr.func, scope)
             for _name, arg in expr.args:
