@@ -4670,7 +4670,8 @@ class TestStatisticsModule(unittest.TestCase):
         from arabi_lang.interpreter import BUILTIN_MODULES
         self.assertIn('إحصاء', BUILTIN_MODULES)
         self.assertIn('عمليات', BUILTIN_MODULES)
-        self.assertEqual(len(BUILTIN_MODULES), 18)
+        self.assertIn('موزعة', BUILTIN_MODULES)
+        self.assertEqual(len(BUILTIN_MODULES), 19)
 
 
 
@@ -8309,6 +8310,489 @@ class TestProcessPool(unittest.TestCase):
         self.interp.run(Parser(Lexer(src).tokenize()).parse())
         name = src.split('(')[0].replace('دالة ', '')
         return self.interp.globals.get(name)
+
+
+class TestDistributed(unittest.TestCase):
+    """الحوسبة الموزعة — وحدة 'موزعة' (الإصدار 1.18): البروتوكول."""
+
+    def test_frame_roundtrip(self):
+        from arabi_lang.distributed import send_frame, recv_frame
+        import socket as _socket
+        a, b = _socket.socketpair()
+        msg = ('نتيجة', 7, 'نهاية', {'عالمي': [1, 2.5, 'نص']})
+        send_frame(a, msg)
+        self.assertEqual(recv_frame(b), msg)
+        a.close()
+        b.close()
+
+    def test_send_frame_size_guard(self):
+        from arabi_lang import distributed as dist
+        import socket as _socket
+        a, b = _socket.socketpair()
+        old = dist.MAX_FRAME
+        dist.MAX_FRAME = 16
+        try:
+            with self.assertRaises(ArabiRuntimeError):
+                dist.send_frame(a, 'طويل' * 100)
+        finally:
+            dist.MAX_FRAME = old
+            a.close()
+            b.close()
+
+    def test_recv_frame_size_guard(self):
+        from arabi_lang import distributed as dist
+        import socket as _socket
+        import struct as _struct
+        a, b = _socket.socketpair()
+        a.sendall(_struct.pack('>I', dist.MAX_FRAME + 1))
+        with self.assertRaises(ArabiRuntimeError):
+            dist.recv_frame(b)
+        a.close()
+        b.close()
+
+    def test_parse_target(self):
+        from arabi_lang.distributed import parse_target, DEFAULT_PORT
+        self.assertEqual(parse_target('192.168.1.5:7700'),
+                         ('192.168.1.5', 7700))
+        self.assertEqual(parse_target('جهازي'), ('جهازي', DEFAULT_PORT))
+        with self.assertRaises(ArabiRuntimeError):
+            parse_target('جهازي:غير_رقم')
+        with self.assertRaises(ArabiRuntimeError):
+            parse_target('جهازي:99999')
+
+    def test_worker_connect_failure(self):
+        from arabi_lang.distributed import run_worker
+        # منفذ مغلق — لا خادم يستمع عليه
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            run_worker('127.0.0.1', 1)
+        self.assertIn('تعذر الاتصال', str(caught.exception))
+
+
+class TestDispatcher(unittest.TestCase):
+    """موزع المهام — إنشاؤه وتحققاته وطرقه (الإصدار 1.18)."""
+
+    def setUp(self):
+        from arabi_lang.distributed import _dist_create
+        self.interp = Interpreter(use_vm=False)
+        self.create = lambda args: _dist_create(self.interp, args, None)
+
+    def test_create_defaults_and_metrics(self):
+        disp = self.create([0])
+        try:
+            self.assertIsInstance(disp.port(), int)
+            self.assertGreater(disp.port(), 0)
+            self.assertEqual(disp.host(), '127.0.0.1')
+            self.assertEqual(disp.workers(), 0)
+            self.assertEqual(disp.total(), 0)
+        finally:
+            disp.shutdown()
+
+    def test_error_port_not_int(self):
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self.create(['خمسة'])
+        self.assertIn('عددًا صحيحًا', str(caught.exception))
+
+    def test_error_port_bool(self):
+        with self.assertRaises(ArabiRuntimeError):
+            self.create([True])
+
+    def test_error_port_negative(self):
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self.create([-1])
+        self.assertIn('المدى', str(caught.exception))
+
+    def test_error_port_range(self):
+        with self.assertRaises(ArabiRuntimeError):
+            self.create([70000])
+
+    def test_error_too_many_args(self):
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self.create([1, '127.0.0.1', 5])
+        self.assertIn('معاملين على الأكثر', str(caught.exception))
+
+    def test_error_host_not_str(self):
+        with self.assertRaises(ArabiRuntimeError):
+            self.create([7700, 5])
+
+    def test_error_submit_after_shutdown(self):
+        disp = self.create([0])
+        disp.shutdown()
+        func = self._func('دالة هوية(ن):\n    أعد ن\n')
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            disp._server.submit(func, [func, 1], {}, None)
+        self.assertIn('مغلق', str(caught.exception))
+
+    def test_shutdown_double_safe(self):
+        disp = self.create([0])
+        disp.shutdown()
+        disp.shutdown()          # ثنائي آمن
+
+    def test_error_submit_empty(self):
+        disp = self.create([0])
+        try:
+            with self.assertRaises(ArabiRuntimeError) as caught:
+                disp._server.submit(None, [], {}, None)
+            self.assertIn('دالة', str(caught.exception))
+        finally:
+            disp.shutdown()
+
+    def test_error_submit_non_callable(self):
+        disp = self.create([0])
+        try:
+            with self.assertRaises(ArabiRuntimeError) as caught:
+                disp._server.submit(5, [5], {}, None)
+            self.assertIn('دالة', str(caught.exception))
+        finally:
+            disp.shutdown()
+
+    def test_error_submit_generator(self):
+        disp = self.create([0])
+        try:
+            func = self._func('دالة مولدة():\n    أنتج ١\n')
+            with self.assertRaises(ArabiRuntimeError) as caught:
+                disp._server.submit(func, [func], {}, None)
+            self.assertIn('مولدة', str(caught.exception))
+        finally:
+            disp.shutdown()
+
+    def test_error_submit_live_value(self):
+        disp = self.create([0])
+        try:
+            func = self._func('دالة هوية(ن):\n    أعد ن\n')
+            thr_module = self.interp.globals.get('خيوط')
+            live = self.interp._call_value(
+                thr_module.members['شغّل'], [func, 1], {}, None)
+            with self.assertRaises(ArabiRuntimeError) as caught:
+                disp._server.submit(func, [func, live], {}, None)
+            self.assertIn('لا يمكن إرسال', str(caught.exception))
+        finally:
+            disp.shutdown()
+
+    def test_wait_workers_timeout(self):
+        disp = self.create([0])
+        try:
+            with self.assertRaises(ArabiRuntimeError) as caught:
+                disp._server.wait_workers(1, 0.2, None)
+            self.assertIn('مهلة', str(caught.exception))
+        finally:
+            disp.shutdown()
+
+    def test_error_wait_workers_bad_args(self):
+        disp = self.create([0])
+        try:
+            with self.assertRaises(ArabiRuntimeError):
+                disp._server.wait_workers(0, 1, None)
+            with self.assertRaises(ArabiRuntimeError):
+                disp._server.wait_workers(1, 'سريع', None)
+        finally:
+            disp.shutdown()
+
+    def test_typename_and_display(self):
+        from arabi_lang.runtime import (typename, display,
+                                        DispatcherValue, DistributedTaskValue)
+        disp = self.create([0])
+        try:
+            self.assertEqual(typename(disp), 'موزع')
+            self.assertIn('موزع', display(disp))
+            self.assertIn(str(disp.port()), display(disp))
+            self.assertEqual(typename(DistributedTaskValue(3)),
+                             'مهمة موزعة')
+            self.assertEqual(display(DistributedTaskValue(3)),
+                             '<مهمة موزعة 3>')
+        finally:
+            disp.shutdown()
+
+    # ---------- أدوات ----------
+
+    def _func(self, src):
+        """يعرف دالة عربية في مفسّر الصنف ويعيد قيمتها."""
+        self.interp.run(Parser(Lexer(src).tokenize()).parse())
+        name = src.split('(')[0].replace('دالة ', '')
+        return self.interp.globals.get(name)
+
+
+class TestDistributedEndToEnd(unittest.TestCase):
+    """التوزيع الفعلي عبر TCP محليًا — عمالة حقيقية ومهام حقيقية (1.18)."""
+
+    def setUp(self):
+        import threading
+        self.threading = threading
+        from arabi_lang.distributed import _dist_create, run_worker
+        self._run_worker = run_worker
+        self.interp = Interpreter(use_vm=False)
+        self.disp = _dist_create(self.interp, [0], None)
+        self.threads = []
+
+    def tearDown(self):
+        self.disp.shutdown()
+        for t in self.threads:
+            t.join(timeout=10)
+
+    def _worker(self):
+        t = self.threading.Thread(
+            target=self._run_worker,
+            args=('127.0.0.1', self.disp.port()), daemon=True)
+        t.start()
+        self.threads.append(t)
+        return t
+
+    def _wait_workers(self, count=1):
+        self.disp._server.wait_workers(count, 30, None)
+
+    def _submit(self, src, *args, **kwargs):
+        func = self._define(src)
+        return self.disp._server.submit(func, [func, *args], kwargs, None)
+
+    def _define(self, src):
+        """يعرف كودًا في مفسّر الصنف ويعيد قيمة الدالة المعرفة (أو لا شيء)."""
+        self.interp.run(Parser(Lexer(src).tokenize()).parse())
+        head = src.split('(')[0]
+        for prefix in ('غير متزامنة دالة ', 'دالة '):
+            if head.startswith(prefix):
+                return self.interp.globals.get(
+                    head[len(prefix):].strip())
+        return None                     # تعريف غير دالّي (متغير/صنف)
+
+    def test_simple_result(self):
+        self._worker()
+        self._wait_workers()
+        task = self._submit('دالة جمع(أ، ب):\n    أعد أ + ب\n', 2, 3)
+        self.assertEqual(task.result(), 5)
+        self.assertTrue(task.ready())
+        self.assertEqual(self.disp.total(), 1)
+        self.assertEqual(task.id, 1)
+
+    def test_task_methods(self):
+        self._worker()
+        self._wait_workers()
+        task = self._submit(
+            'دالة مهذبة():\n    انتظر_زمن(0.05)\n    أعد 9\n')
+        self.assertFalse(task.ready())          # لم تنتهِ بعد (نم 0.05)
+        self.assertEqual(task.result(), 9)      # ينتظر
+        self.assertTrue(task.ready())
+        self.assertIsNone(task.error())
+        self.assertEqual(task.result(), 9)      # الاستلام مرة واحدة آمن
+
+    def test_wait_all_ordering_two_workers(self):
+        self._worker()
+        self._worker()
+        self._wait_workers(2)
+        tasks = [self._submit('دالة مضاعف(ن):\n    أعد ن * ٢\n', i)
+                 for i in range(6)]
+        results = self.interp._call_value(
+            self.interp.globals.get('انتظر_الجميع'), [tasks], {}, None)
+        self.assertEqual(results, [0, 2, 4, 6, 8, 10])
+
+    def test_mixed_tasks_wait_all(self):
+        self._worker()
+        self._wait_workers()
+        async_def = ('غير متزامنة دالة بطيئة():\n    انتظر_زمن(0.01)\n'
+                     '    أعد "من المهمة"\n')
+        self.interp.run(Parser(Lexer(async_def).tokenize()).parse())
+        async_task = self.interp._call_value(
+            self.interp.globals.get('بطيئة'), [], {}, None)
+        dist_task = self._submit('دالة نصية():\n    أعد "من العامل"\n')
+        results = self.interp._call_value(
+            self.interp.globals.get('انتظر_الجميع'),
+            [[async_task, dist_task]], {}, None)
+        self.assertEqual(results, ['من المهمة', 'من العامل'])
+
+    def test_kwargs(self):
+        self._worker()
+        self._wait_workers()
+        task = self._submit(
+            'دالة كاملة(أ، ب، زائد=٠):\n    أعد أ + ب + زائد\n',
+            2, ب=3, زائد=4)
+        self.assertEqual(task.result(), 9)
+
+    def test_globals_captured(self):
+        self._worker()
+        self._wait_workers()
+        self._define('المعامل = ١٠\n')   # متغير عالمي يُرمّز مع الحزمة
+        task = self._submit(
+            'دالة حسب(ن):\n    أعد ن * المعامل\n', 5)
+        self.assertEqual(task.result(), 50)
+
+    def test_class_and_object(self):
+        self._worker()
+        self._wait_workers()
+        class_src = ('صنف حاسبة:\n'
+                     '    دالة إنشاء(بداية):\n'
+                     '        هذا.قيمة = بداية\n'
+                     '    دالة زد(ن):\n'
+                     '        هذا.قيمة = هذا.قيمة + ن\n'
+                     '        أعد هذا\n')
+        self.interp.run(Parser(Lexer(class_src).tokenize()).parse())
+        cls = self.interp.globals.get('حاسبة')
+        obj = self.interp._call_value(
+            cls, [7], {}, None)                # كائن يُرمَّز ويعود
+        task = self.disp._server.submit(
+            lambda_v := self._define('دالة زد_عن_عنوان(ك، ن):\n'
+                                     '    ك.زد(ن)\n'
+                                     '    أعد ك\n'),
+            [lambda_v, obj, 3], {}, None)
+        result = task.result()
+        from arabi_lang.runtime import InstanceValue
+        self.assertIsInstance(result, InstanceValue)
+        self.assertEqual(result.fields['قيمة'], 10)
+
+    def test_custom_error_identity(self):
+        from arabi_lang.errors import ArabiUserError
+        self._worker()
+        self._wait_workers()
+        self.interp.run(Parser(Lexer(
+            'صنف خطأي من استثناء:\n    تجاهل\n').tokenize()).parse())
+        src = ('دالة رفاعي():\n'
+               '    ارفع خطأي("انفجرت في العامل")\n')
+        with self.assertRaises(ArabiUserError) as caught:
+            self._submit(src).result()   # النتيجة هي التي ترفع الخطأ
+        # الخطأ المخصص يحتفظ بهويته عبر الشبكة — الصنف نفسه
+        self.assertEqual(
+            caught.exception.instance.cls.name, 'خطأي')
+        self.assertIn('انفجرت في العامل',
+                      str(caught.exception.instance.fields.get('رسالة', '')))
+
+    def test_runtime_error_crosses(self):
+        self._worker()
+        self._wait_workers()
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._submit('دالة قاسمة(ن):\n    أعد ن / ٠\n', 5).result()
+        self.assertIn('صفر', str(caught.exception))
+
+    def test_async_function_unwrapped(self):
+        self._worker()
+        self._wait_workers()
+        src = ('غير متزامنة دالة عمل(ن):\n    أعد ن + ١\n')
+        task = self._submit(src, 41)
+        self.assertEqual(task.result(), 42)
+
+    def test_race(self):
+        self._worker()
+        self._worker()
+        self._wait_workers(2)
+        fast = self._submit('دالة سريعة():\n    أعد "فازت"\n')
+        slow = self._submit(
+            'دالة بطيئة():\n    انتظر_زمن(0.15)\n    أعد "متأخرة"\n')
+        winner = self.interp._call_value(
+            self.interp.globals.get('سباق'), [[fast, slow]], {}, None)
+        self.assertEqual(winner.result(), 'فازت')
+
+    def test_await_keyword(self):
+        self._worker()
+        self._wait_workers()
+        src = ('من خيوط استورد شغّل\n'
+               'من موزعة استورد موزع، عامل\n'
+               'م = موزع(0)\n'
+               'خ = شغّل(عامل، "127.0.0.1"، م.منفذ())\n'
+               'م.انتظر_العمال(1)\n'
+               'د = دالة(س) => س * 2\n'
+               'ت = م.قدّم(د، ٢١)\n'
+               'اطبع("النتيجة:", انتظر ت)\n'
+               'م.إنهاء()\n'
+               'انتظر خ\n')
+        out = self._run_program(src)
+        self.assertIn('النتيجة: 42', out)
+
+    def test_worker_disconnect_requeues(self):
+        import socket as _socket
+        from arabi_lang.distributed import send_frame, recv_frame
+        # عامل مزيّف: يتسجل ويستلم الحزمة ثم ينقطع بلا جواب
+        fake = _socket.create_connection(
+            ('127.0.0.1', self.disp.port()), timeout=10)
+        send_frame(fake, ('مرحبا', -1, 'مزيّف'))
+        self._wait_workers()
+        task = self._submit('دالة جمع(أ، ب):\n    أعد أ + ب\n', 1, 2)
+        # انتظر وصول العمل للعامل المزيّف (تقديم يضخ فورًا لعامل معطل)
+        fake.settimeout(5)
+        msg = recv_frame(fake)
+        self.assertIsInstance(msg, tuple)
+        self.assertEqual(msg[0], 'عمل')
+        fake.close()                     # انقطاع صارخ دون نتيجة
+        # عامل حقيقي يأتي فينقضي على المهمة المعاد طابورها
+        self._worker()
+        self.assertEqual(task.result(), 3)
+
+    def test_shutdown_drains_and_worker_exits(self):
+        self._worker()
+        self._wait_workers()
+        tasks = [self._submit('دالة مضاعف(ن):\n    أعد ن * ٢\n', i)
+                 for i in range(4)]
+        self.disp.shutdown()                # ينتظر تصفية الجاري كله
+        results = [t.result() for t in tasks]
+        self.assertEqual(results, [0, 2, 4, 6])
+        for t in self.threads:
+            t.join(timeout=10)              # العمالة خرجت برسالة الوداع
+            self.assertFalse(t.is_alive())
+
+    def test_vm_equivalence(self):
+        src = ('من خيوط استورد شغّل\n'
+               'من موزعة استورد موزع، عامل\n'
+               'م = موزع(0)\n'
+               'خ = شغّل(عامل، "127.0.0.1"، م.منفذ())\n'
+               'م.انتظر_العمال(1)\n'
+               'جمع = دالة(أ، ب) => أ + ب\n'
+               'مهام = [م.قدّم(جمع، ١، ب=٢)، م.قدّم(جمع، ٣، ب=٤)]\n'
+               'اطبع(انتظر_الجميع(مهام))\n'
+               'م.إنهاء()\n'
+               'انتظر خ\n')
+        self.assertEqual(self._run_program(src, use_vm=True),
+                         self._run_program(src, use_vm=False))
+
+    def test_two_dispatchers_independent(self):
+        from arabi_lang.distributed import _dist_create
+        other = _dist_create(self.interp, [0], None)
+        try:
+            self.assertNotEqual(self.disp.port(), other.port())
+            self._worker()
+            self._wait_workers()
+            t1 = self._submit('دالة جمع(أ، ب):\n    أعد أ + ب\n', 1, 1)
+            self.assertEqual(t1.result(), 2)
+            self.assertEqual(other.workers(), 0)   # لا تسريب بين الموزعين
+            self.assertEqual(other.total(), 0)
+        finally:
+            other.shutdown()
+
+    # ---------- أدوات ----------
+
+    def _run_program(self, src, use_vm=False):
+        """ينفذ برنامجًا كاملًا ويعيد مخرجاته المطبوعة."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            interp = Interpreter(use_vm=use_vm)
+            interp.run(Parser(Lexer(src).tokenize()).parse())
+        return buf.getvalue()
+
+
+class TestDistributedCliWorker(unittest.TestCase):
+    """العامل من سطر الأوامر: --عامل المضيف:منفذ (الإصدار 1.18)."""
+
+    def test_cli_worker_executes_task(self):
+        import subprocess
+        import sys as _sys
+        from arabi_lang.distributed import _dist_create
+        interp = Interpreter(use_vm=False)
+        interp.run(Parser(Lexer(
+            'دالة حسب(س):\n    أعد س + ١\n').tokenize()).parse())
+        func = interp.globals.get('حسب')
+        disp = _dist_create(interp, [0], None)
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [_sys.executable, os.path.join(ROOT, 'arabi.py'),
+                 '--عامل', f'127.0.0.1:{disp.port()}'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+            disp._server.wait_workers(1, 30, None)
+            task = disp._server.submit(func, [func, 41], {}, None)
+            self.assertEqual(task.result(), 42)
+        finally:
+            disp.shutdown()
+            if proc is not None:
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == '__main__':

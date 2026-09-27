@@ -30,10 +30,13 @@ from .runtime import (
     GENERATOR_METHODS, DB_METHODS,
     THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS, TASK_METHODS,
     POOL_METHODS, PROCESS_METHODS, PROCESS_TASK_METHODS,
-    PROCESS_POOL_METHODS, _pool_submit,
+    PROCESS_POOL_METHODS, DISPATCHER_METHODS, DIST_TASK_METHODS,
+    _pool_submit,
 )
 from .processes import _ppool_submit
-from .runtime import ProcessValue, ProcessTaskValue, ProcessPoolValue
+from .distributed import _dist_submit
+from .runtime import (ProcessValue, ProcessTaskValue, ProcessPoolValue,
+                      DispatcherValue, DistributedTaskValue)
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
 sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
@@ -49,7 +52,7 @@ CATCHABLE = (
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
                    'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم',
                    'قاعدة', 'ترميز', 'جداول', 'خيوط', 'تواريخ', 'إحصاء',
-                   'عمليات')
+                   'عمليات', 'موزعة')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -1234,6 +1237,13 @@ class Interpreter:
             if name == 'قدّم':
                 return _ppool_submit(obj, args, kwargs, line)
             table = PROCESS_POOL_METHODS
+        elif isinstance(obj, DispatcherValue):
+            # قدّم مسار خاص كذلك: الترميز يقع لحظة التقديم قبل العبور للشبكة
+            if name == 'قدّم':
+                return _dist_submit(obj, args, kwargs, line)
+            table = DISPATCHER_METHODS
+        elif isinstance(obj, DistributedTaskValue):
+            table = DIST_TASK_METHODS
         elif isinstance(obj, LockValue):
             table = LOCK_METHODS
         elif isinstance(obj, QueueValue):
@@ -1644,13 +1654,12 @@ class Interpreter:
         يعيد رفع خطأ العمل الخلفي إن فشل، على سطر 'انتظر' نفسه.
         """
         value = self.evaluate(node.operand, env)
-        if isinstance(value, TaskValue):
+        if isinstance(value, (TaskValue, ProcessTaskValue,
+                              DistributedTaskValue)):
             return value.result(node.line)
         if isinstance(value, (ThreadValue, ProcessValue)):
             # 'انتظر' تعمل على خيوط وحدة 'خيوط' وعلى العمليات المنفصلة
             # أيضًا (1.17) — توحيد للانتظار
-            return value.result(node.line)
-        if isinstance(value, ProcessTaskValue):
             return value.result(node.line)
         raise ArabiRuntimeError(
             f"'انتظر' تتوقع مهمة (نتاج دالة غير متزامنة أو قدّم على "

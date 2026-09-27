@@ -47,13 +47,16 @@ from .runtime import (
     _VM_PENDING, TaskValue, typename, ModuleValue, GeneratorValue,
     DBValue, SuperValue, ThreadValue, LockValue, QueueValue, PoolValue,
     ProcessValue, ProcessTaskValue, ProcessPoolValue, DateValue,
+    DispatcherValue, DistributedTaskValue,
 )
 
 # القيم الحية المرتبطة بخيوط/عمليات الأب — تُتخطى صامتة في الربط
 # العالمي (لا معنى لها في الابن)، وتُرفض صراحة كوسائط/نتائج.
+# والقيم الموزعة (الموزع ومهامه) حية كذلك: مرتبطة بخادم الشبكة (1.18).
 LIVE_TYPES = (GeneratorValue, DBValue, SuperValue, ThreadValue,
               LockValue, QueueValue, TaskValue, PoolValue, ProcessValue,
-              ProcessTaskValue, ProcessPoolValue, DateValue)
+              ProcessTaskValue, ProcessPoolValue, DateValue,
+              DispatcherValue, DistributedTaskValue)
 
 # أنواع القيم الحية التي لا تعبر حدود العملية — تُتخطى صامتة في الربط
 # العالمي (الابن يبني وحداته الخاصة)، وتُرفض صراحة كوسائط/نتائج.

@@ -801,6 +801,97 @@ def _pool_worker_target(job_q, result_q):
     _pool_worker(job_q, result_q)
 
 
+class DistributedTaskValue:
+    """مهمة موزعة — نتاج قدّم على موزع (الإصدار 1.18).
+
+    الواجهة نفسها لمهام الخيوط والعمليات: نتيجة/الخطأ/جاهز/انتظر
+    — فتعمل مع 'انتظر' و'انتظر_الجميع' و'سباق' دون أي فرق في
+    الاستخدام، لكن عملها قد ينفذ على أي جهاز في الشبكة.
+    """
+
+    __slots__ = ('_event', '_lock', '_done', '_error', '_result', 'id')
+
+    def __init__(self, task_id):
+        self.id = task_id               # المعرف العالمي للمهمة
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._done = False
+        self._error = None
+        self._result = None
+
+    def _finish(self, result, error):
+        """يسجل النتيجة أو الخطأ مرة واحدة ويوقظ كل المنتظرين."""
+        with self._lock:
+            if self._done:
+                return
+            self._result = result
+            self._error = error
+            self._done = True
+        self._event.set()
+
+    def result(self, line=None):
+        """ينتظر انتهاء المهمة ويعيد نتيجتها — يعيد رفع خطأها إن فشلت."""
+        if not self._event.wait(DISTRIBUTED_TIMEOUT):
+            raise ArabiRuntimeError(
+                'انتهت مهلة انتظار المهمة الموزعة دون نتيجة — ربما لا '
+                'يوجد عالِم متصل بالموزع أو علق العمل طويلًا جدًا', line)
+        if self._error is not None:
+            self._error.line = self._error.line or line
+            raise self._error
+        return self._result
+
+    def error(self):
+        """ينتظر الانتهاء ويعيد رسالة الخطأ أو 'ولا شيء' إذا نجحت."""
+        if not self._event.wait(DISTRIBUTED_TIMEOUT):
+            return 'انتهت مهلة انتظار المهمة الموزعة'
+        return self._error.message if self._error is not None else None
+
+    def ready(self):
+        """هل انتهت المهمة؟ فحص فوري دون انتظار."""
+        return self._done
+
+
+class DispatcherValue:
+    """موزع مهام — نتاج موزعة.موزع(الإصدار 1.18).
+
+    خادم توزيع يستقبل اتصالات العمالة من أي جهاز ويسلمها المهام
+    المقدَّمة بـ 'قدّم' — والنتائج تعود للنادل مهما نُفذ عملها.
+    - قدّم(دالة، معاملات...) تعيد مهمة موزعة تنتظرها بـ 'انتظر'.
+    - عمال() عدد العمالة المتصلة الآن، منفذ() المنفذ الفعلي
+      (بعد الاختيار التلقائي)، حجم() عدد المهام المقدَّمة كله.
+    - انتظر_العمال(عدد، مهلة) يحجب حتى تكتمل العمالة المطلوبة.
+    - إنهاء() يوقف قبول المهام وينتظر تصفية الجاري ثم يودّع العمالة.
+    """
+
+    __slots__ = ('_server',)
+
+    def __init__(self, server):
+        self._server = server
+
+    # تفويض مباشر للخادم — بواجهة عربية قصيرة للاستخدام الداخلي والاختبارات
+
+    def submit(self, func, args, kwargs, line=None):
+        return self._server.submit(func, args, kwargs, line)
+
+    def workers(self):
+        return self._server.workers()
+
+    def port(self):
+        return self._server.port()
+
+    def host(self):
+        return self._server.host()
+
+    def total(self):
+        return self._server.total()
+
+    def wait_workers(self, count, timeout, line=None):
+        return self._server.wait_workers(count, timeout, line)
+
+    def shutdown(self, line=None):
+        return self._server.shutdown(line)
+
+
 class DateValue:
     """قيمة تاريخ ووقت — تغلف datetime.datetime (الإصدار 1.9)."""
 
@@ -820,8 +911,11 @@ POOL_METHODS = {}     # تُملأ بعد تعريف طرق تجمع الخيو�
 PROCESS_METHODS = {}  # تُملأ بعد تعريف طرق العمليات المنفصلة (1.17)
 PROCESS_TASK_METHODS = {}  # تُملأ بعد تعريف طرق مهام العمليات (1.17)
 PROCESS_POOL_METHODS = {}  # تُملأ بعد تعريف طرق تجمع العمليات (1.17)
+DISPATCHER_METHODS = {}   # تُملأ بعد تعريف طرق الموزع (1.18)
+DIST_TASK_METHODS = {}    # تُملأ بعد تعريف طرق المهام الموزعة (1.18)
 
 PROCESS_TIMEOUT = 120  # مهلة انتظار نتيجة العملية الواحدة (ثوانٍ)
+DISTRIBUTED_TIMEOUT = 120  # مهلة انتظار نتيجة المهمة الموزعة (ثوانٍ)
 
 
 def typename(v):
@@ -847,6 +941,10 @@ def typename(v):
         return 'مهمة عملية'
     if isinstance(v, ProcessPoolValue):
         return 'تجمع عمليات'
+    if isinstance(v, DispatcherValue):
+        return 'موزع'
+    if isinstance(v, DistributedTaskValue):
+        return 'مهمة موزعة'
     if isinstance(v, (ArabiFunc, BuiltinFunc)):
         if isinstance(v, ArabiFunc) and v.is_async:
             return 'دالة غير متزامنة'
@@ -935,6 +1033,10 @@ def display(v):
         return '<قفل>'
     if isinstance(v, QueueValue):
         return '<طابور>'
+    if isinstance(v, DispatcherValue):
+        return f'<موزع على المنفذ {v._server.port()}>'
+    if isinstance(v, DistributedTaskValue):
+        return f'<مهمة موزعة {v.id}>'
     if isinstance(v, DateValue):
         return v.dt.strftime('%Y-%m-%d %H:%M:%S')
     return str(v)
@@ -1553,6 +1655,16 @@ def install_builtins(env):
         'تجمع': BuiltinFunc('تجمع', _ppool_create, takes_interp=True),
         'معالجات': BuiltinFunc('معالجات', _proc_cpu_count),
         'معرفي': BuiltinFunc('معرفي', _proc_pid),
+    }))
+
+    # ============ وحدة الموزعة (الإصدار 1.18) ============
+    # الاستيراد هنا (وليس أعلى الملف) تفاديًا للدورانية — distributed
+    # يستورد أسماء القيم من processes وruntime، وهي مكتملة قبل أي استدعاء.
+
+    from .distributed import _dist_create, _dist_worker
+    env.define('موزعة', ModuleValue('موزعة', {
+        'موزع': BuiltinFunc('موزع', _dist_create, takes_interp=True),
+        'عامل': BuiltinFunc('عامل', _dist_worker, takes_interp=True),
     }))
 
     # ============ وحدة التواريخ (الإصدار 1.9) ============
@@ -2371,17 +2483,19 @@ def _task_list(args, name, line):
     """يتحقق من معامل قائمة مهام لـ انتظر_الجميع/سباق ويعيدها.
 
     المهام نتاج دوال غير متزامنة أو قدّم على تجمع الخيوط أو تجمع
-    العمليات (1.17) — الثلاثة بواجهة واحدة.
+    العمليات (1.17) أو موزع (1.18) — الأربعة بواجهة واحدة.
     """
     from .processes import ProcessTaskValue
     if len(args) != 1 or not isinstance(args[0], list):
         raise ArabiRuntimeError(
             f"'{name}' تحتاج قائمة مهام — مثال: {name}([م١، م٢])", line)
     for i, t in enumerate(args[0]):
-        if not isinstance(t, (TaskValue, ProcessTaskValue)):
+        if not isinstance(t, (TaskValue, ProcessTaskValue,
+                              DistributedTaskValue)):
             raise ArabiRuntimeError(
                 f'العنصر رقم {i + 1} ليس مهمة بل {typename(t)} — '
-                'المهام نتاج استدعاء دوال غير متزامنة أو قدّم على تجمع',
+                'المهام نتاج استدعاء دوال غير متزامنة أو قدّم على تجمع '
+                'أو موزع',
                 line)
     return args[0]
 
@@ -2696,6 +2810,110 @@ def _ppool_size(obj, args, line):
 PROCESS_POOL_METHODS.update({
     'إنهاء': _ppool_shutdown,
     'حجم': _ppool_size,
+})
+
+
+# ================== طرق الموزع والمهام الموزعة (الإصدار 1.18) ==================
+
+def _dist_workers(obj, args, line):
+    """موزع.عمال() — عدد العمالة المتصلة بالموزع الآن."""
+    _require_args('عمال', args, 0, 0, line)
+    return obj._server.workers()
+
+
+def _dist_port(obj, args, line):
+    """موزع.منفذ() — المنفذ الفعلي بعد الربط (للاختيار التلقائي 0)."""
+    _require_args('منفذ', args, 0, 0, line)
+    return obj._server.port()
+
+
+def _dist_host(obj, args, line):
+    """موزع.عنوان() — العنوان المرتبط به الخادم."""
+    _require_args('عنوان', args, 0, 0, line)
+    return obj._server.host()
+
+
+def _dist_size(obj, args, line):
+    """موزع.حجم() — عدد المهام المقدَّمة إلى الموزع منذ بدئه."""
+    _require_args('حجم', args, 0, 0, line)
+    return obj._server.total()
+
+
+def _dist_wait_workers(obj, args, line):
+    """موزع.انتظر_العمال(عدد؟، مهلة؟) — يحجب حتى يتصل عدد كافٍ من
+    العمالة (الافتراضي: عامل واحد حتى 30 ثانية) — وإلا رفع خطأ
+    (التحقق من المعاملات داخل الخادم نفسه)."""
+    count, timeout = 1, 30
+    if len(args) > 2:
+        raise ArabiRuntimeError(
+            f"'انتظر_العمال' تأخذ معاملين على الأكثر (العدد ثم المهلة) "
+            f'لكنها استلمت {len(args)}', line)
+    if len(args) >= 1:
+        count = args[0]
+    if len(args) == 2:
+        timeout = args[1]
+    obj._server.wait_workers(count, timeout, line)
+    return None
+
+
+def _dist_shutdown(obj, args, line):
+    """موزع.إنهاء() — يوقف قبول المهام وينتظر تصفية الجاري ثم يودّع
+    العمالة — فتعود حلقة كل عامل بلا نتائج أعمال جديدة."""
+    _require_args('إنهاء', args, 0, 0, line)
+    obj._server.shutdown(line)
+    return None
+
+
+DISPATCHER_METHODS.update({
+    'عمال': _dist_workers,
+    'منفذ': _dist_port,
+    'عنوان': _dist_host,
+    'حجم': _dist_size,
+    'انتظر_العمال': _dist_wait_workers,
+    'إنهاء': _dist_shutdown,
+})
+
+
+def _dtask_result(obj, args, line):
+    """المهمة الموزعة.نتيجة() — ينتظر ويعيد النتيجة (أو يرفع الخطأ)."""
+    _require_args('نتيجة', args, 0, 0, line)
+    return obj.result(line)
+
+
+def _dtask_error(obj, args, line):
+    """المهمة الموزعة.الخطأ() — ينتظر ويعيد رسالة الخطأ أو 'ولا شيء'."""
+    _require_args('الخطأ', args, 0, 0, line)
+    return obj.error()
+
+
+def _dtask_ready(obj, args, line):
+    """المهمة الموزعة.جاهز() — فحص فوري بلا انتظار."""
+    _require_args('جاهز', args, 0, 0, line)
+    return obj.ready()
+
+
+def _dtask_wait(obj, args, line):
+    """المهمة الموزعة.انتظر() — انتظار بلا إعادة النتيجة."""
+    _require_args('انتظر', args, 0, 0, line)
+    try:
+        obj.result(line)
+    except ArabiError:
+        pass
+    return None
+
+
+def _dtask_id(obj, args, line):
+    """المهمة الموزعة.معرف() — الرقم التسلسلي للمهمة لدى الموزع."""
+    _require_args('معرف', args, 0, 0, line)
+    return obj.id
+
+
+DIST_TASK_METHODS.update({
+    'نتيجة': _dtask_result,
+    'الخطأ': _dtask_error,
+    'جاهز': _dtask_ready,
+    'انتظر': _dtask_wait,
+    'معرف': _dtask_id,
 })
 
 
