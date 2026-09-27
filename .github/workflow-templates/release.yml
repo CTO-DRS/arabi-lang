@@ -1,0 +1,159 @@
+# ============================================================
+# سير الإصدارات الآلي للغة «عربي» — يُشغَّل عند دفع وسم v*
+#
+# ١) يبني الملف التنفيذي المستقل على لينكس وويندوز وماك
+# ٢) يبني حزمة بايثون (sdist + wheel) للتوزيع عبر pip
+# ٣) ينشئ إصدار GitHub ويرفق كل الأصول
+# ٤) النشر إلى PyPI يدوي اختياري (workflow_dispatch) — يحتاج
+#    سر PYPI_API_TOKEN في إعدادات المستودع
+#
+# ⚠ التفعيل: GitHub يمنع دفع ملفات .github/workflows/ إلا بتوكن
+# يحمل صلاحية workflow — لذا يخزَّن هذا السير هنا جاهزًا، ويُفعَّل
+# بأحد الطريقين:
+#   أ) نقل بسطر واحد ثم دفع (بتوكن يحمل صلاحية workflow):
+#      mv .github/workflow-templates/release.yml .github/workflows/release.yml
+#   ب) من واجهة GitHub: Add file → Create new file → المسار
+#      .github/workflows/release.yml والصق محتوى هذا الملف
+# ============================================================
+
+name: إصدارات لغة عربي
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    name: بناء التنفيذي على ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: لينكس
+            suffix: linux-x64
+          - os: windows-latest
+            name: ويندوز
+            suffix: windows-x64
+          - os: macos-latest
+            name: ماك
+            suffix: macos-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: تثبيت PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: البناء
+        run: python -m PyInstaller عربي.spec --noconfirm --clean
+
+      - name: فحص الناتج
+        run: |
+          python -c "import glob; srcs = glob.glob('dist/عربي*'); assert len(srcs) == 1, srcs"
+          python dist/عربي* --نسخة
+
+      - name: تسمية الأصل باسم ASCII
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT="arabi-${VERSION}-${{ matrix.suffix }}"
+          python -c "import glob, shutil, sys; shutil.copy2(glob.glob('dist/عربي*')[0], sys.argv[1]); print('الناتج:', sys.argv[1])" "$OUT"
+          echo "ASSET=$OUT" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ثنائي-${{ matrix.suffix }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  build-python:
+    name: بناء حزمة بايثون
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: البناء (sdist + wheel)
+        run: |
+          python -m pip install build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: حزمة-بايثون
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: إنشاء إصدار GitHub
+    needs: [build-binaries, build-python]
+    runs-on: ubuntu-latest
+    steps:
+      - name: تنزيل كل الأصول
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: إنشاء الإصدار ورفع الأصول
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES=$(cat <<'ملاحظات'
+          إصدار جديد من لغة برمجة عربي.
+
+          ## الأصول
+          - **arabi-*-linux-x64** — الملف التنفيذي المستقل للينكس (يعمل بلا بايثون)
+          - **arabi-*-windows-x64.exe** — الملف التنفيذي المستقل لويندوز
+          - **arabi-*-macos-arm64** — الملف التنفيذي المستقل لماك (معالجات Apple Silicon)
+          - **arabi_lang-*.whl** و **arabi-lang-*.tar.gz** — التثبيت عبر pip:
+            ```
+            pip install arabi_lang-*.whl
+            arabi --نسخة
+            ```
+
+          شاهد [README](https://github.com/CTO-DRS/arabi-lang) للتفاصيل الكاملة.
+          ملاحظات
+          )
+          echo "$NOTES" > notes.md
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "عربي ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md
+
+  publish-pypi:
+    name: النشر إلى PyPI (يدوي)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: البناء (sdist + wheel)
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: النشر إلى PyPI — يتطلب سر PYPI_API_TOKEN
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}

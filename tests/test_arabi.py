@@ -7472,5 +7472,403 @@ class TestNetworkDownload(unittest.TestCase):
         self.assertIn('صح', out)
 
 
+class TestThreadPool(unittest.TestCase):
+    """تجمع الخيوط محدود الحجم (الإصدار 1.16) — تجمع / قدّم / إنهاء / حجم."""
+
+    # ---------- الإنشاء والأنواع ----------
+
+    def test_typename_and_display(self):
+        out = run_code('تج = تجمع(٣)\nاطبع(نوع(تج))\nاطبع(تج)\n')
+        self.assertIn('تجمع خيوط', out)
+        self.assertIn('<تجمع خيوط 3>', out)
+
+    def test_size_method(self):
+        out = run_code('تج = تجمع(٤)\nاطبع(تج.حجم())\nتج.إنهاء()\n')
+        self.assertIn('4', out)
+
+    def test_creation_requires_one_int_arg(self):
+        for src, keyword in [
+            ("تجمع()", 'معامل'),
+            ("تجمع(٢، ٣)", 'معاملًا واحدًا'),
+            ("تجمع(١.٥)", 'عددًا صحيحًا'),
+            ('تجمع("ثلاثة")', 'عددًا صحيحًا'),
+            ("تجمع(صح)", 'عددًا صحيحًا'),
+            ("تجمع(٠)", 'موجبًا'),
+            ("تجمع(-٢)", 'موجبًا'),
+            ("تجمع(٥١٣)", 'الحد الأعلى'),
+        ]:
+            with self.assertRaises(ArabiRuntimeError) as ctx:
+                run_code(src)
+            self.assertIn(keyword, str(ctx.exception), src)
+
+    # ---------- التقديم والنتائج ----------
+
+    def test_submit_returns_task_with_methods(self):
+        out = run_code(
+            'حسب = دالة(ر) => ر + ١\n'
+            'تج = تجمع(١)\n'
+            'م = تج.قدّم(حسب، ٤١)\n'
+            'اطبع(نوع(م))\n'
+            'م.انتظر()\n'
+            'اطبع(م.جاهز())\n'
+            'اطبع(م.نتيجة())\n'
+            'تج.إنهاء()\n')
+        self.assertIn('مهمة', out)
+        self.assertIn('صح', out)
+        self.assertIn('42', out)
+
+    def test_wait_all_preserves_order(self):
+        out = run_code(
+            'حسب = دالة(ر) => ر * ر\n'
+            'تج = تجمع(٣)\n'
+            'مهام = []\n'
+            'لكل ر في مدى(١، ٧):\n'
+            '    مهام.أضف(تج.قدّم(حسب، ر))\n'
+            'نت = انتظر_الجميع(مهام)\n'
+            'تج.إنهاء()\n'
+            'اطبع(نت)\n')
+        self.assertIn('[1، 4، 9، 16، 25، 36]', out)
+
+    def test_submit_async_function(self):
+        out = run_code(
+            'غير متزامنة دالة اطبخ(الاسم):\n'
+            '    انتظر_زمن(0.01)\n'
+            '    أعد "تم " + الاسم\n'
+            'تج = تجمع(٢)\n'
+            'اطبع(انتظر تج.قدّم(اطبخ، "الشاي"))\n'
+            'تج.إنهاء()\n')
+        self.assertIn('تم الشاي', out)
+
+    def test_submit_bound_method(self):
+        out = run_code(
+            'صنف حاسب:\n'
+            '    دالة إنشاء(معامل):\n'
+            '        هذا.معامل = معامل\n'
+            '    دالة احسب(ر):\n'
+            '        أعد ر * ر * هذا.معامل\n'
+            'ك = حاسب(٣)\n'
+            'تج = تجمع(٢)\n'
+            'اطبع(انتظر تج.قدّم(ك.احسب، ٤))\n'
+            'تج.إنهاء()\n')
+        self.assertIn('48', out)
+
+    def test_submit_lambda_and_builtin(self):
+        out = run_code(
+            'تج = تجمع(٢)\n'
+            'اطبع(انتظر تج.قدّم(دالة(ر) => ر + ١، ٩))\n'
+            'اطبع(انتظر تج.قدّم(أكبر، ٣، ١٢))\n'
+            'تج.إنهاء()\n')
+        self.assertIn('10', out)
+        self.assertIn('12', out)
+
+    def test_submit_with_kwargs(self):
+        out = run_code(
+            'دالة يرحب(الاسم، لقب = "بلا لقب"):\n'
+            '    أعد "أهلًا " + الاسم + " " + لقب\n'
+            'تج = تجمع(١)\n'
+            'اطبع(انتظر تج.قدّم(يرحب، "سالم"))\n'
+            'اطبع(انتظر تج.قدّم(يرحب، "سالم"، لقب = "المهندس"))\n'
+            'تج.إنهاء()\n')
+        self.assertIn('أهلًا سالم بلا لقب', out)
+        self.assertIn('أهلًا سالم المهندس', out)
+
+    def test_submit_requires_callable(self):
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            run_code('تج = تجمع(١)\nتج.قدّم(٥)\n')
+        self.assertIn("تتوقع دالة", str(ctx.exception))
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            run_code('تج = تجمع(١)\nتج.قدّم()\n')
+        self.assertIn('تحتاج دالة', str(ctx.exception))
+
+    # ---------- الأخطاء ----------
+
+    def test_runtime_error_propagates(self):
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            run_code(
+                'تج = تجمع(١)\n'
+                'انتظر تج.قدّم(دالة() => ١ / ٠)\n'
+                'تج.إنهاء()\n')
+        self.assertIn('قسمة على صفر', str(ctx.exception))
+
+    def test_custom_error_preserves_identity(self):
+        out = run_code(
+            'دالة تفشل():\n'
+            '    ارفع استثناء("بيانات ناقصة")\n'
+            'تج = تجمع(١)\n'
+            'م = تج.قدّم(تفشل)\n'
+            'اطبع(م.الخطأ())\n'
+            'جرب:\n'
+            '    انتظر م\n'
+            'باستثناء هـ:\n'
+            '    اطبع("رسالة: " + هـ.رسالة)\n'
+            'تج.إنهاء()\n')
+        self.assertIn('بيانات ناقصة', out)
+        self.assertIn('رسالة: بيانات ناقصة', out)
+
+    def test_error_method_waits(self):
+        out = run_code(
+            'تج = تجمع(١)\n'
+            'م = تج.قدّم(دالة() => ٥)\n'
+            'اطبع(نوع(م.الخطأ()))\n'
+            'تج.إنهاء()\n')
+        self.assertIn('ولا شيء', out)
+
+    # ---------- حد التزامن والتوازي ----------
+
+    def test_concurrency_bound_respected(self):
+        out = run_code(
+            'قفل_عد = خيوط.قفل()\n'
+            'عد_نشط = ٠\n'
+            'أقصى = ٠\n'
+            'دالة يعمل(ر):\n'
+            '    عالمي عد_نشط، أقصى\n'
+            '    قفل_عد.احجز()\n'
+            '    عد_نشط = عد_نشط + ١\n'
+            '    لو عد_نشط > أقصى:\n'
+            '        أقصى = عد_نشط\n'
+            '    قفل_عد.افرح()\n'
+            '    انتظر_زمن(0.03)\n'
+            '    قفل_عد.احجز()\n'
+            '    عد_نشط = عد_نشط - ١\n'
+            '    قفل_عد.افرح()\n'
+            '    أعد ر\n'
+            'تج = تجمع(٢)\n'
+            'مهام = []\n'
+            'لكل ر في مدى(٦):\n'
+            '    مهام.أضف(تج.قدّم(يعمل، ر))\n'
+            'انتظر_الجميع(مهام)\n'
+            'تج.إنهاء()\n'
+            'اطبع(أقصى <= ٢)\n')
+        self.assertIn('صح', out)
+
+    def test_two_workers_run_in_parallel(self):
+        out = run_code(
+            'بداية = وقت.زمن()\n'
+            'تج = تجمع(٢)\n'
+            'م١ = تج.قدّم(دالة() => انتظر_زمن(0.15))\n'
+            'م٢ = تج.قدّم(دالة() => انتظر_زمن(0.15))\n'
+            'انتظر_الجميع([م١، م٢])\n'
+            'تج.إنهاء()\n'
+            'المدة = وقت.زمن() - بداية\n'
+            'اطبع(المدة < 0.25)\n')
+        self.assertIn('صح', out)
+
+    # ---------- الإنهاء ----------
+
+    def test_shutdown_waits_for_queued_tasks(self):
+        out = run_code(
+            'تج = تجمع(١)\n'
+            'مهام = []\n'
+            'لكل ر في مدى(٣):\n'
+            '    مهام.أضف(تج.قدّم(دالة(ر) => ر * ١٠، ر))\n'
+            'تج.إنهاء()          # ينتظر تصفية الثلاثة كلها\n'
+            'اطبع(انتظر_الجميع(مهام))\n'
+            'تج.إنهاء()          # مزدوج آمن\n'
+            'اطبع("أُنهي")\n')
+        self.assertIn('[0، 10، 20]', out)
+        self.assertIn('أُنهي', out)
+
+    def test_submit_after_shutdown_rejected(self):
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            run_code(
+                'تج = تجمع(١)\n'
+                'تج.إنهاء()\n'
+                'تج.قدّم(دالة() => ١)\n')
+        self.assertIn('مغلق', str(ctx.exception))
+
+    def test_shutdown_from_inside_task_no_deadlock(self):
+        """إنهاء من داخل مهمة على التجمع نفسه — لا تعليق ولا انهيار."""
+        out = run_code(
+            'تج = تجمع(١)\n'
+            'م = تج.قدّم(دالة() => تج.إنهاء())\n'
+            'انتظر م\n'
+            'اطبع("نظيف")\n')
+        self.assertIn('نظيف', out)
+
+
+class TestPoolVm(unittest.TestCase):
+    """تكافؤ تجمع الخيوط بين الدولاب الافتراضي والممسح الشجري (1.16)."""
+
+    def _run(self, source, use_vm):
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                tree = Parser(Lexer(source).tokenize()).parse()
+                Interpreter(use_vm=use_vm).run(tree)
+            return ('ok', out.getvalue())
+        except ArabiError as exc:
+            return ('error', f'{type(exc).__name__}: {exc}')
+
+    def assert_same(self, source):
+        vm_kind, vm_out = self._run(source, True)
+        ast_kind, ast_out = self._run(source, False)
+        self.assertEqual((vm_kind, vm_out), (ast_kind, ast_out))
+        return vm_out if vm_kind == 'ok' else None
+
+    def test_pool_program_equivalence(self):
+        out = self.assert_same(
+            'دالة حسب(ر):\n'
+            '    أعد ر * ر + ١\n'
+            'تج = تجمع(٣)\n'
+            'مهام = []\n'
+            'لكل ر في مدى(١، ٥):\n'
+            '    مهام.أضف(تج.قدّم(حسب، ر))\n'
+            'اطبع(انتظر_الجميع(مهام))\n'
+            'اطبع(تج.حجم())\n'
+            'تج.إنهاء()\n')
+        self.assertIn('[2، 5، 10، 17]', out)
+
+    def test_pool_bound_method_equivalence(self):
+        out = self.assert_same(
+            'صنف حاسب:\n'
+            '    دالة إنشاء(معامل):\n'
+            '        هذا.معامل = معامل\n'
+            '    دالة احسب(ر):\n'
+            '        أعد ر + هذا.معامل\n'
+            'ك = حاسب(١٠)\n'
+            'تج = تجمع(٢)\n'
+            'اطبع(انتظر تج.قدّم(ك.احسب، ٥))\n'
+            'تج.إنهاء()\n')
+        self.assertIn('15', out)
+
+    def test_pool_errors_equivalence(self):
+        out = self.assert_same(
+            'تج = تجمع(١)\n'
+            'م = تج.قدّم(دالة() => ١ / ٠)\n'
+            'اطبع("رسالة: " + م.الخطأ())\n'
+            'جرب:\n'
+            '    انتظر م\n'
+            'باستثناء:\n'
+            '    اطبع("التُقط")\n'
+            'تج.إنهاء()\n'
+            'تج.إنهاء()\n'
+            'جرب:\n'
+            '    تج.قدّم(دالة() => ١)\n'
+            'باستثناء:\n'
+            '    اطبع("مرفوض")\n')
+        self.assertIn('رسالة: قسمة على صفر', out)
+        self.assertIn('التُقط', out)
+        self.assertIn('مرفوض', out)
+
+    def test_pool_creation_errors_equivalence(self):
+        out = self.assert_same(
+            'جرب:\n'
+            '    تجمع(٠)\n'
+            'باستثناء هـ:\n'
+            '    اطبع("خطأ: " + هـ)\n'
+            'جرب:\n'
+            '    تجمع(١.٥)\n'
+            'باستثناء هـ:\n'
+            '    اطبع("خطأ: " + هـ)\n')
+        self.assertEqual(out.count('خطأ:'), 2)
+
+
+class TestPipPackaging(unittest.TestCase):
+    """التوزيع عبر pip (الإصدار 1.16) — pyproject والتثبيت الفعلي."""
+
+    def _pyproject(self):
+        path = os.path.join(ROOT, 'pyproject.toml')
+        self.assertTrue(os.path.isfile(path), 'pyproject.toml مفقود')
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+
+    def test_pyproject_metadata(self):
+        content = self._pyproject()
+        for needle in (
+            'name = "arabi-lang"',
+            'requires-python = ">=3.8"',
+            'license = {text = "MIT"}',
+            'arabi = "arabi:main"',
+            'py-modules = ["arabi"]',
+            'packages = ["arabi_lang"]',
+            'setuptools.build_meta',
+        ):
+            self.assertIn(needle, content, f'مفقود من pyproject: {needle}')
+
+    def test_version_consistency(self):
+        import arabi
+        import arabi_lang
+        import json as _json
+        content = self._pyproject()
+        self.assertIn(f'version = "{arabi_lang.__version__}"', content)
+        with open(os.path.join(ROOT, 'editor', 'vscode', 'package.json'),
+                  encoding='utf-8') as f:
+            vsp = _json.load(f)
+        self.assertEqual(vsp['version'], arabi_lang.__version__)
+        self.assertIn(arabi_lang.__version__, arabi.version_text())
+
+    def test_pip_install_end_to_end(self):
+        """تثبيت فعلي عبر pip في مجلد مؤقت ثم تشغيل المثبَّت."""
+        import subprocess
+        import arabi_lang
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, 'site')
+            base = [sys.executable, '-m', 'pip', 'install', ROOT,
+                    '--target', target, '--no-deps', '--quiet',
+                    '--disable-pip-version-check']
+            # المحاولة الأولى بلا عزل البناء، ومع العزل عند الفشل
+            proc = subprocess.run(base + ['--no-build-isolation'],
+                                  capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                proc = subprocess.run(base, capture_output=True, text=True,
+                                      timeout=300)
+            self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+            # الملفات المثبتة
+            self.assertTrue(os.path.isfile(os.path.join(target, 'arabi.py')))
+            self.assertTrue(os.path.isdir(os.path.join(target, 'arabi_lang')))
+            dist_info = [d for d in os.listdir(target)
+                         if d.startswith('arabi_lang-')
+                         and d.endswith('.dist-info')]
+            self.assertTrue(dist_info, 'dist-info مفقود')
+            self.assertIn(arabi_lang.__version__, dist_info[0])
+            # التشغيل من النسخة المثبتة نفسها (وليس من المصدر)
+            env = dict(os.environ, PYTHONPATH=target)
+            proc = subprocess.run(
+                [sys.executable, '-m', 'arabi', '-c',
+                 'اطبع("تثبيت ناجح " + نص(٢ + ٣))'],
+                capture_output=True, text=True, timeout=60,
+                env=env, cwd=tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('تثبيت ناجح 5', proc.stdout)
+            # سكربت الأمر arabi (على الأنظمة الشبيهة بيونكس)
+            if os.name != 'nt':
+                self.assertTrue(
+                    os.path.isfile(os.path.join(target, 'bin', 'arabi')),
+                    'سكربت الأمر arabi مفقود')
+
+
+class TestReleaseWorkflow(unittest.TestCase):
+    """سير الإصدارات الآلي (الإصدار 1.16) — بناء الثنائيات والحزمة."""
+
+    def test_release_workflow_content(self):
+        # GitHub يمنع دفع .github/workflows/ بلا صلاحية workflow —
+        # لذا يخزَّن السير جاهزًا في workflow-templates ويُفعَّل بنقله
+        path = os.path.join(ROOT, '.github', 'workflow-templates',
+                            'release.yml')
+        self.assertTrue(os.path.isfile(path),
+                        '.github/workflow-templates/release.yml مفقود')
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        for needle in (
+            "tags: ['v*']",
+            'workflow_dispatch',
+            'ubuntu-latest', 'windows-latest', 'macos-latest',
+            'PyInstaller', 'عربي.spec',
+            'upload-artifact', 'download-artifact',
+            'gh release create',
+            'python -m build',
+            'pypa/gh-action-pypi-publish',
+            'PYPI_API_TOKEN',
+        ):
+            self.assertIn(needle, content, f'مفقود من سير الإصدار: {needle}')
+
+    def test_ci_workflow_untouched(self):
+        path = os.path.join(ROOT, '.github', 'workflows', 'tests.yml')
+        self.assertTrue(os.path.isfile(path))
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        self.assertIn('unittest discover', content)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

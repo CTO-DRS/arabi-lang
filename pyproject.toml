@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arabi-lang"
+version = "1.16.0"
+description = "لغة برمجة عربية بالكامل — مفسّر، ١٧ وحدة قياسية، مدير حزم، دولاب افتراضي، غير متزامن، خادم لغة، وتنفيذي مستقل"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "CTO-DRS"}]
+keywords = ["arabic", "arabic-programming-language", "interpreter", "language", "عربية", "عربي", "لغة"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Arabic",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Interpreters",
+]
+
+[project.urls]
+Homepage = "https://github.com/CTO-DRS/arabi-lang"
+Repository = "https://github.com/CTO-DRS/arabi-lang"
+Issues = "https://github.com/CTO-DRS/arabi-lang/issues"
+Changelog = "https://github.com/CTO-DRS/arabi-lang/releases"
+
+[project.scripts]
+arabi = "arabi:main"
+
+[tool.setuptools]
+py-modules = ["arabi"]
+packages = ["arabi_lang"]

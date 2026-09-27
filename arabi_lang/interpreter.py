@@ -22,13 +22,14 @@ from .runtime import (
     ClassValue, InstanceValue, BoundMethod,
     EnumValue, EnumMember, Property, NativeCtor,
     GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
-    ThreadValue, LockValue, QueueValue, DateValue, TaskValue,
+    ThreadValue, LockValue, QueueValue, DateValue, TaskValue, PoolValue,
     typename, display, install_builtins, NO_DEFAULT,
     BreakSignal, ContinueSignal, ReturnSignal,
     _VM_PENDING, _VM_NO,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
     GENERATOR_METHODS, DB_METHODS,
     THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS, TASK_METHODS,
+    POOL_METHODS, _pool_submit,
 )
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
@@ -1215,6 +1216,11 @@ class Interpreter:
             table = THREAD_METHODS
         elif isinstance(obj, TaskValue):
             table = TASK_METHODS
+        elif isinstance(obj, PoolValue):
+            # قدّم مسار خاص: كلمات المفاتيح تُمرر للدالة المقدَّمة نفسها
+            if name == 'قدّم':
+                return _pool_submit(obj, args, kwargs, line)
+            table = POOL_METHODS
         elif isinstance(obj, LockValue):
             table = LOCK_METHODS
         elif isinstance(obj, QueueValue):

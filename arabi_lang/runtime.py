@@ -533,6 +533,73 @@ class TaskValue:
         return self._done
 
 
+class PoolValue:
+    """تجمع خيوط محدود الحجم (الإصدار 1.16) — نتاج الجاهزة تجمع(عدد).
+
+    عدد ثابت من الخيوط العاملة يُعاد استخدامه لتنفيذ المهام المقدَّمة
+    بـ 'قدّم' بدل فتح خيط جديد لكل مهمة — يحفظ الموارد ويحد التزامن.
+    - قدّم(دالة، معاملات...) تعيد مهمة (TaskValue) تنتظرها بـ 'انتظر'
+      أو تجمع نتائجها بـ 'انتظر_الجميع' — سواء كانت الدالة عادية أو
+      غير متزامنة؛ التنفيذ يحدث على خيوط التجمع في كل الأحوال.
+    - إنهاء() توقف قبول مهام جديدة وتنتظر تصفية الجاري منها.
+    - حجم() تعيد عدد الخيوط العاملة.
+    """
+
+    __slots__ = ('size', '_interp', '_queue', '_closed', '_lock', '_threads')
+
+    def __init__(self, size):
+        self.size = size
+        self._interp = None            # يربطه باني التجمع (الجاهزة تجمع)
+        self._queue = queue.Queue()
+        self._closed = False
+        self._lock = threading.Lock()
+        self._threads = []
+        for i in range(size):
+            worker = threading.Thread(target=self._worker, daemon=True,
+                                      name=f'تجمع-عربي-{i + 1}')
+            worker.start()
+            self._threads.append(worker)
+
+    def _worker(self):
+        """حلقة الخيط العامل: يسحب أعمالًا من الطابور حتى إشارة الإنهاء."""
+        while True:
+            job = self._queue.get()
+            if job is None:            # إشارة إنهاء
+                break
+            try:
+                job()
+            finally:
+                self._queue.task_done()
+
+    def _make_job(self, func, local, this_val, task):
+        """يبني عملًا ينفذ جسم دالة عربية على خيط التجمع — بنفس دلالات
+        _spawn_task تمامًا (رفع الأخطاء بكائنها، و'هذا' على المكدس)."""
+        interp = self._interp
+
+        def job():
+            stack = None
+            try:
+                if this_val is not None:
+                    stack = getattr(interp._tls, 'this_stack', None)
+                    if stack is None:
+                        stack = []
+                        interp._tls.this_stack = stack
+                    stack.append(this_val)
+                try:
+                    result = interp._run_func(func, local)
+                finally:
+                    if stack is not None:
+                        stack.pop()
+                task._finish(result, None)
+            except ArabiError as exc:
+                task._finish(None, exc)
+            except Exception as exc:      # شبكة أمان — لا تموت المهمة بصمت
+                task._finish(None, ArabiRuntimeError(
+                    f'خطأ داخل مهمة التجمع: {exc}'))
+
+        return job
+
+
 class DateValue:
     """قيمة تاريخ ووقت — تغلف datetime.datetime (الإصدار 1.9)."""
 
@@ -548,6 +615,7 @@ THREAD_METHODS = {}   # تُملأ بعد تعريف طرق الخيوط
 LOCK_METHODS = {}     # تُملأ بعد تعريف طرق القفل
 QUEUE_METHODS = {}    # تُملأ بعد تعريف طرق الطابور
 TASK_METHODS = {}     # تُملأ بعد تعريف طرق المهام غير المتزامنة (1.15)
+POOL_METHODS = {}     # تُملأ بعد تعريف طرق تجمع الخيوط (1.16)
 
 
 def typename(v):
@@ -593,6 +661,8 @@ def typename(v):
         return 'خيط'
     if isinstance(v, TaskValue):
         return 'مهمة'
+    if isinstance(v, PoolValue):
+        return 'تجمع خيوط'
     if isinstance(v, LockValue):
         return 'قفل'
     if isinstance(v, QueueValue):
@@ -647,6 +717,8 @@ def display(v):
         return '<خيط>'
     if isinstance(v, TaskValue):
         return '<مهمة>'
+    if isinstance(v, PoolValue):
+        return f'<تجمع خيوط {v.size}>'
     if isinstance(v, LockValue):
         return '<قفل>'
     if isinstance(v, QueueValue):
@@ -1131,6 +1203,8 @@ def install_builtins(env):
         ('انتظر_الجميع', _async_wait_all),
         ('سباق', _async_race),
         ('انتظر_زمن', _async_sleep),
+        # تجمع الخيوط (الإصدار 1.16)
+        ('تجمع', BuiltinFunc('تجمع', _pool_create, takes_interp=True)),
     ]
     for name, fn in builtins_list:
         if isinstance(fn, BuiltinFunc):          # دوال جاهزة مغلفة مسبقًا
@@ -2170,6 +2244,123 @@ TASK_METHODS.update({
     'الخطأ': _task_error,
     'جاهز': _task_ready,
     'انتظر': _task_wait,
+})
+
+
+# ================== تجمع الخيوط (الإصدار 1.16) ==================
+
+POOL_MAX_SIZE = 512          # حد أعلى معقول يمنع استهلاك الخيوط الجامح
+
+def _pool_create(interp, args, line):
+    """تجمع(عدد) — ينشئ تجمع خيوط محدود الحجم يعاد استخدام خيوطه.
+
+    قدّم أعمالًا بـ قدّم على الناتج، واجمع النتائج بـ انتظر أو
+    انتظر_الجميع. الإنهاء بـ إنهاء() — ينتظر تصفية كل المقدَّم.
+    """
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'تجمع' تتوقع معاملًا واحدًا (عدد الخيوط) لكنها استلمت "
+            f'{len(args)}', line)
+    size = args[0]
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise ArabiRuntimeError(
+            f"'تجمع' تتوقع عددًا صحيحًا موجبًا لكنها استلمت {typename(size)}",
+            line)
+    if size < 1:
+        raise ArabiRuntimeError(
+            f"'تجمع' يحتاج عددًا موجبًا من الخيوط (استلم {size})", line)
+    if size > POOL_MAX_SIZE:
+        raise ArabiRuntimeError(
+            f'الحد الأعلى لعدد خيوط التجمع هو {POOL_MAX_SIZE} (استلم {size})',
+            line)
+    pool = PoolValue(size)
+    pool._interp = interp
+    return pool
+
+
+def _pool_submit(obj, args, kwargs, line):
+    """تجمع.قدّم(دالة، معاملات...) — يقدّم عملًا للتجمع ويعيد مهمة.
+
+    المعاملات تُربط لحظة التقديم، والتنفيذ على خيوط التجمع بترتيب
+    التقديم كلما انفضّ خيط. الدالة قد تكون عادية أو غير متزامنة أو
+    سهمية أو طريقة مرتبطة أو حتى دالة جاهزة.
+    """
+    if not args:
+        raise ArabiRuntimeError(
+            "'قدّم' تحتاج دالة على الأقل — مثال: تج.قدّم(حسب، ٥)", line)
+    with obj._lock:
+        if obj._closed:
+            raise ArabiRuntimeError(
+                "التجمع مغلق — لا يقبل مهامًا جديدة بعد 'إنهاء'", line)
+    interp = obj._interp
+    func = args[0]
+    rest = args[1:]
+    task = TaskValue()
+
+    if isinstance(func, ArabiFunc):
+        local = interp._bind_call_args(func, rest, kwargs, line)
+        this_val = None
+        job = obj._make_job(func, local, this_val, task)
+    elif isinstance(func, BoundMethod):
+        inner = func.func
+        if not isinstance(inner, ArabiFunc):
+            raise ArabiRuntimeError(
+                f"'قدّم' تتوقع دالة لكنها استلمت {typename(func)}", line)
+        local = interp._bind_call_args(inner, rest, kwargs, line)
+        local.define('هذا', func.instance)   # كـ _invoke_bound تمامًا
+        job = obj._make_job(inner, local, func.instance, task)
+    elif isinstance(func, BuiltinFunc):
+        fn = func
+
+        def job():
+            try:
+                if fn.takes_interp:
+                    result = fn.fn(interp, rest, line)
+                else:
+                    result = fn.fn(rest, line)
+                task._finish(result, None)
+            except ArabiError as exc:
+                task._finish(None, exc)
+            except Exception as exc:      # شبكة أمان — لا تموت المهمة بصمت
+                task._finish(None, ArabiRuntimeError(
+                    f'خطأ داخل مهمة التجمع: {exc}'))
+    else:
+        raise ArabiRuntimeError(
+            f"'قدّم' تتوقع دالة لكنها استلمت {typename(func)}", line)
+
+    obj._queue.put(job)
+    return task
+
+
+def _pool_shutdown(obj, args, line):
+    """تجمع.إنهاء() — يغلق التجمع وينتظر تصفية كل المهام المقدَّمة.
+
+    مهام قيد التنفيذ تكمل حتى النهاية ثم تخرج الخيوط العاملة.
+    الاستدعاء بعد إغلاق آمن (تكرار بلا أثر).
+    """
+    _require_args('إنهاء', args, 0, 0, line)
+    with obj._lock:
+        if obj._closed:
+            return None
+        obj._closed = True
+        for _ in obj._threads:
+            obj._queue.put(None)          # إشارة إنهاء لكل خيط
+    current = threading.current_thread()
+    for worker in obj._threads:
+        if worker is not current:         # إنهاء من داخل مهمة — لا ينتظر نفسه
+            worker.join()
+    return None
+
+
+def _pool_size(obj, args, line):
+    """تجمع.حجم() — يعيد عدد الخيوط العاملة في التجمع."""
+    _require_args('حجم', args, 0, 0, line)
+    return obj.size
+
+
+POOL_METHODS.update({
+    'إنهاء': _pool_shutdown,
+    'حجم': _pool_size,
 })
 
 
