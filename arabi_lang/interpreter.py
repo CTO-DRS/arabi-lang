@@ -20,9 +20,11 @@ from .runtime import (
     ClassValue, InstanceValue, BoundMethod,
     EnumValue, EnumMember, Property, NativeCtor,
     GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
+    ThreadValue, LockValue, QueueValue,
     typename, display, install_builtins, NO_DEFAULT,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
     GENERATOR_METHODS, DB_METHODS,
+    THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS,
 )
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
@@ -38,7 +40,7 @@ CATCHABLE = (
 # الوحدات الجاهزة المدمجة في اللغة
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
                    'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم',
-                   'قاعدة', 'ترميز', 'جداول')
+                   'قاعدة', 'ترميز', 'جداول', 'خيوط')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -226,7 +228,7 @@ class Interpreter:
         params = [(name, self._eval_default(default, env))
                   for name, default in node.params]
         value = ArabiFunc(node.name, params, node.body, env,
-                          is_generator=node.is_generator)
+                          is_generator=node.is_generator, rest=node.rest)
         # تطبيق المزخرفات من الأسفل إلى الأعلى (كما في بايثون)
         for dec in reversed(node.decorators):
             func_value = self.evaluate(dec, env)
@@ -278,7 +280,8 @@ class Interpreter:
                 params = [(name, self._eval_default(default, env))
                           for name, default in stmt.params]
                 method = ArabiFunc(stmt.name, params, stmt.body, class_env,
-                                   is_generator=stmt.is_generator)
+                                   is_generator=stmt.is_generator,
+                                   rest=stmt.rest)
                 # تطبيق مزخرفات الطرق إن وجدت
                 for dec in reversed(stmt.decorators):
                     func_value = self.evaluate(dec, env)
@@ -313,6 +316,67 @@ class Interpreter:
         if parents:
             new_class.mro = [new_class] + mro_ancestors
         env.set(node.name, new_class)
+
+    def exec_InterfaceDef(self, node, env):
+        """تعريف واجهة: عقد مجرد تلتزم به الأصناف.
+
+        الطرق المجردة (بلا جسم) تُسجل في abstract ولا تُخزن كأعضاء،
+        والطرق بجسم تصل تنفيذًا افتراضيًا يورثه كل صنف منفذ.
+        """
+        parents = []
+        if node.superclass is not None:
+            names = (node.superclass if isinstance(node.superclass, list)
+                     else [node.superclass])
+            for pname in names:
+                parent = env.get(pname, node.line)
+                if not isinstance(parent, ClassValue):
+                    raise ArabiRuntimeError(
+                        f"'{pname}' ليس واجهة — وراثة الواجهات تكون من "
+                        'واجهة فقط', node.line)
+                if not parent.is_interface:
+                    raise ArabiRuntimeError(
+                        f"لا يمكن أن ترث الواجهة '{node.name}' الصنف "
+                        f"'{pname}' — الواجهات ترث الواجهات فقط", node.line)
+                parents.append(parent)
+        members = {}
+        class_env = Env(env)
+        class_env.define('الأصل', parents[0] if parents else None)
+        for stmt in node.body:
+            if isinstance(stmt, N.FuncDef):
+                if stmt.name in members:
+                    raise ArabiRuntimeError(
+                        f"تكرار تعريف الطريقة '{stmt.name}' في الواجهة "
+                        f"'{node.name}'", stmt.line)
+                if stmt.body is None:
+                    continue                   # طريقة مجردة — لا عضو
+                params = [(name, self._eval_default(default, env))
+                          for name, default in stmt.params]
+                members[stmt.name] = ArabiFunc(
+                    stmt.name, params, stmt.body, class_env,
+                    is_generator=stmt.is_generator, rest=stmt.rest)
+            elif (isinstance(stmt, N.Assign) and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], N.Name)):
+                name = stmt.targets[0].name
+                value = self.evaluate(stmt.value, env)
+                members[name] = value          # ثابت واجهة
+                class_env.define(name, value)
+            elif isinstance(stmt, N.Pass):
+                continue
+            else:
+                raise ArabiRuntimeError(
+                    "داخل 'واجهة' تُسمح الطرق (بجسم أو بلا جسم) والثوابت فقط",
+                    stmt.line)
+        interface = ClassValue(node.name, parents[0] if parents else None,
+                               members, class_env,
+                               is_interface=True, abstract=node.abstract)
+        if parents:
+            # الوراثة بين الواجهات خطية — نجمع الطرق المجردة من الأصول
+            inherited = set(node.abstract)
+            for parent in parents:
+                for scope in self._class_chain(parent):
+                    inherited |= scope.abstract
+            interface.abstract = frozenset(inherited)
+        env.set(node.name, interface)
 
     def _class_chain(self, cls):
         """يتكرر على سلسلة الصنف (MRO إن حُسب، وإلا سلسلة superclass)."""
@@ -725,7 +789,33 @@ class Interpreter:
         return env.get(node.name, node.line)
 
     def eval_ListLit(self, node, env):
-        return [self.evaluate(item, env) for item in node.items]
+        result = []
+        for item in node.items:
+            if isinstance(item, N.SpreadArg):
+                self._spread_into(result, self.evaluate(item.expr, env),
+                                  item.line)
+            else:
+                result.append(self.evaluate(item, env))
+        return result
+
+    def _spread_into(self, target, value, line):
+        """يفتّ القيمة القابلة للتكرار (قائمة/نص/مدى/مولد) في قائمة هدف."""
+        if isinstance(value, list):
+            target.extend(value)
+        elif isinstance(value, str):
+            target.extend(value)
+        elif isinstance(value, range):
+            target.extend(value)
+        elif isinstance(value, GeneratorValue):
+            while True:
+                ok, item = value._next_pair()
+                if not ok:
+                    break
+                target.append(item)
+        else:
+            raise ArabiRuntimeError(
+                f'لا يمكن تفكيك {typename(value)} في قائمة — '
+                'المتوقع قائمة أو نصًا أو مدى', line)
 
     def eval_DictLit(self, node, env):
         result = {}
@@ -780,11 +870,22 @@ class Interpreter:
         return self._call_value(func, args, kwargs, node.line)
 
     def _evaluate_args(self, arg_nodes, env):
-        """يقيّم معاملات الاستدعاء ويفصل الموضعية عن المسماة."""
+        """يقيّم معاملات الاستدعاء ويفصل الموضعية عن المسماة.
+
+        يدعم التفكيك: دالة(...قائمة) تفتّ العناصر كوسائط موضعية.
+        """
         args = []
         kwargs = {}
         kw_started = False
         for name, expr in arg_nodes:
+            if isinstance(expr, N.SpreadArg):
+                value = self.evaluate(expr.expr, env)
+                if kw_started:
+                    raise ArabiRuntimeError(
+                        'لا يمكن وضع تفكيك ... بعد معامل بالاسم',
+                        getattr(expr, 'line', None))
+                self._spread_into(args, value, getattr(expr, 'line', None))
+                continue
             value = self.evaluate(expr, env)
             if name is None:
                 if kw_started:
@@ -878,6 +979,12 @@ class Interpreter:
             table = GENERATOR_METHODS
         elif isinstance(obj, DBValue):
             table = DB_METHODS
+        elif isinstance(obj, ThreadValue):
+            table = THREAD_METHODS
+        elif isinstance(obj, LockValue):
+            table = LOCK_METHODS
+        elif isinstance(obj, QueueValue):
+            table = QUEUE_METHODS
         else:
             raise ArabiRuntimeError(
                 f"النوع '{typename(obj)}' لا يدعم الطرق — لا توجد طريقة اسمها '{name}'",
@@ -893,7 +1000,8 @@ class Interpreter:
         params = [(name, self._eval_default(default, env))
                   for name, default in node.params]
         body = [N.Return(node.body, node.line)]
-        return ArabiFunc('سهمية', params, body, env, is_lambda=True)
+        return ArabiFunc('سهمية', params, body, env, is_lambda=True,
+                         rest=node.rest)
 
     def eval_Attribute(self, node, env):
         obj = self.evaluate(node.obj, env)
@@ -1072,6 +1180,17 @@ class Interpreter:
             return func.fn(args, line)
         # إنشاء كائن: نقطة(٣، ٤)
         if isinstance(func, ClassValue):
+            if func.is_interface:
+                raise ArabiRuntimeError(
+                    f"لا يمكن إنشاء كائن من الواجهة '{func.name}' — "
+                    'الواجهة عقد تلتزم به الأصناف وليست تُنشأ مباشرة', line)
+            missing = self._missing_abstract(func)
+            if missing:
+                details = '، '.join(
+                    f"'{m}' من الواجهة '{w}'" for m, w in missing)
+                raise ArabiRuntimeError(
+                    f"لا يمكن إنشاء كائن من الصنف '{func.name}' — "
+                    f'لم ينفذ الطرق المجردة: {details}', line)
             instance = InstanceValue(func)
             ctor, _owner = self._lookup_member(func, 'إنشاء')
             if isinstance(ctor, ArabiFunc):
@@ -1086,29 +1205,55 @@ class Interpreter:
         raise ArabiRuntimeError(
             f"'{display(func)}' من نوع {typename(func)} — لا يمكن استدعاؤها كدالة", line)
 
+    def _missing_abstract(self, cls):
+        """يجمع الطرق المجردة غير المنفذة في سلسلة الصنف.
+
+        يعيد قائمة (اسم الطريقة، اسم الواجهة) — فارغة إذا التزم الصنف.
+        """
+        chain = list(self._class_chain(cls))
+        missing = []
+        for scope in chain:
+            if not scope.is_interface:
+                continue
+            for name in scope.abstract:
+                # مُنفذة في أي حلقة من السلسلة؟ (الطرق المجردة ليست أعضاء)
+                if not any(name in c.members for c in chain):
+                    missing.append((name, scope.name))
+        return missing
+
     def _bind_call_args(self, func, args, kwargs, line):
-        """يربط معاملات الاستدعاء (موضعية وبالاسم) بالمعاملات الرسمية.
+        """يربط معاملات الاستدعاء (موضعية وبالاسم و...المتغير) بالمعاملات الرسمية.
 
         يعيد بيئة محلية جاهزة للتنفيذ، ويرفع أخطاء عربية واضحة عند:
         نقص معامل إجباري، زيادة معاملات، اسم غير معروف، أو تكرار إرسال قيمة.
         """
         params = func.params                      # [(الاسم، الافتراضي)، ...]
+        rest_name = getattr(func, 'rest', None)
         local = Env(func.env)
         bound = {}
+        rest_values = []
 
-        # ١) المعاملات الموضعية بالترتيب
+        # ١) المعاملات الموضعية بالترتيب، وما زاد يجمعه المتغير ...
         for i, value in enumerate(args):
             if i >= len(params):
-                raise ArabiRuntimeError(
-                    self._arity_message(func, len(params), len(args), kwargs), line)
+                if rest_name is None:
+                    raise ArabiRuntimeError(
+                        self._arity_message(func, len(params), len(args),
+                                            kwargs), line)
+                rest_values.append(value)
+                continue
             bound[params[i][0]] = value
 
         # ٢) المعاملات بالاسم
         for name, value in kwargs.items():
+            if rest_name is not None and name == rest_name:
+                raise ArabiRuntimeError(
+                    f"المعامل المتغير '{rest_name}' يجمع الوسائط تلقائيًا — "
+                    'لا تُرسله بالاسم', line)
             if not any(p[0] == name for p in params):
                 raise ArabiRuntimeError(
                     f"'{func.name}' لا تحتوي على معامل بالاسم '{name}' — "
-                    f"المعاملات: {self._params_list(params)}", line)
+                    f"المعاملات: {self._params_list(params, rest_name)}", line)
             if name in bound:
                 raise ArabiRuntimeError(
                     f"المعامل '{name}' أُرسل مرتين في '{func.name}' "
@@ -1127,9 +1272,16 @@ class Interpreter:
 
         for name, _default in params:
             local.define(name, bound[name])
+        if rest_name is not None:
+            local.define(rest_name, rest_values)
         return local
 
     def _arity_message(self, func, n_params, n_args, kwargs):
+        if getattr(func, 'rest', None) is not None:
+            required = sum(1 for _name, default in func.params
+                           if default is NO_DEFAULT)
+            return (f"'{func.name}' تتوقع {required} معاملًا إجباريًا "
+                    'على الأقل لكنها استلمت شيئًا بالاسم غير مطابق')
         required = sum(1 for _name, default in func.params
                        if default is NO_DEFAULT)
         got = n_args + len(kwargs)
@@ -1139,8 +1291,11 @@ class Interpreter:
         return (f"'{func.name}' تتوقع {required} معاملًا إجباريًا "
                 f'لكنها استلمت {got}')
 
-    def _params_list(self, params):
-        return '، '.join(p[0] for p in params) or 'لا معاملات'
+    def _params_list(self, params, rest=None):
+        names = [p[0] for p in params]
+        if rest is not None:
+            names.append('...' + rest)
+        return '، '.join(names) or 'لا معاملات'
 
     # ================== أدوات الأصناف ==================
 

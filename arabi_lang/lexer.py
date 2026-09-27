@@ -57,6 +57,8 @@ KEYWORDS = {
     'احذف': T.DELETE,
     # كلمات الإصدار 1.7
     'أنتج': T.YIELD,
+    # كلمات الإصدار 1.8
+    'واجهة': T.INTERFACE,
 }
 
 # كلمات مفتاحية مركبة
@@ -157,6 +159,11 @@ class Lexer:
             if ch == '،':             # الفاصلة العربية
                 self.add(T.COMMA, '،')
                 self.pos += 1
+                continue
+
+            if self.src.startswith('...', self.pos):
+                self.add(T.ELLIPSIS, '...')
+                self.pos += 3
                 continue
 
             pair = self.src[self.pos:self.pos + 2]

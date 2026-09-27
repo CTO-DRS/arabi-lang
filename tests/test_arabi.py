@@ -3375,4 +3375,704 @@ class TestCsvModule(unittest.TestCase):
             ArabiRuntimeError, 'حرفًا واحدًا')
 
 
+class TestInterfaces(unittest.TestCase):
+    """الواجهات (واجهة) — الإصدار 1.8."""
+
+    def test_basic_interface_implementation(self):
+        out = run_arabi("""
+واجهة شكل:
+    دالة مساحة()
+
+صنف مربع من شكل:
+    دالة إنشاء(ض):
+        هذا.ض = ض
+    دالة مساحة():
+        أعد هذا.ض * هذا.ض
+
+م = مربع(٣)
+اطبع(م.مساحة())
+""")
+        self.assertEqual(out.strip(), '9')
+
+    def test_abstract_method_missing_blocks_instantiation(self):
+        expect_error("""
+واجهة شكل:
+    دالة مساحة()
+
+صنف مربع من شكل:
+    تجاهل
+م = مربع()
+""", ArabiRuntimeError, 'لم ينفذ الطرق المجردة')
+
+    def test_cannot_instantiate_interface_directly(self):
+        expect_error("""
+واجهة شكل:
+    دالة مساحة()
+شكل()
+""", ArabiRuntimeError, 'لا يمكن إنشاء كائن من الواجهة')
+
+    def test_default_implementation_is_inherited(self):
+        out = run_arabi("""
+واجهة حيوان:
+    دالة صوت():
+        أعد "..."
+    دالة تعريف():
+        أعد "أنا " + هذا.صوت()
+
+صنف قط من حيوان:
+    دالة صوت():
+        أعد "مياو"
+
+ق = قط()
+اطبع(ق.تعريف())
+""")
+        self.assertEqual(out.strip(), 'أنا مياو')
+
+    def test_default_implementation_used_when_not_overridden(self):
+        out = run_arabi("""
+واجهة حيوان:
+    دالة صوت():
+        أعد "..."
+
+صنف حيوان_عام من حيوان:
+    تجاهل
+
+ه = حيوان_عام()
+اطبع(ه.صوت())
+""")
+        self.assertEqual(out.strip(), '...')
+
+    def test_interface_constants(self):
+        out = run_arabi("""
+واجهة قياس:
+    وحدات = "متر"
+
+صنف طول من قياس:
+    تجاهل
+اطبع(طول.وحدات)
+""")
+        self.assertEqual(out.strip(), 'متر')
+
+    def test_interface_extending_interface(self):
+        out = run_arabi("""
+واجهة أساسي:
+    دالة اسم()
+
+واجهة كامل من أساسي:
+    دالة وصف()
+
+صنف منتج من كامل:
+    دالة اسم():
+        أعد "قلم"
+    دالة وصف():
+        أعد "أداة كتابة"
+
+ص = منتج()
+اطبع(ص.اسم() + ': ' + ص.وصف())
+""")
+        self.assertEqual(out.strip(), 'قلم: أداة كتابة')
+
+    def test_extending_inherits_abstract_from_parent(self):
+        expect_error("""
+واجهة أساسي:
+    دالة اسم()
+
+واجهة كامل من أساسي:
+    تجاهل
+
+صنف منتج من كامل:
+    دالة وصف():
+        أعد "وصف"
+منتج()
+""", ArabiRuntimeError, "لم ينفذ الطرق المجردة: 'اسم'")
+
+    def test_partial_implementation_intermediate_class(self):
+        expect_error("""
+واجهة شكل:
+    دالة مساحة()
+    دالة محيط()
+
+صنف مجرد من شكل:
+    دالة مساحة():
+        أعد ٠
+
+صنف دائرة من مجرد:
+    تجاهل
+دائرة()
+""", ArabiRuntimeError, 'محيط')
+
+    def test_intermediate_class_satisfies_interface(self):
+        out = run_arabi("""
+واجهة شكل:
+    دالة مساحة()
+    دالة محيط()
+
+صنف مجرد من شكل:
+    دالة مساحة():
+        أعد ٠
+
+صنف دائرة من مجرد:
+    دالة محيط():
+        أعد ٦
+
+د = دائرة()
+اطبع(د.مساحة() + د.محيط())
+""")
+        self.assertEqual(out.strip(), '6')
+
+    def test_mixed_class_and_interface_inheritance(self):
+        out = run_arabi("""
+صنف قاعدة:
+    دالة مرحبا():
+        أعد "مرحبا"
+
+واجهة رسم:
+    دالة ارسم()
+
+صنف تطبيق من قاعدة، رسم:
+    دالة ارسم():
+        أعد "أرسم"
+
+ت = تطبيق()
+اطبع(ت.مرحبا() + ' ' + ت.ارسم())
+""")
+        self.assertEqual(out.strip(), 'مرحبا أرسم')
+
+    def test_typename_of_interface(self):
+        out = run_arabi("""
+واجهة شكل:
+    دالة مساحة()
+اطبع(نوع(شكل))
+""")
+        self.assertEqual(out.strip(), 'واجهة')
+
+    def test_class_typename_stays_class(self):
+        out = run_arabi("""
+صنف نقطة:
+    تجاهل
+اطبع(نوع(نقطة))
+""")
+        self.assertEqual(out.strip(), 'صنف')
+
+    def test_interface_inherits_from_class_error(self):
+        expect_error("""
+صنف نقطة:
+    تجاهل
+واجهة شكل من نقطة:
+    تجاهل
+""", ArabiRuntimeError, 'ترث الواجهات فقط')
+
+    def test_interface_inherits_from_unknown_name(self):
+        expect_error("""
+واجهة شكل من غيره:
+    تجاهل
+""", ArabiRuntimeError, 'غير معرّف')
+
+    def test_abstract_method_with_params(self):
+        out = run_arabi("""
+واجهة عملية:
+    دالة نفذ(س، ص)
+
+صنف جمع من عملية:
+    دالة نفذ(س، ص):
+        أعد س + ص
+
+ع = جمع()
+اطبع(ع.نفذ(٢، ٥))
+""")
+        self.assertEqual(out.strip(), '7')
+
+    def test_missing_abstract_lists_all_missing(self):
+        exc = expect_error("""
+واجهة شكل:
+    دالة مساحة()
+    دالة محيط()
+
+صنف بسيط من شكل:
+    تجاهل
+بسيط()
+""", ArabiRuntimeError, 'لم ينفذ الطرق المجردة')
+        self.assertIn('مساحة', str(exc))
+        self.assertIn('محيط', str(exc))
+
+    def test_interface_with_static_method_call(self):
+        out = run_arabi("""
+واجهة صانع:
+    الاسم = "صانع"
+    دالة اصنع()
+
+صنف مصنع من صانع:
+    دالة اصنع():
+        أعد "صنعت بواسطة " + هذا.الاسم
+
+م = مصنع()
+اطبع(م.اصنع())
+""")
+        self.assertEqual(out.strip(), 'صنعت بواسطة صانع')
+
+    def test_linter_understands_interface(self):
+        issues = lint_source("""
+واجهة شكل:
+    دالة مساحة()
+
+صنف مربع من شكل:
+    دالة مساحة():
+        أعد ١
+""")
+        errors = [i for i in issues if i[1] == 'خطأ']
+        self.assertEqual(errors, [])
+
+
+class TestVarargs(unittest.TestCase):
+    """المعاملات المتغيرة (...) — الإصدار 1.8."""
+
+    def test_rest_collects_extra_args(self):
+        out = run_arabi("""
+دالة مجموع(...أرقام):
+    م = ٠
+    لكل أ في أرقام:
+        م += أ
+    أعد م
+اطبع(مجموع(١، ٢، ٣، ٤، ٥))
+""")
+        self.assertEqual(out.strip(), '15')
+
+    def test_rest_empty_gives_empty_list(self):
+        out = run_arabi("""
+دالة عدد(...قيم):
+    أعد طول(قيم)
+اطبع(عدد())
+""")
+        self.assertEqual(out.strip(), '0')
+
+    def test_fixed_params_then_rest(self):
+        out = run_arabi("""
+دالة علامة(اسم، ...درجات):
+    أعد اسم + ': ' + نص(درجات)
+اطبع(علامة("سالم"، ٩٠، ٨٥))
+""")
+        self.assertEqual(out.strip(), 'سالم: [90، 85]')
+
+    def test_rest_with_defaults(self):
+        out = run_arabi("""
+دالة ف(أ = "افتراضي"، ...بقية):
+    أعد نص(أ) + '|' + نص(طول(بقية))
+اطبع(ف())
+اطبع(ف("محدد"، ١، ٢))
+""")
+        self.assertEqual(out.strip(), 'افتراضي|0\nمحدد|2')
+
+    def test_named_args_still_work_with_rest(self):
+        out = run_arabi("""
+دالة ف(أ، ...بقية):
+    أعد نص(أ) + '|' + نص(طول(بقية))
+اطبع(ف(أ = "باسم"))
+""")
+        self.assertEqual(out.strip(), 'باسم|0')
+
+    def test_rest_must_be_last_error(self):
+        expect_error(
+            'دالة ف(...بقية، أ):\n    أعد أ\n',
+            ParseError, 'يجب أن يكون الأخير')
+
+    def test_rest_cannot_be_sent_by_name(self):
+        expect_error("""
+دالة ف(...بقية):
+    أعد طول(بقية)
+ف(بقية = [١])
+""", ArabiRuntimeError, 'لا تُرسله بالاسم')
+
+    def test_lambda_rest(self):
+        out = run_arabi("""
+عدد = دالة(...قيم) => طول(قيم)
+اطبع(عدد(١، ٢، ٣))
+""")
+        self.assertEqual(out.strip(), '3')
+
+    def test_lambda_rest_identity(self):
+        out = run_arabi("""
+هوية = دالة(...قيم) => قيم
+اطبع(هوية("أ"، "ب"))
+""")
+        self.assertEqual(out.strip(), '[أ، ب]')
+
+    def test_method_rest(self):
+        out = run_arabi("""
+صنف حساب:
+    دالة مجموع(...قيم):
+        م = ٠
+        لكل ق في قيم:
+            م += ق
+        أعد م
+
+ح = حساب()
+اطبع(ح.مجموع(١٠، ٢٠، ٣٠))
+""")
+        self.assertEqual(out.strip(), '60')
+
+    def test_rest_inside_decorator_kept(self):
+        out = run_arabi("""
+دالة مجموع(...قيم):
+    م = ٠
+    لكل ق في قيم:
+        م += ق
+    أعد م
+اطبع(مجموع(٥، ١٠))
+""")
+        self.assertEqual(out.strip(), '15')
+
+    def test_arity_error_without_rest(self):
+        expect_error("""
+دالة ف(أ):
+    أعد أ
+ف(١، ٢)
+""", ArabiRuntimeError, 'كحد أقصى')
+
+    def test_params_list_message_shows_rest(self):
+        exc = expect_error("""
+دالة ف(أ، ...بقية):
+    أعد أ
+ف(ص = ١)
+""", ArabiRuntimeError, 'لا تحتوي على معامل بالاسم')
+        self.assertIn('...بقية', str(exc))
+
+    def test_recursion_with_rest(self):
+        out = run_arabi("""
+دالة أكبر(...قيم):
+    لو طول(قيم) == ١:
+        أعد قيم[٠]
+    الفرعي = أكبر(...قيم[1:طول(قيم)])
+    لو قيم[٠] > الفرعي:
+        أعد قيم[٠]
+    أعد الفرعي
+اطبع(أكبر(٣، ٩، ٢، ٧))
+""")
+        self.assertEqual(out.strip(), '9')
+
+
+class TestSpread(unittest.TestCase):
+    """التفكيك ... في الاستدعاء والقوائم — الإصدار 1.8."""
+
+    def test_spread_call_list(self):
+        out = run_arabi("""
+دالة جمع_ثلاثة(أ، ب، ج):
+    أعد أ + ب + ج
+ق = [١، ٢]
+اطبع(جمع_ثلاثة(...ق، ٣))
+""")
+        self.assertEqual(out.strip(), '6')
+
+    def test_spread_full_list(self):
+        out = run_arabi("""
+دالة مجموع(...أرقام):
+    م = ٠
+    لكل أ في أرقام:
+        م += أ
+    أعد م
+ق = [١٠، ٢٠، ٣٠]
+اطبع(مجموع(...ق))
+""")
+        self.assertEqual(out.strip(), '60')
+
+    def test_spread_mixed_with_positional(self):
+        out = run_arabi("""
+دالة ثلاثية(أ، ب، ج):
+    أعد نص(أ) + نص(ب) + نص(ج)
+اطبع(ثلاثية(١، ...[٢، ٣]))
+""")
+        self.assertEqual(out.strip(), '123')
+
+    def test_spread_range(self):
+        out = run_arabi("اطبع(طول([٠، ...مدى(٥)، ٩]))")
+        self.assertEqual(out.strip(), '7')
+
+    def test_spread_string_into_list(self):
+        out = run_arabi("اطبع([...\"أب\"])")
+        self.assertEqual(out.strip(), '[أ، ب]')
+
+    def test_spread_in_list_literal(self):
+        out = run_arabi("""
+أ = [٢، ٣]
+ب = [١، ...أ، ٤]
+اطبع(ب)
+""")
+        self.assertEqual(out.strip(), '[1، 2، 3، 4]')
+
+    def test_spread_two_lists_in_list(self):
+        out = run_arabi("اطبع([...[١]، ...[٢، ٣]])")
+        self.assertEqual(out.strip(), '[1، 2، 3]')
+
+    def test_spread_generator_into_call(self):
+        out = run_arabi("""
+دالة تولد():
+    أنتج ١
+    أنتج ٢
+    أنتج ٣
+دالة مجموع(...أرقام):
+    م = ٠
+    لكل أ في أرقام:
+        م += أ
+    أعد م
+اطبع(مجموع(...تولد()))
+""")
+        self.assertEqual(out.strip(), '6')
+
+    def test_spread_non_iterable_error(self):
+        expect_error(
+            'دالة ف(...ق):\n    أعد ق\nف(...٥)\n',
+            ArabiRuntimeError, 'لا يمكن تفكيك')
+
+    def test_spread_non_iterable_in_list_error(self):
+        expect_error(
+            'ص = [...صح]\n',
+            ArabiRuntimeError, 'لا يمكن تفكيك')
+
+    def test_spread_after_named_error(self):
+        expect_error("""
+دالة ف(أ):
+    أعد أ
+ف(أ = ١، ...[٢])
+""", ArabiRuntimeError, 'بعد معامل بالاسم')
+
+    def test_spread_empty_list(self):
+        out = run_arabi("""
+دالة ف(...ق):
+    أعد طول(ق)
+اطبع(ف(...[]))
+""")
+        self.assertEqual(out.strip(), '0')
+
+
+class TestThreadsModule(unittest.TestCase):
+    """وحدة خيوط — الإصدار 1.8."""
+
+    def test_spawn_and_result(self):
+        out = run_arabi("""
+دالة ضاعف(س):
+    أعد س * ٢
+خ = خيوط.شغّل(ضاعف، ٢١)
+اطبع(خ.نتيجة())
+""")
+        self.assertEqual(out.strip(), '42')
+
+    def test_spawn_multiple_args(self):
+        out = run_arabi("""
+دالة جمع(أ، ب، ج):
+    أعد أ + ب + ج
+خ = خيوط.شغّل(جمع، ١، ٢، ٣)
+اطبع(خ.نتيجة())
+""")
+        self.assertEqual(out.strip(), '6')
+
+    def test_spawn_with_no_args(self):
+        out = run_arabi("""
+دالة ثابتة():
+    أعد "جاهز"
+خ = خيوط.شغّل(ثابتة)
+اطبع(خ.نتيجة())
+""")
+        self.assertEqual(out.strip(), 'جاهز')
+
+    def test_wait_returns_none_but_finishes(self):
+        out = run_arabi("""
+دالة عمل():
+    أعد ٥
+خ = خيوط.شغّل(عمل)
+خ.انتظر()
+اطبع(خ.حي())
+""")
+        self.assertEqual(out.strip(), 'خطأ')
+
+    def test_alive_false_after_finish(self):
+        out = run_arabi("""
+دالة عمل():
+    أعد ٥
+خ = خيوط.شغّل(عمل)
+خ.نتيجة()
+اطبع(خ.حي())
+""")
+        self.assertEqual(out.strip(), 'خطأ')
+
+    def test_join_all_returns_results(self):
+        out = run_arabi("""
+مهام = []
+لكل س في مدى(٥):
+    مهام.أضف(خيوط.شغّل(دالة(ن) => ن + ١، س))
+النتائج = خيوط.انتظر_الكل(مهام)
+اطبع(طول(النتائج))
+اطبع(جمع(النتائج))
+""")
+        lines = out.strip().splitlines()
+        self.assertEqual(lines[0], '5')
+        self.assertEqual(lines[1], '15')
+
+    def test_shared_memory_with_lock(self):
+        out = run_arabi("""
+العداد = ٠
+الحارس = خيوط.قفل()
+
+دالة زد():
+    عالمي العداد
+    لكل س في مدى(١٠٠):
+        الحارس.احجز()
+        العداد += ١
+        الحارس.افرح()
+
+مهام = []
+لكل س في مدى(٤):
+    مهام.أضف(خيوط.شغّل(زد))
+خيوط.انتظر_الكل(مهام)
+اطبع(العداد)
+""")
+        self.assertEqual(out.strip(), '400')
+
+    def test_lock_acquire_release_and_try(self):
+        out = run_arabi("""
+ق = خيوط.قفل()
+أول = ق.احجز()
+ثاني = ق.محاولة()
+ق.افرح()
+ثالث = ق.محاولة()
+اطبع(نص(أول) + ' ' + نص(ثاني) + ' ' + نص(ثالث))
+""")
+        self.assertEqual(out.strip(), 'صح خطأ صح')
+
+    def test_lock_try_timeout(self):
+        out = run_arabi("""
+ق = خيوط.قفل()
+ق.احجز()
+نتيجة = ق.احجز(٠.٠٥)
+ق.افرح()
+اطبع(نتيجة)
+""")
+        self.assertEqual(out.strip(), 'خطأ')
+
+    def test_lock_release_unheld_error(self):
+        expect_error("""
+ق = خيوط.قفل()
+ق.افرح()
+""", ArabiRuntimeError, 'قفل غير محجوز')
+
+    def test_queue_send_receive(self):
+        out = run_arabi("""
+ط = خيوط.طابور()
+ط.أرسل("رسالة")
+اطبع(ط.استلم())
+""")
+        self.assertEqual(out.strip(), 'رسالة')
+
+    def test_queue_fifo_order(self):
+        out = run_arabi("""
+ط = خيوط.طابور()
+ط.أرسل(١)
+ط.أرسل(٢)
+ط.أرسل(٣)
+اطبع(ط.استلم())
+اطبع(ط.استلم())
+""")
+        self.assertEqual(out.strip(), '1\n2')
+
+    def test_queue_size_empty(self):
+        out = run_arabi("""
+ط = خيوط.طابور()
+اطبع(ط.فارغ())
+ط.أرسل(١)
+اطبع(ط.الحجم())
+ط.استلم()
+اطبع(ط.فارغ())
+""")
+        self.assertEqual(out.strip(), 'صح\n1\nصح')
+
+    def test_queue_nowait_error_on_empty(self):
+        expect_error("""
+ط = خيوط.طابور()
+ط.استلم_الآن()
+""", ArabiRuntimeError, 'الطابور فارغ')
+
+    def test_thread_error_propagates(self):
+        expect_error("""
+دالة تفشل():
+    ارفع("انفجار داخل الخيط")
+خ = خيوط.شغّل(تفشل)
+خ.نتيجة()
+""", ArabiRuntimeError, 'انفجار داخل الخيط')
+
+    def test_thread_error_not_raised_by_wait(self):
+        out = run_arabi("""
+دالة تفشل():
+    ارفع("خطأ داخلي")
+خ = خيوط.شغّل(تفشل)
+خ.انتظر()
+اطبع("تجاوزنا الانتظار")
+""")
+        self.assertEqual(out.strip(), 'تجاوزنا الانتظار')
+
+    def test_spawn_needs_function(self):
+        expect_error(
+            'خيوط.شغّل(٥)\n',
+            ArabiRuntimeError, 'يجب أن يكون دالة')
+
+    def test_spawn_needs_at_least_one_arg(self):
+        expect_error(
+            'خيوط.شغّل()\n',
+            ArabiRuntimeError, 'معامل أول')
+
+    def test_join_all_needs_list(self):
+        expect_error(
+            'خيوط.انتظر_الكل(٥)\n',
+            ArabiRuntimeError, 'قائمة خيوط')
+
+    def test_join_all_rejects_non_thread(self):
+        expect_error(
+            'خيوط.انتظر_الكل([٥])\n',
+            ArabiRuntimeError, 'ليس خيطًا')
+
+    def test_cpu_count_positive(self):
+        out = run_arabi('اطبع(خيوط.معالجات() > ٠)')
+        self.assertEqual(out.strip(), 'صح')
+
+    def test_producer_consumer_with_queue(self):
+        out = run_arabi("""
+الطابور = خيوط.طابور()
+
+دالة منتج():
+    لكل س في مدى(٣):
+        الطابور.أرسل(س * س)
+
+دالة مستهلك():
+    النتائج = []
+    لكل س في مدى(٣):
+        النتائج.أضف(الطابور.استلم())
+    أعد النتائج
+
+خيوط.شغّل(منتج).انتظر()
+نتائج = خيوط.شغّل(مستهلك).نتيجة()
+اطبع(نتائج)
+""")
+        self.assertEqual(out.strip(), '[0، 1، 4]')
+
+    def test_threads_typename(self):
+        out = run_arabi("""
+اطبع(نوع(خيوط.شغّل(دالة() => ١)))
+اطبع(نوع(خيوط.قفل()))
+اطبع(نوع(خيوط.طابور()))
+""")
+        lines = out.strip().splitlines()
+        self.assertEqual(lines, ['خيط', 'قفل', 'طابور'])
+
+    def test_threads_in_builtin_modules(self):
+        from arabi_lang.interpreter import BUILTIN_MODULES
+        self.assertIn('خيوط', BUILTIN_MODULES)
+
+    def test_linter_accepts_threads_code(self):
+        issues = lint_source("""
+دالة عمل():
+    أعد ١
+خ = خيوط.شغّل(عمل)
+اطبع(خ.نتيجة())
+""")
+        errors = [i for i in issues if i[1] == 'خطأ']
+        self.assertEqual(errors, [])
+
+
 if __name__ == '__main__':    unittest.main(verbosity=2)

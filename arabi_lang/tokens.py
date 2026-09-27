@@ -53,6 +53,9 @@ class T(Enum):
     # ---- كلمات الإصدار 1.7 ----
     YIELD = auto()     # أنتج (المولدات)
 
+    # ---- كلمات الإصدار 1.8 ----
+    INTERFACE = auto()  # واجهة (عقد مجرد تلتزم به الأصناف)
+
     # ---- معاملات ----
     PLUS = auto()          # +
     MINUS = auto()         # -
@@ -80,6 +83,7 @@ class T(Enum):
     COMMA = auto()         # , أو ،
     COLON = auto()         # :
     DOT = auto()           # .
+    ELLIPSIS = auto()      # ... (معامل متغير أو تفكيك)
     AT = auto()            # @
 
     # ---- بنيوية ----

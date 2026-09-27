@@ -107,18 +107,21 @@ class ArabiFunc:
     params قائمة أزواج (الاسم، القيمة الافتراضية أو NO_DEFAULT) —
     تُقيّم الافتراضات مرة واحدة عند التعريف (كما في بايثون).
     is_generator صح إذا يحوي الجسم 'أنتج' — استدعاؤها يعيد مولدًا.
+    rest اسم المعامل المتغير (...الاسم) الذي يجمع ما زاد من الوسائط.
     """
 
-    __slots__ = ('name', 'params', 'body', 'env', 'is_lambda', 'is_generator')
+    __slots__ = ('name', 'params', 'body', 'env', 'is_lambda',
+                 'is_generator', 'rest')
 
     def __init__(self, name, params, body, env, is_lambda=False,
-                 is_generator=False):
+                 is_generator=False, rest=None):
         self.name = name
         self.params = params
         self.body = body
         self.env = env
         self.is_lambda = is_lambda
         self.is_generator = is_generator
+        self.rest = rest
 
 
 class BuiltinFunc:
@@ -153,16 +156,22 @@ class ClassValue:
 
     members يجمع الطرق (ArabiFunc) وثوابت الصنف.
     mro ترتيب حل الطرق (C3) — قائمة تبدأ بالصنف نفسه، أو None للصنف بلا أصول.
+    is_interface صح للواجهات — عقد مجرد لا يمكن إنشاء كائنات منه مباشرة.
+    abstract أسماء الطرق المجردة المعلنة في الواجهة (بلا جسم).
     """
 
-    __slots__ = ('name', 'superclass', 'members', 'env', 'mro')
+    __slots__ = ('name', 'superclass', 'members', 'env', 'mro',
+                 'is_interface', 'abstract')
 
-    def __init__(self, name, superclass, members, env, mro=None):
+    def __init__(self, name, superclass, members, env, mro=None,
+                 is_interface=False, abstract=()):
         self.name = name
         self.superclass = superclass      # ClassValue أو None
         self.members = members
         self.env = env
         self.mro = mro
+        self.is_interface = is_interface
+        self.abstract = frozenset(abstract)
 
 
 class InstanceValue:
@@ -373,8 +382,79 @@ class SuperValue:
         self.instance = instance
 
 
+class ThreadValue:
+    """خيط تنفيذ من وحدة 'خيوط' — يشغل دالة عربية بالتوازي.
+
+    _queue يستلم ('نهاية'، النتيجة) أو ('خطأ'، استثناء) من الخيط العامل،
+    ونتيجة() تنتظر الانتهاء وتعيد النتيجة أو تعيد رفع الخطأ.
+    """
+
+    __slots__ = ('thread', '_queue', '_done', '_error', '_result')
+
+    def __init__(self):
+        self.thread = None
+        self._queue = queue.Queue()
+        self._done = False
+        self._error = None
+        self._result = None
+
+    def _finish(self, kind, value):
+        self._queue.put((kind, value))
+
+    def result(self, line=None):
+        """ينتظر انتهاء الخيط ويعيد نتيجته — يعيد رفع الخطأ إن وقع."""
+        if self._error is not None:
+            raise ArabiRuntimeError(self._error.message, line)
+        if not self._done:
+            kind, value = self._queue.get()
+            self._done = True
+            if kind == 'خطأ':
+                self._error = value
+                raise ArabiRuntimeError(value.message, line)
+            self._result = value
+        return self._result
+
+    def join(self, line=None):
+        """ينتظر انتهاء الخيط دون إعادة النتيجة (ويبتلع الخطأ)."""
+        if not self._done:
+            kind, value = self._queue.get()
+            self._done = True
+            if kind == 'خطأ':
+                self._error = value
+                return
+            self._result = value
+
+    def alive(self):
+        if self._done:
+            return False
+        if self.thread is not None:
+            return self.thread.is_alive()
+        return True
+
+
+class LockValue:
+    """قفل حصر من وحدة 'خيوط' — يحمي بيانات مشتركة بين الخيوط."""
+
+    __slots__ = ('lock',)
+
+    def __init__(self):
+        self.lock = threading.Lock()
+
+
+class QueueValue:
+    """طابور آمن بين الخيوط من وحدة 'خيوط' — لتمرير الرسائل."""
+
+    __slots__ = ('q',)
+
+    def __init__(self):
+        self.q = queue.Queue()
+
+
 DB_METHODS = {}       # تُملأ بعد تعريف دوال قاعدة البيانات
 GENERATOR_METHODS = {}  # تُملأ بعد تعريف طرق المولدات
+THREAD_METHODS = {}   # تُملأ بعد تعريف طرق الخيوط
+LOCK_METHODS = {}     # تُملأ بعد تعريف طرق القفل
+QUEUE_METHODS = {}    # تُملأ بعد تعريف طرق الطابور
 
 
 def typename(v):
@@ -399,7 +479,7 @@ def typename(v):
     if isinstance(v, ModuleValue):
         return 'وحدة'
     if isinstance(v, ClassValue):
-        return 'صنف'
+        return 'واجهة' if v.is_interface else 'صنف'
     if isinstance(v, InstanceValue):
         return 'كائن'
     if isinstance(v, BoundMethod):
@@ -414,6 +494,12 @@ def typename(v):
         return 'قاعدة بيانات'
     if isinstance(v, SuperValue):
         return 'الأصل'
+    if isinstance(v, ThreadValue):
+        return 'خيط'
+    if isinstance(v, LockValue):
+        return 'قفل'
+    if isinstance(v, QueueValue):
+        return 'طابور'
     return type(v).__name__
 
 
@@ -456,6 +542,12 @@ def display(v):
         return f'<قاعدة بيانات {v.name}>'
     if isinstance(v, SuperValue):
         return f'<الأصل {v.cls.name}>'
+    if isinstance(v, ThreadValue):
+        return '<خيط>'
+    if isinstance(v, LockValue):
+        return '<قفل>'
+    if isinstance(v, QueueValue):
+        return '<طابور>'
     return str(v)
 
 
@@ -1042,6 +1134,16 @@ def install_builtins(env):
         'اكتب': BuiltinFunc('اكتب', _csv_write),
         'حلل': BuiltinFunc('حلل', _csv_parse),
         'نص': BuiltinFunc('نص', _csv_text),
+    }))
+
+    # ============ وحدة الخيوط (الإصدار 1.8) ============
+
+    env.define('خيوط', ModuleValue('خيوط', {
+        'شغّل': BuiltinFunc('شغّل', _thr_spawn, takes_interp=True),
+        'انتظر_الكل': BuiltinFunc('انتظر_الكل', _thr_join_all),
+        'قفل': BuiltinFunc('قفل', _thr_lock),
+        'طابور': BuiltinFunc('طابور', _thr_queue),
+        'معالجات': BuiltinFunc('معالجات', _thr_cpu_count),
     }))
 
     # ============ إطار الاختبارات (الإصدار 1.6) ============
@@ -2184,6 +2286,174 @@ def _csv_text(args, line):
     for row in rows:
         writer.writerow([_csv_cell_text(c) for c in row])
     return out.getvalue()
+
+
+# ================== وحدة خيوط (الإصدار 1.8) ==================
+
+def _thr_spawn(interp, args, line):
+    """شغّل(دالة، وسائط...) — يشغل دالة عربية في خيط مستقل ويعيد خيطًا."""
+    if not args:
+        raise ArabiRuntimeError(
+            "'شغّل' تحتاج الدالة المراد تشغيلها كمعامل أول", line)
+    func = args[0]
+    if not isinstance(func, (ArabiFunc, BuiltinFunc, BoundMethod)):
+        raise ArabiRuntimeError(
+            f"المعامل الأول لـ 'شغّل' يجب أن يكون دالة لكنه "
+            f'{typename(func)}', line)
+    rest_args = list(args[1:])
+    tv = ThreadValue()
+
+    def _worker():
+        try:
+            result = interp._call_value(func, rest_args, {}, line)
+            tv._finish('نهاية', result)
+        except ArabiError as exc:
+            tv._finish('خطأ', exc)
+        except Exception as exc:            # شبكة أمان — لا يموت الخيط بصمت
+            tv._finish('خطأ', ArabiRuntimeError(f'خطأ داخل الخيط: {exc}'))
+
+    tv.thread = threading.Thread(target=_worker, daemon=True,
+                                 name='خيط-عربي')
+    tv.thread.start()
+    return tv
+
+
+def _thr_join_all(args, line):
+    """انتظر_الكل(قائمة_خيوط) — ينتظر كل الخيوط ويعيد قائمة النتائج."""
+    if len(args) != 1 or not isinstance(args[0], list):
+        raise ArabiRuntimeError(
+            "'انتظر_الكل' تحتاج قائمة خيوط — مثال: انتظر_الكل(المهام)", line)
+    results = []
+    for i, t in enumerate(args[0]):
+        if not isinstance(t, ThreadValue):
+            raise ArabiRuntimeError(
+                f'العنصر رقم {i + 1} ليس خيطًا بل {typename(t)}', line)
+        results.append(t.result(line))
+    return results
+
+
+def _thr_lock(args, line):
+    """قفل() — ينشئ قفل حصر لحماية البيانات المشتركة."""
+    if args:
+        raise ArabiRuntimeError(
+            f"'قفل' لا تأخذ معاملات لكنها استلمت {len(args)}", line)
+    return LockValue()
+
+
+def _thr_queue(args, line):
+    """طابور() — ينشئ طابورًا آمنًا لتمرير الرسائل بين الخيوط."""
+    if args:
+        raise ArabiRuntimeError(
+            f"'طابور' لا تأخذ معاملات لكنها استلمت {len(args)}", line)
+    return QueueValue()
+
+
+def _thr_cpu_count(args, line):
+    """معالجات() — عدد أنوية المعالج المتوفرة."""
+    if args:
+        raise ArabiRuntimeError(
+            f"'معالجات' لا تأخذ معاملات لكنها استلمت {len(args)}", line)
+    return os.cpu_count() or 1
+
+
+def _thr_result(obj, args, line):
+    _require_args('نتيجة', args, 0, 0, line)
+    return obj.result(line)
+
+
+def _thr_join(obj, args, line):
+    _require_args('انتظر', args, 0, 0, line)
+    obj.join(line)
+    return None
+
+
+def _thr_alive(obj, args, line):
+    _require_args('حي', args, 0, 0, line)
+    return obj.alive()
+
+
+THREAD_METHODS.update({
+    'نتيجة': _thr_result,
+    'انتظر': _thr_join,
+    'حي': _thr_alive,
+})
+
+
+def _lock_acquire(obj, args, line):
+    """احجز([مهلة؟]) — يحجز القفل ويعيد صح، أو خطأ إذا انتهت المهلة."""
+    if len(args) > 1:
+        raise ArabiRuntimeError(
+            f"'احجز' تقبل مهلة واحدة اختيارية لكنها استلمت {len(args)}", line)
+    timeout = -1                             # -1 = انتظر بلا مهلة
+    if args:
+        if isinstance(args[0], bool) or not isinstance(args[0], (int, float)):
+            raise ArabiRuntimeError(
+                'مهلة القفل يجب أن تكون عددًا (بالثواني)', line)
+        timeout = args[0]
+    try:
+        return obj.lock.acquire(timeout=timeout)
+    except ValueError as exc:
+        raise ArabiRuntimeError(f'قيمة مهلة غير صالحة: {exc}', line)
+
+
+def _lock_release(obj, args, line):
+    _require_args('افرح', args, 0, 0, line)
+    try:
+        obj.lock.release()
+    except RuntimeError:
+        raise ArabiRuntimeError(
+            'لا يمكن فتح قفل غير محجوز — احجزه أولًا', line)
+    return None
+
+
+def _lock_try(obj, args, line):
+    _require_args('محاولة', args, 0, 0, line)
+    return obj.lock.acquire(blocking=False)
+
+
+LOCK_METHODS.update({
+    'احجز': _lock_acquire,
+    'افرح': _lock_release,
+    'محاولة': _lock_try,
+})
+
+
+def _queue_put(obj, args, line):
+    _require_args('أرسل', args, 1, 1, line)
+    obj.q.put(args[0])
+    return None
+
+
+def _queue_get(obj, args, line):
+    _require_args('استلم', args, 0, 0, line)
+    return obj.q.get()
+
+
+def _queue_get_nowait(obj, args, line):
+    _require_args('استلم_الآن', args, 0, 0, line)
+    try:
+        return obj.q.get_nowait()
+    except queue.Empty:
+        raise ArabiRuntimeError('الطابور فارغ — لا رسائل لاستلامها', line)
+
+
+def _queue_size(obj, args, line):
+    _require_args('الحجم', args, 0, 0, line)
+    return obj.q.qsize()
+
+
+def _queue_empty(obj, args, line):
+    _require_args('فارغ', args, 0, 0, line)
+    return obj.q.empty()
+
+
+QUEUE_METHODS.update({
+    'أرسل': _queue_put,
+    'استلم': _queue_get,
+    'استلم_الآن': _queue_get_nowait,
+    'الحجم': _queue_size,
+    'فارغ': _queue_empty,
+})
 
 
 # ================== وحدة اختبارات (إطار الاختبارات) ==================

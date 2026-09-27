@@ -2,7 +2,7 @@
   "name": "arabi-lang",
   "displayName": "لغة عربي — Arabi Language",
   "description": "دعم لغة عربي البرمجية: تلوين بناء الجملة، مقتطفات كود، وأدوات تحرير للملفات ذات الامتداد .عربي",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "publisher": "arabi-lang",
   "license": "MIT",
   "icon": null,

@@ -69,13 +69,14 @@ class For(Node):
 
 class FuncDef(Node):
     def __init__(self, name, params, body, line=None, decorators=None,
-                 is_generator=False):
+                 is_generator=False, rest=None):
         super().__init__(line)
         self.name = name
         self.params = params      # [(الاسم، تعبير الافتراضي أو None)، ...]
         self.body = body
         self.decorators = decorators or []   # [تعبير، ...] بترتيب الكتابة
         self.is_generator = is_generator     # صح إذا يحوي 'أنتج'
+        self.rest = rest          # اسم المعامل المتغير ... أو None
 
 
 class Return(Node):
@@ -143,6 +144,21 @@ class ClassDef(Node):
         self.name = name
         self.superclass = superclass      # اسم أو قائمة أسماء أو None
         self.body = body                  # [FuncDef | Assign]
+
+
+class InterfaceDef(Node):
+    """تعريف واجهة: واجهة الاسم من واجهة_أصل: ...
+
+    طرق بلا جسم = طرق مجردة يجب على الأصناف المنفذة توفيرها.
+    طرق بجسم = تنفيذ افتراضي يورث. الثوابت مسموحة.
+    """
+
+    def __init__(self, name, superclass, body, abstract, line=None):
+        super().__init__(line)
+        self.name = name
+        self.superclass = superclass      # اسم أو قائمة أسماء أو None
+        self.body = body                  # [FuncDef | Assign] (المجردة بجسم None)
+        self.abstract = abstract          # [أسماء الطرق المجردة]
 
 
 class Switch(Node):
@@ -330,10 +346,19 @@ class Ternary(Node):
         self.if_false = if_false
 
 
+class SpreadArg(Node):
+    """تفكيك في استدعاء أو قائمة: دالة(...قائمة) أو [١، ...أخرى]."""
+
+    def __init__(self, expr, line=None):
+        super().__init__(line)
+        self.expr = expr
+
+
 class Lambda(Node):
     """دالة سهمية على سطر واحد: دالة(س، ص) => س + ص"""
 
-    def __init__(self, params, body, line=None):
+    def __init__(self, params, body, line=None, rest=None):
         super().__init__(line)
         self.params = params          # [(الاسم، تعبير الافتراضي أو None)، ...]
         self.body = body              # تعبير واحد
+        self.rest = rest              # اسم المعامل المتغير ... أو None

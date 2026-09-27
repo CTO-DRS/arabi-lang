@@ -232,6 +232,8 @@ class _Linter:
             self._define(scope, stmt.name, stmt.line, 'دالة')
         elif isinstance(stmt, N.ClassDef):
             self._define(scope, stmt.name, stmt.line, 'صنف')
+        elif isinstance(stmt, N.InterfaceDef):
+            self._define(scope, stmt.name, stmt.line, 'واجهة')
         elif isinstance(stmt, N.EnumDef):
             self._define(scope, stmt.name, stmt.line, 'تعداد')
         elif isinstance(stmt, N.Import):
@@ -313,6 +315,22 @@ class _Linter:
                                 '(أعد/كسر/استمر/ارفع)')
                 break
 
+    def _walk_method(self, method, class_scope, outer_scope):
+        """يمشي جسم طريقة صنف/واجهة بنطاقها الخاص."""
+        for name, default in method.params:
+            if default is not None:
+                self._walk_expr(default, outer_scope)
+        fn_scope = _Scope(parent=class_scope, kind='function')
+        self.scopes.append(fn_scope)
+        for pname, _d in method.params:
+            fn_scope.define(pname, method.line, 'معامل')
+        if method.rest is not None:
+            fn_scope.define(method.rest, method.line, 'معامل')
+        self._register_block(method.body, fn_scope)
+        self._walk_block(method.body, fn_scope,
+                         in_function=True, loop_depth=0)
+        self._report_unused(fn_scope)
+
     def _walk_stmt(self, stmt, scope, in_function, loop_depth):
         if isinstance(stmt, N.ExprStmt):
             self._walk_expr(stmt.expr, scope)
@@ -349,10 +367,15 @@ class _Linter:
                     self.report(stmt.line, 'تحذير',
                                 f"المعامل '{name}' مكرر في تعريف الدالة")
                 seen_params.add(name)
+            if stmt.rest is not None and stmt.rest in seen_params:
+                self.report(stmt.line, 'خطأ',
+                            f"اسم المعامل المتغير '{stmt.rest}' مكرر مع معامل عادي")
             child = _Scope(parent=scope, kind='function')
             self.scopes.append(child)
             for name, _default in stmt.params:
                 child.define(name, stmt.line, 'معامل')
+            if stmt.rest is not None:
+                child.define(stmt.rest, stmt.line, 'معامل')
             self._register_block(stmt.body, child)
             self._walk_block(stmt.body, child, in_function=True, loop_depth=0)
             self._report_unused(child)
@@ -392,17 +415,7 @@ class _Linter:
                     child.define(m.name, m.line, 'خاصية')
             for m in stmt.body:
                 if isinstance(m, N.FuncDef):
-                    for name, default in m.params:
-                        if default is not None:
-                            self._walk_expr(default, scope)
-                    fn_scope = _Scope(parent=child, kind='function')
-                    self.scopes.append(fn_scope)
-                    for pname, _d in m.params:
-                        fn_scope.define(pname, m.line, 'معامل')
-                    self._register_block(m.body, fn_scope)
-                    self._walk_block(m.body, fn_scope,
-                                     in_function=True, loop_depth=0)
-                    self._report_unused(fn_scope)
+                    self._walk_method(m, child, scope)
                 elif isinstance(m, N.Assign):
                     self._walk_expr(m.value, scope)
                 elif isinstance(m, N.PropertyDef):
@@ -411,6 +424,22 @@ class _Linter:
                     self._register_block(m.body, p_scope)
                     self._walk_block(m.body, p_scope,
                                      in_function=True, loop_depth=0)
+        elif isinstance(stmt, N.InterfaceDef):
+            child = _Scope(parent=scope, kind='class')
+            self.scopes.append(child)
+            for m in stmt.body:
+                if isinstance(m, N.FuncDef):
+                    child.define(m.name, m.line,
+                                 'طريقة مجردة' if m.body is None else 'طريقة')
+                elif isinstance(m, N.Assign):
+                    for target in m.targets:
+                        if isinstance(target, N.Name):
+                            child.define(target.name, m.line, 'ثابت واجهة')
+            for m in stmt.body:
+                if isinstance(m, N.FuncDef) and m.body is not None:
+                    self._walk_method(m, child, scope)
+                elif isinstance(m, N.Assign):
+                    self._walk_expr(m.value, scope)
         elif isinstance(stmt, N.Switch):
             self._walk_expr(stmt.subject, scope)
             for value, body in stmt.cases:
@@ -490,6 +519,8 @@ class _Linter:
         elif isinstance(expr, N.ListLit):
             for item in expr.items:
                 self._walk_expr(item, scope)
+        elif isinstance(expr, N.SpreadArg):
+            self._walk_expr(expr.expr, scope)
         elif isinstance(expr, N.DictLit):
             for k, v in zip(expr.keys, expr.values):
                 self._walk_expr(k, scope)
@@ -509,6 +540,8 @@ class _Linter:
                 if default is not None:
                     self._walk_expr(default, scope)
                 child.define(name, expr.line, 'معامل')
+            if expr.rest is not None:
+                child.define(expr.rest, expr.line, 'معامل')
             self._walk_expr(expr.body, child)
         # Num / Str / Bool / Null / This / Super: لا شيء
 
@@ -571,13 +604,16 @@ def _render_literal(expr):
     return '…'
 
 
-def _render_params(params):
+def _render_params(params, rest=None):
+    """يعرض قائمة المعاملات للتوثيق، مع الافتراضيات والمعامل المتغير."""
     parts = []
     for name, default in params:
         if default is None:
             parts.append(name)
         else:
             parts.append(f'{name} = {_render_literal(default)}')
+    if rest is not None:
+        parts.append('...' + rest)
     return '، '.join(parts)
 
 
@@ -630,6 +666,8 @@ def generate_docs(filename, source):
     imports = [s for s in tree.statements if isinstance(s, N.Import)]
     funcs = [s for s in tree.statements if isinstance(s, N.FuncDef)]
     classes = [s for s in tree.statements if isinstance(s, N.ClassDef)]
+    interfaces = [s for s in tree.statements
+                  if isinstance(s, N.InterfaceDef)]
     enums = [s for s in tree.statements if isinstance(s, N.EnumDef)]
     consts = [s for s in tree.statements
               if isinstance(s, N.Assign) and len(s.targets) == 1
@@ -657,7 +695,7 @@ def generate_docs(filename, source):
         out.append('')
         for fn in funcs:
             tags = _fn_tags(fn)
-            out.append(f'### {fn.name}({_render_params(fn.params)}){tags}')
+            out.append(f'### {fn.name}({_render_params(fn.params, fn.rest)}){tags}')
             out.append('')
             doc = _docstring(fn.body)
             if doc:
@@ -691,7 +729,7 @@ def generate_docs(filename, source):
                 out.append('')
                 for m in methods:
                     tags = _fn_tags(m)
-                    out.append(f'- `{m.name}({_render_params(m.params)})`{tags}')
+                    out.append(f'- `{m.name}({_render_params(m.params, m.rest)})`{tags}')
                     mdoc = _docstring(m.body)
                     if mdoc:
                         out.append(f'  - {mdoc}')
@@ -699,6 +737,39 @@ def generate_docs(filename, source):
             if props:
                 out.append('**الخصائص المحسوبة:** ' + '، '.join(
                     f'`{p.name}`' for p in props))
+                out.append('')
+
+    if interfaces:
+        documented_any = True
+        out.append('## الواجهات')
+        out.append('')
+        for iface in interfaces:
+            parent = _render_parents(iface.superclass)
+            out.append(f'### واجهة {iface.name}{parent}')
+            out.append('')
+            doc = _docstring(iface.body)
+            if doc:
+                out.append(doc)
+                out.append('')
+            if iface.abstract:
+                out.append('**الطرق المجردة:** ' + '، '.join(
+                    f'`{name}()`' for name in iface.abstract))
+                out.append('')
+            defaults = [m for m in iface.body
+                        if isinstance(m, N.FuncDef) and m.body is not None]
+            constants = [m for m in iface.body if isinstance(m, N.Assign)
+                         and len(m.targets) == 1
+                         and isinstance(m.targets[0], N.Name)]
+            if defaults:
+                out.append('**التنفيذ الافتراضي:**')
+                out.append('')
+                for m in defaults:
+                    tags = _fn_tags(m)
+                    out.append(f'- `{m.name}({_render_params(m.params, m.rest)})`{tags}')
+                out.append('')
+            if constants:
+                out.append('**الثوابت:** ' + '، '.join(
+                    f'`{c.targets[0].name}`' for c in constants))
                 out.append('')
 
     if enums:

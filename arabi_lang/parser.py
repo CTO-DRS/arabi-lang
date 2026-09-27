@@ -8,10 +8,11 @@
 from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
-    Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda, Switch,
-    EnumDef, PropertyDef, Global, Assert, Delete, Yield,
+    Break, Continue, Pass, Try, Raise, Import, ClassDef, InterfaceDef,
+    Lambda, Switch, EnumDef, PropertyDef, Global, Assert, Delete, Yield,
     Num, Str, FString, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
     Call, Index, Slice, MethodCall, Attribute, This, Super, Ternary,
+    SpreadArg,
 )
 from .errors import ParseError
 
@@ -44,7 +45,7 @@ STMT_KEYWORDS = {
     T.SWITCH: 'بدّل', T.CASE: 'حالة', T.DEFAULT: 'افتراض',
     T.ENUM: 'تعداد', T.PROPERTY: 'خاصية', T.GLOBAL: 'عالمي',
     T.ASSERT: 'تحقق', T.DELETE: 'احذف',
-    T.YIELD: 'أنتج',
+    T.YIELD: 'أنتج', T.INTERFACE: 'واجهة',
 }
 
 # كلمات مفتاحية يُسمح بظهورها كأسماء خصائص/طرق بعد النقطة
@@ -139,7 +140,7 @@ class Parser:
         # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب/صنف/بدّل) تستهلك DEDENT
         # داخل block()، لذا الجملة التالية تبدأ مباشرة
         if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef,
-                             Switch, PropertyDef, EnumDef)):
+                             Switch, PropertyDef, EnumDef, InterfaceDef)):
             return stmt
         self.error('متوقع نهاية السطر بعد الجملة')
 
@@ -174,6 +175,8 @@ class Parser:
             return self.import_stmt()
         if t is T.CLASS:
             return self.class_def()
+        if t is T.INTERFACE:
+            return self.interface_def()
         if t is T.SWITCH:
             return self.switch_stmt()
         if t is T.ENUM:
@@ -216,14 +219,14 @@ class Parser:
     def func_def(self):
         tok = self.advance()                       # دالة
         name = self.expect_ident("متوقع اسم الدالة بعد 'دالة'")
-        params = self.parse_params()
+        params, rest = self.parse_params()
         self._yield_scopes.append(False)
         try:
             body = self.block()
         finally:
             is_generator = self._yield_scopes.pop()
         return FuncDef(name, params, body, tok.line,
-                       is_generator=is_generator)
+                       is_generator=is_generator, rest=rest)
 
     def decorated_def(self):
         """مزخرفات فوق الدالة:
@@ -256,17 +259,41 @@ class Parser:
         return Yield(self.expression(), tok.line)
 
     def parse_params(self):
-        """يقرأ قائمة المعاملات مع الافتراضيات: (أ، ب = ٥)"""
+        """يقرأ المعاملات مع الافتراضيات والمعامل المتغير: (أ، ب = ٥، ...البقية)
+
+        يعيد (قائمة المعاملات، اسم المعامل المتغير أو None).
+        """
         self.expect(T.LPAREN, "متوقع '(' لفتح قائمة المعاملات")
         params = []
+        rest = None
         if not self.check(T.RPAREN):
-            params.append(self.parse_param())
-            while self.match(T.COMMA):
-                if self.check(T.RPAREN):           # فاصلة أخيرة مسموحة
-                    break
+            if self.check(T.ELLIPSIS):             # البدء مباشرة بـ ...الاسم
+                self.advance()
+                rest = self.expect_ident(
+                    "متوقع اسم المعامل المتغير بعد '...'")
+                if self.match(T.COMMA) and not self.check(T.RPAREN):
+                    self.error("المعامل المتغير '...' يجب أن يكون الأخير")
+            else:
                 params.append(self.parse_param())
+                while self.match(T.COMMA):
+                    if self.check(T.RPAREN):           # فاصلة أخيرة مسموحة
+                        break
+                    if self.check(T.ELLIPSIS):
+                        if rest is not None:
+                            self.error('تكرار المعامل المتغير — يُسمح بـ ... مرة واحدة')
+                        self.advance()
+                        rest = self.expect_ident(
+                            "متوقع اسم المعامل المتغير بعد '...'")
+                        if self.match(T.COMMA) and not self.check(T.RPAREN):
+                            self.error(
+                                "المعامل المتغير '...' يجب أن يكون الأخير")
+                        continue
+                    params.append(self.parse_param())
         self.expect(T.RPAREN, "متوقع ')' لإغلاق قائمة المعاملات")
-        return params
+        if rest is not None and any(p[0] == rest for p in params):
+            self.error(
+                f"اسم المعامل المتغير '{rest}' مكرر مع معامل عادي")
+        return params, rest
 
     def parse_param(self):
         """معامل واحد: اسم أو اسم = قيمة افتراضية"""
@@ -386,6 +413,75 @@ class Parser:
                     superclass.append(self.expect_ident('متوقع اسم صنف أصل'))
         body = self.block()
         return ClassDef(name, superclass, body, tok.line)
+
+    def interface_def(self):
+        """واجهة الاسم [من أصل] — عقد مجرد تلتزم به الأصناف.
+
+        طرق بلا جسم = مجردة (يجب تنفيذها)، بجسم = تنفيذ افتراضي يورث.
+        """
+        tok = self.advance()                       # واجهة
+        name = self.expect_ident("متوقع اسم الواجهة بعد 'واجهة'")
+        superclass = None
+        if self.check(T.IDENT) and self.cur().value == 'من':
+            self.advance()
+            superclass = self.expect_ident(
+                "متوقع اسم الواجهة الأصل بعد 'من'")
+            if self.match(T.COMMA):
+                superclass = [superclass]
+                superclass.append(
+                    self.expect_ident('متوقع اسم واجهة الأصل الثاني'))
+                while self.match(T.COMMA):
+                    superclass.append(
+                        self.expect_ident('متوقع اسم واجهة أصل'))
+        body, abstract = self._interface_block(name)
+        return InterfaceDef(name, superclass, body, abstract, tok.line)
+
+    def _interface_block(self, name):
+        """كتلة الواجهة: طرق (بجسم أو بلا جسم) وثوابت وتجاهل فقط."""
+        self.expect(T.COLON, "متوقع ':' في نهاية السطر")
+        if self.check(T.ASSIGN):
+            self.error("متوقع ':' — هل تقصد '==' للمقارنة؟")
+        self.expect(T.NEWLINE, "متوقع سطرًا جديدًا بعد ':'")
+        if not self.check(T.INDENT):
+            self.error("متوقع كتلة بمسافة بادئة بعد ':'")
+        self.advance()
+        body = []
+        abstract = []
+        while True:
+            if self.check(T.EOF):
+                self.error("كتلة غير مغلقة — انتهى الملف قبل نهاية الكتلة")
+            if self.check(T.DEDENT):
+                self.advance()
+                break
+            if self.check(T.DEF):
+                fn = self._interface_method()
+                if fn.body is None:
+                    abstract.append(fn.name)
+                body.append(fn)
+            elif self.check(T.PASS):
+                p = self.advance()
+                body.append(Pass(p.line))
+            else:
+                stmt = self.expr_stmt()            # ثابت: الاسم = قيمة
+                body.append(stmt)
+            self.skip_newlines()
+        if not body:
+            self.error(
+                f"الواجهة '{name}' فارغة — أضف طريقة مجردة أو "
+                'تنفيذًا افتراضيًا أو ثابتًا')
+        return body, abstract
+
+    def _interface_method(self):
+        """طريقة داخل واجهة: بجسم (تنفيذ افتراضي) أو بلا جسم (مجردة)."""
+        tok = self.advance()                       # دالة
+        name = self.expect_ident("متوقع اسم الطريقة بعد 'دالة'")
+        params, rest = self.parse_params()
+        if self.check(T.NEWLINE) or self.check(T.EOF) or self.check(T.DEDENT):
+            if self.check(T.NEWLINE):              # نهاية سطر الطريقة المجردة
+                self.advance()
+            return FuncDef(name, params, None, tok.line, rest=rest)
+        body = self.block()
+        return FuncDef(name, params, body, tok.line, rest=rest)
 
     def switch_stmt(self):
         """بدّل التعبير — كتل حالة على أسطر تالية بنفس مستوى 'بدّل':
@@ -607,7 +703,10 @@ class Parser:
         return args
 
     def parse_arg(self):
-        """معامل استدعاء واحد: تعبير أو اسم = تعبير (معامل بالاسم)."""
+        """معامل استدعاء واحد: تعبير، اسم = تعبير، أو ...تعبير (تفكيك)."""
+        if self.check(T.ELLIPSIS):
+            tok = self.advance()
+            return (None, SpreadArg(self.expression(), tok.line))
         if (self.check(T.IDENT) and self.peek(1).type is T.ASSIGN):
             name_tok = self.advance()
             self.advance()                         # =
@@ -709,24 +808,31 @@ class Parser:
     def lambda_expr(self):
         """دالة سهمية: دالة(س، ص) => س + ص"""
         tok = self.advance()                       # دالة
-        params = self.parse_params()
+        params, rest = self.parse_params()
         self.expect(T.ARROW, "متوقع '=>' بعد معاملات الدالة السهمية")
         if self.check(T.NEWLINE) or self.check(T.EOF):
             self.error('جسم الدالة السهمية يجب أن يكون تعبيرًا واحدًا على نفس السطر')
         body = self.expression()
-        return Lambda(params, body, tok.line)
+        return Lambda(params, body, tok.line, rest=rest)
 
     def list_literal(self):
         tok = self.advance()                       # [
         items = []
         if not self.check(T.RBRACKET):
-            items.append(self.expression())
+            items.append(self._list_item())
             while self.match(T.COMMA):
                 if self.check(T.RBRACKET):
                     break
-                items.append(self.expression())
+                items.append(self._list_item())
         self.expect(T.RBRACKET, "متوقع ']' لإغلاق القائمة")
         return ListLit(items, tok.line)
+
+    def _list_item(self):
+        """عنصر قائمة: تعبير أو ...تعبير (تفكيك)."""
+        if self.check(T.ELLIPSIS):
+            tok = self.advance()
+            return SpreadArg(self.expression(), tok.line)
+        return self.expression()
 
     def dict_literal(self):
         tok = self.advance()                       # {

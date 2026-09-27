@@ -16,6 +16,9 @@
       "include": "#class-def"
     },
     {
+      "include": "#interface-def"
+    },
+    {
       "include": "#compound-keywords"
     },
     {
@@ -163,6 +166,17 @@
         }
       }
     },
+    "interface-def": {
+      "match": "(?<![\\u0600-\\u06FF\\w])(واجهة)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.declaration.interface.arabi"
+        },
+        "2": {
+          "name": "entity.name.interface.arabi"
+        }
+      }
+    },
     "compound-keywords": {
       "patterns": [
         {
@@ -200,6 +214,10 @@
         {
           "name": "keyword.declaration.property.arabi",
           "match": "(?<![\\u0600-\\u06FF\\w])خاصية(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.declaration.interface.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])واجهة(?![\\u0600-\\u06FF\\w])"
         },
         {
           "name": "keyword.other.scope.arabi",
@@ -261,7 +279,7 @@
     },
     "modules": {
       "name": "entity.other.module.arabi",
-      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت|ملفات|جيسون|عشوائية|نظام|تنظيم|شبكة|تحويل|اختبارات|خادم)(?![\\u0600-\\u06FF\\w])"
+      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت|ملفات|جيسون|عشوائية|نظام|تنظيم|شبكة|تحويل|اختبارات|خادم|قاعدة|ترميز|جداول|خيوط)(?![\\u0600-\\u06FF\\w])"
     },
     "numbers": {
       "patterns": [
@@ -273,6 +291,10 @@
     },
     "operators": {
       "patterns": [
+        {
+          "name": "keyword.operator.spread.arabi",
+          "match": "\\.\\.\\."
+        },
         {
           "name": "keyword.operator.assignment.augmented.arabi",
           "match": "(\\+=|-=|\\*=|/=)"
