@@ -5769,3 +5769,640 @@ class TestBytecodeCLI(unittest.TestCase):
         r2 = self._cli(self.path)
         self.assertEqual(r2.returncode, 0)
         self.assertIn('من CLI', r2.stdout)
+
+
+# ================== سجل الحزم (الإصدار 1.12) ==================
+
+import json                                                  # noqa: E402
+import shutil                                                # noqa: E402
+import zipfile                                               # noqa: E402
+import pathlib                                               # noqa: E402
+import subprocess                                            # noqa: E402
+
+from arabi_lang import packages                              # noqa: E402
+from arabi_lang.errors import ArabiError                     # noqa: E402
+
+
+def _write_arabi(path, content):
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def _write_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+class TestPackageVersions(unittest.TestCase):
+    """النسخ الدلالية وقيودها في سجل الحزم."""
+
+    def test_parse_full(self):
+        self.assertEqual(packages.parse_version('1.2.3'), (1, 2, 3))
+
+    def test_parse_partial_fills_zero(self):
+        self.assertEqual(packages.parse_version('2'), (2, 0, 0))
+        self.assertEqual(packages.parse_version('1.5'), (1, 5, 0))
+
+    def test_parse_invalid(self):
+        for bad in ('', 'أ ب', '1.2.3.4', 'x.y', '1.2.-3', None):
+            with self.assertRaises(ArabiError):
+                packages.parse_version(bad)
+
+    def test_compare(self):
+        self.assertEqual(packages.compare_versions('1.0.0', '1.0.0'), 0)
+        self.assertEqual(packages.compare_versions('1.10.0', '1.2.0'), 1)
+        self.assertEqual(packages.compare_versions('0.9.9', '1.0.0'), -1)
+        self.assertEqual(packages.compare_versions('2.0', '2.0.0'), 0)
+
+    def test_exact(self):
+        self.assertTrue(packages.satisfies('1.2.3', '1.2.3'))
+        self.assertFalse(packages.satisfies('1.2.4', '1.2.3'))
+        self.assertTrue(packages.satisfies('1.2.3', '=1.2.3'))
+        self.assertTrue(packages.satisfies('1.2.3', '==1.2.3'))
+
+    def test_ge_le(self):
+        self.assertTrue(packages.satisfies('1.5.0', '>=1.0.0'))
+        self.assertTrue(packages.satisfies('1.0.0', '>=1.0.0'))
+        self.assertFalse(packages.satisfies('0.9.0', '>=1.0.0'))
+        self.assertTrue(packages.satisfies('1.0.0', '<=1.0.0'))
+        self.assertFalse(packages.satisfies('1.0.1', '<=1.0.0'))
+
+    def test_gt_lt(self):
+        self.assertTrue(packages.satisfies('2.0.0', '>1.9.9'))
+        self.assertFalse(packages.satisfies('2.0.0', '>2.0.0'))
+        self.assertTrue(packages.satisfies('0.1.0', '<1.0.0'))
+        self.assertFalse(packages.satisfies('1.0.0', '<1.0.0'))
+
+    def test_caret(self):
+        self.assertTrue(packages.satisfies('1.2.3', '^1.2.3'))
+        self.assertTrue(packages.satisfies('1.9.9', '^1.2.3'))
+        self.assertFalse(packages.satisfies('2.0.0', '^1.2.3'))
+        self.assertFalse(packages.satisfies('1.2.2', '^1.2.3'))
+        # الرتّب الصفري: ^0.2.3 يقبل 0.2.x فقط
+        self.assertTrue(packages.satisfies('0.2.9', '^0.2.3'))
+        self.assertFalse(packages.satisfies('0.3.0', '^0.2.3'))
+
+    def test_tilde(self):
+        self.assertTrue(packages.satisfies('1.2.9', '~1.2.3'))
+        self.assertFalse(packages.satisfies('1.3.0', '~1.2.3'))
+        self.assertFalse(packages.satisfies('1.2.2', '~1.2.3'))
+
+    def test_any(self):
+        self.assertTrue(packages.satisfies('9.9.9', '*'))
+        self.assertTrue(packages.satisfies('0.0.1', ''))
+
+    def test_invalid_constraint(self):
+        for bad in ('>>1.0.0', 'أكبر من 1', '~.'):
+            with self.assertRaises(ArabiError):
+                packages.satisfies('1.0.0', bad)
+
+
+class TestPackageManager(unittest.TestCase):
+    """مدير الحزم: البيان والفهرس والتثبيت والإزالة والقفل."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-حزم-')
+        self.registry = os.path.join(self.tmp, 'سجل')
+        os.makedirs(self.registry)
+        # حزمة أ: مجلد كامل ببيان — بلا تبعيات
+        self.src_a = os.path.join(self.registry, 'ادوات_نص')
+        os.makedirs(self.src_a)
+        _write_arabi(os.path.join(self.src_a, 'ادوات_نص.عربي'),
+                     '"أدوات نصية."\n\n'
+                     'دالة كرر_مرتين(ن):\n'
+                     '    أعد ن + ن\n')
+        _write_json(os.path.join(self.src_a, 'حزمة.json'), {
+            'الاسم': 'ادوات_نص', 'النسخة': '1.4.0',
+            'الوصف': 'أدوات معالجة النصوص', 'المدخل': 'ادوات_نص.عربي',
+        })
+        # حزمة ب: مجلد كامل — تعتمد على أ
+        self.src_b = os.path.join(self.registry, 'احصاء_متقدم')
+        os.makedirs(self.src_b)
+        _write_arabi(os.path.join(self.src_b, 'احصاء_متقدم.عربي'),
+                     '"إحصاء متقدم."\n\n'
+                     'من ادوات_نص استورد كرر_مرتين\n\n'
+                     'دالة تقرير(أعداد):\n'
+                     '    س = 0\n'
+                     '    لكل أ في أعداد:\n'
+                     '        س = س + أ\n'
+                     '    أعد كرر_مرتين("المجموع: " + نص(س))\n')
+        _write_json(os.path.join(self.src_b, 'حزمة.json'), {
+            'الاسم': 'احصاء_متقدم', 'النسخة': '2.1.0',
+            'الوصف': 'حسابات إحصائية متقدمة', 'المدخل': 'احصاء_متقدم.عربي',
+            'التبعيات': {'ادوات_نص': '>=1.0.0'},
+        })
+        # حزمة ج: ملف مفرد بلا بيان — يُغلَّف تلقائيًا
+        self.src_c = os.path.join(self.registry, 'مفيد.عربي')
+        _write_arabi(self.src_c,
+                     'دالة سلام():\n'
+                     '    أعد "أهلا"\n')
+        # حزمة د: أرشيف zip
+        self.src_d_dir = os.path.join(self.registry, '_مبعثر')
+        os.makedirs(self.src_d_dir)
+        _write_arabi(os.path.join(self.src_d_dir, 'مبعثر.عربي'),
+                     'دالة قيمة():\n'
+                     '    أعد 42\n')
+        _write_json(os.path.join(self.src_d_dir, 'حزمة.json'), {
+            'الاسم': 'مبعثر', 'النسخة': '1.0.0', 'الوصف': 'حزمة مضغوطة',
+        })
+        self.src_d = os.path.join(self.registry, 'مبعثر.zip')
+        with zipfile.ZipFile(self.src_d, 'w') as zf:
+            zf.write(os.path.join(self.src_d_dir, 'مبعثر.عربي'), 'مبعثر.عربي')
+            zf.write(os.path.join(self.src_d_dir, 'حزمة.json'), 'حزمة.json')
+        # الفهرس
+        self.index = os.path.join(self.registry, 'الفهرس.json')
+        _write_json(self.index, {
+            'ادوات_نص': {'النسخة': '1.4.0', 'الوصف': 'أدوات معالجة النصوص',
+                         'المصدر': self.src_a},
+            'احصاء_متقدم': {'النسخة': '2.1.0',
+                            'الوصف': 'حسابات إحصائية متقدمة',
+                            'المصدر': self.src_b},
+            'مفيد': {'النسخة': '0.9.0', 'الوصف': 'دوال مفيدة',
+                     'المصدر': self.src_c},
+            'مبعثر': {'النسخة': '1.0.0', 'الوصف': 'حزمة مضغوطة',
+                      'المصدر': self.src_d},
+        })
+        self.project = os.path.join(self.tmp, 'مشروع')
+        os.makedirs(self.project)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ---------- بيان الحزمة ----------
+
+    def test_read_manifest_complete(self):
+        data = packages.read_manifest(self.src_a)
+        self.assertEqual(data['الاسم'], 'ادوات_نص')
+        self.assertEqual(data['النسخة'], '1.4.0')
+        self.assertEqual(data['المدخل'], 'ادوات_نص.عربي')
+        self.assertEqual(data['التبعيات'], {})
+
+    def test_read_manifest_defaults(self):
+        # بلا نسخة ولا مدخل — افتراضيات معقولة
+        d = os.path.join(self.tmp, 'بسيطة')
+        os.makedirs(d)
+        _write_json(os.path.join(d, 'حزمة.json'), {'الاسم': 'بسيطة'})
+        data = packages.read_manifest(d)
+        self.assertEqual(data['النسخة'], '0.0.0')
+        self.assertEqual(data['المدخل'], 'بسيطة.عربي')
+
+    def test_read_manifest_missing_name(self):
+        d = os.path.join(self.tmp, 'بلا_اسم')
+        os.makedirs(d)
+        _write_json(os.path.join(d, 'حزمة.json'), {'النسخة': '1.0.0'})
+        with self.assertRaises(ArabiError) as ctx:
+            packages.read_manifest(d)
+        self.assertIn('الاسم', str(ctx.exception))
+
+    def test_read_manifest_bad_name(self):
+        # الاسم بشرطة — غير قابل للاستيراد
+        d = os.path.join(self.tmp, 'اسم_سيء')
+        os.makedirs(d)
+        _write_json(os.path.join(d, 'حزمة.json'), {'الاسم': 'اسم-سيء'})
+        with self.assertRaises(ArabiError) as ctx:
+            packages.read_manifest(d)
+        self.assertIn('غير صالح', str(ctx.exception))
+
+    def test_read_manifest_missing_file(self):
+        with self.assertRaises(ArabiError):
+            packages.read_manifest(self.tmp)
+
+    def test_read_manifest_bad_version(self):
+        d = os.path.join(self.tmp, 'نسخة_سيئة')
+        os.makedirs(d)
+        _write_json(os.path.join(d, 'حزمة.json'),
+                    {'الاسم': 'ن', 'النسخة': 'واحد'})
+        with self.assertRaises(ArabiError):
+            packages.read_manifest(d)
+
+    # ---------- التثبيت ----------
+
+    def test_install_with_dependency(self):
+        msgs = packages.install('احصاء_متقدم', self.project, self.index)
+        kinds = [k for _, k in msgs]
+        self.assertEqual(kinds, ['ثُبتت', 'ثُبتت'])
+        # التبعية ثُبتت أولًا
+        self.assertIn('ادوات_نص', msgs[0][0])
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.project, 'حزم', 'ادوات_نص', 'ادوات_نص.عربي')))
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.project, 'حزم', 'احصاء_متقدم', 'احصاء_متقدم.عربي')))
+
+    def test_install_creates_lock(self):
+        packages.install('احصاء_متقدم', self.project, self.index)
+        lock = packages.read_lock(self.project)
+        self.assertIn('ادوات_نص', lock)
+        self.assertEqual(lock['ادوات_نص']['النسخة'], '1.4.0')
+        self.assertEqual(lock['احصاء_متقدم']['النسخة'], '2.1.0')
+
+    def test_install_single_file_package(self):
+        msgs = packages.install('مفيد', self.project, self.index)
+        self.assertEqual([k for _, k in msgs], ['ثُبتت'])
+        # الملف المفرد غُلِّف ببيان تلقائي بنسخة الفهرس
+        data = packages.read_manifest(
+            os.path.join(self.project, 'حزم', 'مفيد'))
+        self.assertEqual(data['النسخة'], '0.9.0')
+        self.assertEqual(data['المدخل'], 'مفيد.عربي')
+
+    def test_install_zip_package(self):
+        msgs = packages.install('مبعثر', self.project, self.index)
+        self.assertEqual([k for _, k in msgs], ['ثُبتت'])
+        out = run_code('استورد مبعثر\nاطبع(مبعثر.قيمة())',
+                       script_dir=self.project)
+        self.assertIn('42', out)
+
+    def test_install_from_file_url(self):
+        # رابط file:// لمجلد حزمة — تنزيل بلا شبكة
+        url = pathlib.Path(self.src_a).as_uri()
+        msgs = packages.install(url, self.project, self.index)
+        self.assertEqual([k for _, k in msgs], ['ثُبتت'])
+        self.assertIn('ادوات_نص', str(msgs))
+
+    def test_install_from_local_path(self):
+        # تثبيت بمسار مباشر دون فهرس
+        msgs = packages.install(self.src_a, self.project, self.index)
+        self.assertEqual([k for _, k in msgs], ['ثُبتت'])
+
+    def test_install_already_installed(self):
+        packages.install('ادوات_نص', self.project, self.index)
+        msgs = packages.install('ادوات_نص', self.project, self.index)
+        self.assertEqual(msgs,
+                         [('ادوات_نص v1.4.0 مثبتة بالفعل وتلبي القيد',
+                           'موجودة')])
+        # لم تُعاد الكتابة
+        self.assertEqual(packages.list_installed(self.project)['ادوات_نص']
+                         ['نسخة'], '1.4.0')
+
+    def test_install_constraint_conflict_with_index(self):
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install_dep('ادوات_نص', '>=2.0.0', self.project,
+                                 self.index, [])
+        self.assertIn('لا تلبي القيد', str(ctx.exception))
+
+    def test_install_constraint_conflict_with_installed(self):
+        # مثبتة بنسخة قديمة (0.0.0 من ملف مفرد) والفهرس أحدث
+        packages.install(self.src_c, self.project, self.index)
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install_dep('مفيد', '>=0.5.0', self.project,
+                                 self.index, [])
+        self.assertIn('مثبتة بنسخة', str(ctx.exception))
+
+    def test_install_missing_package(self):
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install('غير_موجود', self.project, self.index)
+        self.assertIn('غير موجودة', str(ctx.exception))
+
+    def test_install_cyclic_dependency(self):
+        # أ تعتمد ب وتعتمد أ — كشف الدورة
+        src_x = os.path.join(self.registry, 'دائرية_أ')
+        os.makedirs(src_x)
+        _write_arabi(os.path.join(src_x, 'دائرية_أ.عربي'), 'س = 1\n')
+        _write_json(os.path.join(src_x, 'حزمة.json'), {
+            'الاسم': 'دائرية_أ', 'النسخة': '1.0.0',
+            'التبعيات': {'دائرية_ب': '*'}})
+        src_y = os.path.join(self.registry, 'دائرية_ب')
+        os.makedirs(src_y)
+        _write_arabi(os.path.join(src_y, 'دائرية_ب.عربي'), 'ص = 2\n')
+        _write_json(os.path.join(src_y, 'حزمة.json'), {
+            'الاسم': 'دائرية_ب', 'النسخة': '1.0.0',
+            'التبعيات': {'دائرية_أ': '*'}})
+        _write_json(self.index, {
+            'دائرية_أ': {'النسخة': '1.0.0', 'المصدر': src_x},
+            'دائرية_ب': {'النسخة': '1.0.0', 'المصدر': src_y},
+        })
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install('دائرية_أ', self.project, self.index)
+        self.assertIn('تبعية دائرية', str(ctx.exception))
+
+    def test_install_name_mismatch(self):
+        # الفهرس يدعي اسمًا والمصدر بيانه باسم آخر
+        _write_json(self.index, {
+            'ادوات_نص': {'النسخة': '1.4.0', 'المصدر': self.src_b},
+        })
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install('ادوات_نص', self.project, self.index)
+        self.assertIn('لا يطابق', str(ctx.exception))
+
+    def test_install_refuses_broken_code(self):
+        # كود غير سليم — لا تثبت
+        broken = os.path.join(self.registry, 'مكسورة')
+        os.makedirs(broken)
+        _write_arabi(os.path.join(broken, 'مكسورة.عربي'), 'اطبع(\n')
+        _write_json(os.path.join(broken, 'حزمة.json'),
+                    {'الاسم': 'مكسورة', 'النسخة': '1.0.0'})
+        _write_json(self.index, {
+            'مكسورة': {'النسخة': '1.0.0', 'المصدر': broken}})
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install('مكسورة', self.project, self.index)
+        self.assertIn('غير سليم', str(ctx.exception))
+        self.assertNotIn('مكسورة', packages.list_installed(self.project))
+
+    def test_install_index_without_source(self):
+        bad_index = os.path.join(self.registry, 'فهرس_سيء.json')
+        _write_json(bad_index, {'شىء': {'النسخة': '1.0.0'}})
+        with self.assertRaises(ArabiError) as ctx:
+            packages.load_index(bad_index)
+        self.assertIn('المصدر', str(ctx.exception))
+
+    # ---------- الإزالة والقائمة والتحديث ----------
+
+    def test_remove_blocks_dependents(self):
+        packages.install('احصاء_متقدم', self.project, self.index)
+        with self.assertRaises(ArabiError) as ctx:
+            packages.remove('ادوات_نص', self.project)
+        self.assertIn('احصاء_متقدم', str(ctx.exception))
+
+    def test_remove_leaf_and_lock_update(self):
+        packages.install('احصاء_متقدم', self.project, self.index)
+        msg = packages.remove('احصاء_متقدم', self.project)
+        self.assertIn('أُزيلت', msg)
+        lock = packages.read_lock(self.project)
+        self.assertNotIn('احصاء_متقدم', lock)
+        # التبعية اليتيمة تبقى (المستخدم قد يريدها)
+        self.assertIn('ادوات_نص', lock)
+
+    def test_remove_not_installed(self):
+        with self.assertRaises(ArabiError) as ctx:
+            packages.remove('مفيد', self.project)
+        self.assertIn('غير مثبتة', str(ctx.exception))
+
+    def test_list_installed(self):
+        self.assertEqual(packages.list_installed(self.project), {})
+        packages.install('احصاء_متقدم', self.project, self.index)
+        installed = packages.list_installed(self.project)
+        self.assertEqual(set(installed), {'ادوات_نص', 'احصاء_متقدم'})
+        self.assertEqual(installed['ادوات_نص']['نسخة'], '1.4.0')
+        self.assertEqual(installed['ادوات_نص']['تبعيات'], {})
+        self.assertEqual(installed['احصاء_متقدم']['تبعيات'],
+                         {'ادوات_نص': '>=1.0.0'})
+
+    def test_update_single(self):
+        # ثبت من ملف مباشر (نسخة 0.0.0) ثم حدّث من الفهرس
+        packages.install(self.src_c, self.project, self.index)
+        msgs = packages.update('مفيد', self.project, self.index)
+        self.assertTrue(any(k == 'ثُبتت' for _, k in msgs))
+        self.assertEqual(
+            packages.list_installed(self.project)['مفيد']['نسخة'], '0.9.0')
+
+    def test_update_all(self):
+        packages.install('ادوات_نص', self.project, self.index)
+        msgs = packages.update(None, self.project, self.index)
+        self.assertEqual(len(msgs), 1)   # حزمة واحدة مثبتة
+        self.assertEqual(
+            packages.list_installed(self.project)['ادوات_نص']['نسخة'],
+            '1.4.0')
+
+    def test_update_not_installed(self):
+        with self.assertRaises(ArabiError):
+            packages.update('مفيد', self.project, self.index)
+
+    # ---------- البحث والفهرس ----------
+
+    def test_search_by_name(self):
+        results = packages.search('احصاء', self.index)
+        self.assertEqual([n for n, _ in results], ['احصاء_متقدم'])
+
+    def test_search_by_description(self):
+        results = packages.search('نصوص', self.index)
+        self.assertIn('ادوات_نص', [n for n, _ in results])
+
+    def test_search_empty_lists_all(self):
+        results = packages.search('', self.index)
+        self.assertEqual(len(results), 4)
+
+    def test_search_no_results(self):
+        self.assertEqual(packages.search('شبكة_عصبية', self.index), [])
+
+    def test_load_index_missing(self):
+        with self.assertRaises(ArabiError) as ctx:
+            packages.load_index(os.path.join(self.tmp, 'غائب.json'))
+        self.assertIn('غير موجود', str(ctx.exception))
+
+    def test_load_index_invalid_json(self):
+        bad = os.path.join(self.tmp, 'فاسد.json')
+        with open(bad, 'w', encoding='utf-8') as f:
+            f.write('{غير json')
+        with self.assertRaises(ArabiError):
+            packages.load_index(bad)
+
+
+class TestPackageImports(unittest.TestCase):
+    """الاستيراد من الحزم المثبتة — المفسر يبحث في حزم/."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-استيراد-حزم-')
+        self.project = os.path.join(self.tmp, 'مشروع')
+        os.makedirs(self.project)
+        pkg = os.path.join(self.project, 'حزم', 'حاسبة')
+        os.makedirs(pkg)
+        _write_arabi(os.path.join(pkg, 'حاسبة.عربي'),
+                     '"حاسبة صغيرة."\n\n'
+                     'دالة مجموع(أ، ب):\n'
+                     '    أعد أ + ب\n')
+        _write_json(os.path.join(pkg, 'حزمة.json'),
+                    {'الاسم': 'حاسبة', 'النسخة': '1.0.0'})
+        # حزمة بمدخل مخصص في مجلد فرعي
+        pkg2 = os.path.join(self.project, 'حزم', 'مخصصة', 'المصدر')
+        os.makedirs(pkg2)
+        _write_arabi(os.path.join(pkg2, 'الرئيسية.عربي'),
+                     'دالة قيمة():\n'
+                     '    أعد "من_المدخل_المخصص"\n')
+        _write_json(os.path.join(self.project, 'حزم', 'مخصصة', 'حزمة.json'),
+                    {'الاسم': 'مخصصة', 'النسخة': '2.0.0',
+                     'المدخل': 'المصدر/الرئيسية.عربي'})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_import_from_packages_dir(self):
+        out = run_code('استورد حاسبة\nاطبع(حاسبة.مجموع(٢، ٣))',
+                       script_dir=self.project)
+        self.assertIn('5', out)
+
+    def test_from_import_package_member(self):
+        out = run_code('من حاسبة استورد مجموع\nاطبع(مجموع(10، 5))',
+                       script_dir=self.project)
+        self.assertIn('15', out)
+
+    def test_import_custom_entry(self):
+        out = run_code('استورد مخصصة\nاطبع(مخصصة.قيمة())',
+                       script_dir=self.project)
+        self.assertIn('من_المدخل_المخصص', out)
+
+    def test_local_module_wins(self):
+        # وحدة محلية بنفس الاسم تتقدم على الحزمة
+        _write_arabi(os.path.join(self.project, 'حاسبة.عربي'),
+                     'دالة مجموع(أ، ب):\n'
+                     '    أعد أ * ب\n')
+        out = run_code('استورد حاسبة\nاطبع(حاسبة.مجموع(٢، ٣))',
+                       script_dir=self.project)
+        self.assertIn('6', out)   # ضرب لا جمع
+
+    def test_module_cached_once(self):
+        # استيراد مرتين — التنفيذ مرة واحدة (رسالة توثيق تظهر مرة)
+        _write_arabi(os.path.join(self.project, 'حزم', 'حاسبة',
+                                  'حاسبة.عربي'),
+                     'اطبع("تحميل")\n'
+                     'دالة صفر():\n'
+                     '    أعد 0\n')
+        out = run_code('استورد حاسبة\nاستورد حاسبة\nاطبع(حاسبة.صفر())',
+                       script_dir=self.project)
+        self.assertEqual(out.count('تحميل'), 1)
+
+    def test_package_module_bytecode_cache(self):
+        # الاستيراد من الحزم يستفيد من الكود الوسيط تلقائيًا
+        run_code('استورد حاسبة\nاطبع(حاسبة.مجموع(١، ١))',
+                 script_dir=self.project)
+        cache = os.path.join(self.project, 'حزم', 'حاسبة', '__بايت__',
+                             'حاسبة.بيت')
+        self.assertTrue(os.path.isfile(cache))
+
+    def test_error_message_mentions_packages_dir(self):
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            run_code('استورد ناقص', script_dir=self.project)
+        self.assertIn('حزم', str(ctx.exception))
+
+    def test_circular_import_between_packages(self):
+        # حزمتان تُستورد كل منهما الأخرى — خطأ استيراد دائري
+        for name, other in (('واحدة', 'ثانية'), ('ثانية', 'واحدة')):
+            pkg = os.path.join(self.project, 'حزم', name)
+            os.makedirs(pkg)
+            _write_arabi(os.path.join(pkg, name + '.عربي'),
+                         f'استورد {other}\n'
+                         'دالة قيمة():\n'
+                         '    أعد 1\n')
+            _write_json(os.path.join(pkg, 'حزمة.json'),
+                        {'الاسم': name, 'النسخة': '1.0.0'})
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            run_code('استورد واحدة', script_dir=self.project)
+        self.assertIn('دائري', str(ctx.exception))
+
+    def test_package_can_import_local_modules(self):
+        # الحزمة تستورد وحدة من مجلد المشروع نفسه
+        _write_arabi(os.path.join(self.project, 'مساعدة.عربي'),
+                     'دالة ضعف(ن):\n'
+                     '    أعد ن * 2\n')
+        pkg = os.path.join(self.project, 'حزم', 'مستخدمة')
+        os.makedirs(pkg)
+        _write_arabi(os.path.join(pkg, 'مستخدمة.عربي'),
+                     'من مساعدة استورد ضعف\n'
+                     'دالة أربعة():\n'
+                     '    أعد ضعف(2)\n')
+        _write_json(os.path.join(pkg, 'حزمة.json'),
+                    {'الاسم': 'مستخدمة', 'النسخة': '1.0.0'})
+        out = run_code('استورد مستخدمة\nاطبع(مستخدمة.أربعة())',
+                       script_dir=self.project)
+        self.assertIn('4', out)
+
+
+class TestPackageCLI(unittest.TestCase):
+    """أوامر حزمة عبر سطر الأوامر — عمليات كاملة في مشروع مؤقت."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix='اختبار-حزم-cli-')
+        cls.registry = os.path.join(cls.tmp, 'سجل')
+        os.makedirs(cls.registry)
+        src_a = os.path.join(cls.registry, 'ادوات_نص')
+        os.makedirs(src_a)
+        _write_arabi(os.path.join(src_a, 'ادوات_نص.عربي'),
+                     'دالة كرر_مرتين(ن):\n'
+                     '    أعد ن + ن\n')
+        _write_json(os.path.join(src_a, 'حزمة.json'), {
+            'الاسم': 'ادوات_نص', 'النسخة': '1.4.0',
+            'الوصف': 'أدوات معالجة النصوص'})
+        src_b = os.path.join(cls.registry, 'احصاء_متقدم')
+        os.makedirs(src_b)
+        _write_arabi(os.path.join(src_b, 'احصاء_متقدم.عربي'),
+                     'من ادوات_نص استورد كرر_مرتين\n\n'
+                     'دالة تقرير(أعداد):\n'
+                     '    س = 0\n'
+                     '    لكل أ في أعداد:\n'
+                     '        س = س + أ\n'
+                     '    أعد كرر_مرتين("المجموع: " + نص(س))\n')
+        _write_json(os.path.join(src_b, 'حزمة.json'), {
+            'الاسم': 'احصاء_متقدم', 'النسخة': '2.1.0',
+            'الوصف': 'حسابات إحصائية',
+            'التبعيات': {'ادوات_نص': '>=1.0.0'}})
+        cls.index = os.path.join(cls.registry, 'الفهرس.json')
+        _write_json(cls.index, {
+            'ادوات_نص': {'النسخة': '1.4.0', 'الوصف': 'أدوات معالجة النصوص',
+                         'المصدر': src_a},
+            'احصاء_متقدم': {'النسخة': '2.1.0', 'الوصف': 'حسابات إحصائية',
+                            'المصدر': src_b}})
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _cli(self, project, *args):
+        return subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'arabi.py'), 'حزمة',
+             '--الفهرس', self.index, *args],
+            capture_output=True, text=True, cwd=project, timeout=60)
+
+    def setUp(self):
+        self.project = tempfile.mkdtemp(prefix='مشروع-cli-')
+
+    def tearDown(self):
+        shutil.rmtree(self.project, ignore_errors=True)
+
+    def test_install_command(self):
+        r = self._cli(self.project, 'تثبيت', 'احصاء_متقدم')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('✓', r.stdout)
+        self.assertIn('ادوات_نص', r.stdout)      # التبعية ذُكرت
+        self.assertIn('قفل.json', r.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.project, 'حزم', 'احصاء_متقدم', 'احصاء_متقدم.عربي')))
+
+    def test_list_command(self):
+        self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        r = self._cli(self.project, 'قائمة')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('ادوات_نص v1.4.0', r.stdout)
+
+    def test_search_command(self):
+        r = self._cli(self.project, 'بحث', 'إحصائية')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('احصاء_متقدم', r.stdout)
+
+    def test_remove_command(self):
+        self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        r = self._cli(self.project, 'إزالة', 'ادوات_نص')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('أُزيلت', r.stdout)
+        r2 = self._cli(self.project, 'قائمة')
+        self.assertIn('لا حزم مثبتة', r2.stdout)
+
+    def test_remove_dependent_fails(self):
+        self._cli(self.project, 'تثبيت', 'احصاء_متقدم')
+        r = self._cli(self.project, 'إزالة', 'ادوات_نص')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('تعتمد عليها', r.stderr)
+
+    def test_unknown_command(self):
+        r = self._cli(self.project, 'طيران')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('غير معروف', r.stderr)
+
+    def test_no_command_shows_usage(self):
+        r = self._cli(self.project)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('استخدام', r.stdout)
+
+    def test_install_project_dependencies(self):
+        # مشروع ببيان يحدد تبعياته — تثبيت بلا اسم يثبتها كلها
+        _write_json(os.path.join(self.project, 'حزمة.json'), {
+            'الاسم': 'مشروعي', 'النسخة': '0.1.0',
+            'التبعيات': {'ادوات_نص': '>=1.0.0'}})
+        r = self._cli(self.project, 'تثبيت')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('ادوات_نص v1.4.0', r.stdout)
+        self.assertTrue(os.path.isdir(os.path.join(
+            self.project, 'حزم', 'ادوات_نص')))
+
+    def test_install_without_target_or_manifest(self):
+        r = self._cli(self.project, 'تثبيت')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('حدّد حزمة', r.stderr)

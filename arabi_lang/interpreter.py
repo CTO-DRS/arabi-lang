@@ -7,6 +7,7 @@
 أصناف ووراثة، واستيراد وحدات من ملفات .عربي.
 """
 
+import json
 import os
 import sys
 import threading
@@ -732,13 +733,37 @@ class Interpreter:
         return unique
 
     def _module_candidates(self, name):
-        """مواضع ملف الوحدة اسم.عربي في كل مجلدات البحث ومجلدا وحدات ومكتبات الفرعيان."""
+        """مواضع الوحدة اسم.عربي في كل مجلدات البحث ومجلدات الفرعية.
+
+        مجلدات الفرعية: وحدات/ ومكتبات/ للمكتبات المفردة، وحزم/ لسجل
+        الحزم — ملف مفرد حزم/اسم.عربي أو مجلد حزمة حزم/اسم/ يحمل بيان
+        حزمة.json يحدد مدخله (المدخل).
+        """
         candidates = []
         for d in self._search_dirs():
             candidates.append(os.path.join(d, name + '.عربي'))
             candidates.append(os.path.join(d, 'وحدات', name + '.عربي'))
             candidates.append(os.path.join(d, 'مكتبات', name + '.عربي'))
+            candidates.append(os.path.join(d, 'حزم', name + '.عربي'))
+            candidates.append(os.path.join(d, 'حزم', name, name + '.عربي'))
+            candidates.extend(self._package_entry_candidates(d, name))
         return candidates
+
+    @staticmethod
+    def _package_entry_candidates(d, name):
+        """مدخل حزمة مثبتة من بيانها حزم/اسم/حزمة.json (حقل المدخل)."""
+        manifest = os.path.join(d, 'حزم', name, 'حزمة.json')
+        try:
+            with open(manifest, encoding='utf-8') as f:
+                data = json.load(f)
+            entry = data.get('المدخل') or (name + '.عربي')
+            # أمان المدخل: نسبي ضمن مجلد الحزمة (لا مطلق ولا خروج بـ ..)
+            if isinstance(entry, str) and not os.path.isabs(entry) \
+                    and '..' not in entry.replace('\\', '/').split('/'):
+                return [os.path.join(d, 'حزم', name, entry)]
+        except (OSError, ValueError):
+            pass
+        return []  # الافتراضي الاسم.عربي مضاف مسبقًا
 
     def _path_candidates(self, path):
         """مواضع مسار صريح: مطلق مباشرة، وإلا نسبي لمجلدات البحث."""

@@ -12,11 +12,13 @@
     python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
     python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
     python arabi.py --حزم           عرض المكتبات المثبتة
+    python arabi.py حزمة تثبيت ...   مدير الحزم: تثبيت/إزالة/قائمة/بحث/تحديث
     python arabi.py --لغة           تشغيل خادم اللغة (LSP) للمحررات
     python arabi.py --نسخة          عرض الإصدار
 """
 
 import io
+import json
 import sys
 import os
 import contextlib
@@ -188,6 +190,138 @@ def list_packages():
     print(f'المكتبات المثبتة ({len(packages)}):')
     for pkg in packages:
         print(f'  - {pkg[:-len(".عربي")]}')
+
+
+# ================== سجل الحزم (الإصدار 1.12) ==================
+
+def _parse_index_flag(args):
+    """يستخرج العلم --الفهرس (مصدر بديل لسجل الحزم) من المعاملات."""
+    for i, arg in enumerate(args):
+        if arg in ('--الفهرس', '--index'):
+            if i + 1 >= len(args):
+                print("خطأ: العلم '--الفهرس' يحتاج مسارًا أو رابطًا بعده",
+                      file=sys.stderr)
+                sys.exit(1)
+            return args[i + 1]
+    return None
+
+
+def package_cli(args):
+    """مدير الحزم: python arabi.py حزمة تثبيت|إزالة|قائمة|بحث|تحديث ..."""
+    from arabi_lang import packages
+    index_source = _parse_index_flag(args)
+    # إزالة العلم وقيمته من المعاملات
+    cleaned = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in ('--الفهرس', '--index'):
+            skip = True
+            continue
+        cleaned.append(a)
+    args = cleaned
+
+    if not args:
+        print('استخدام: python arabi.py حزمة <أمر> [معاملات]')
+        print('الأوامر: تثبيت [اسم|مسار|رابط] — إزالة اسم — قائمة — '
+              'بحث [كلمة] — تحديث [اسم]')
+        print("مصدر الفهرس: --الفهرس مسار|رابط أو متغير البيئة "
+              f"{packages.INDEX_ENV}")
+        sys.exit(1)
+
+    cmd = args[0]
+    rest = args[1:]
+    try:
+        if cmd in ('تثبيت', '--تثبيت', 'install'):
+            target = rest[0] if rest else None
+            _package_install(packages, target, index_source)
+        elif cmd in ('إزالة', '--إزالة', 'remove'):
+            if not rest:
+                print("خطأ: 'حزمة إزالة' يحتاج اسم الحزمة بعده",
+                      file=sys.stderr)
+                sys.exit(1)
+            print(packages.remove(rest[0]))
+        elif cmd in ('قائمة', '--قائمة', 'list'):
+            _package_list(packages)
+        elif cmd in ('بحث', '--بحث', 'search'):
+            _package_search(packages, rest[0] if rest else '', index_source)
+        elif cmd in ('تحديث', '--تحديث', 'update'):
+            target = rest[0] if rest else None
+            _package_update(packages, target, index_source)
+        else:
+            print(f"خطأ: أمر حزمة غير معروف: '{cmd}' — الأوامر: "
+                  'تثبيت، إزالة، قائمة، بحث، تحديث', file=sys.stderr)
+            sys.exit(1)
+    except packages.ArabiError as error:
+        print(f'✗ {error}', file=sys.stderr)
+        sys.exit(1)
+
+
+def _package_install(packages, target, index_source):
+    """تثبيت حزمة بالاسم/المصدر، أو تبعيات المشروع إن لم يُحدد هدف."""
+    if target is None:
+        # تثبيت تبعيات مشروع له بيان محلي حزمة.json
+        manifest_path = os.path.join(os.getcwd(), packages.MANIFEST_NAME)
+        if not os.path.isfile(manifest_path):
+            print('حدّد حزمة للتثبيت، أو شغّل الأمر داخل مشروع يحمل '
+                  f'{packages.MANIFEST_NAME} لتثبيت تبعياته', file=sys.stderr)
+            sys.exit(1)
+        with open(manifest_path, encoding='utf-8') as f:
+            deps = json.load(f).get('التبعيات', {})
+        if not deps:
+            print('المشروع بلا تبعيات — لا شيء للتثبيت')
+            return
+        for name, constraint in deps.items():
+            _print_install(packages.install_dep(
+                name, constraint, os.getcwd(), index_source, []))
+    else:
+        _print_install(packages.install(target, os.getcwd(), index_source))
+
+
+def _print_install(messages):
+    """يطبع رسائل التثبيت مع ملخص القفل."""
+    from arabi_lang import packages
+    for text, kind in messages:
+        print(('✓ ' if kind == 'ثُبتت' else '• ') + text)
+    if any(kind == 'ثُبتت' for _, kind in messages):
+        print(f'→ سُجّلت النسخ المثبتة في {packages.LOCK_NAME}')
+
+
+def _package_list(packages):
+    """عرض الحزم المثبتة مع نسخها وتبعياتها."""
+    installed = packages.list_installed(os.getcwd())
+    if not installed:
+        print('لا حزم مثبتة في مجلد حزم/')
+        print('  للتثبيت: python arabi.py حزمة تثبيت اسم_الحزمة')
+        return
+    print(f'الحزم المثبتة ({len(installed)}):')
+    for name, info in installed.items():
+        version = info['نسخة'] or '؟'
+        deps = '، '.join(info['تبعيات']) or 'بلا تبعيات'
+        print(f'  - {name} v{version} — {deps}')
+
+
+def _package_search(packages, term, index_source):
+    """بحث في فهرس السجل بالاسم أو الوصف."""
+    results = packages.search(term, index_source)
+    if not results:
+        print(f'لا نتائج للبحث عن "{term}"')
+        return
+    print(f'نتائج البحث ({len(results)}):')
+    for name, info in results:
+        desc = info.get('الوصف') or ''
+        print(f"  - {name} v{info.get('النسخة', '؟')} — {desc}")
+
+
+def _package_update(packages, target, index_source):
+    """تحديث حزمة أو كل الحزم إلى أحدث نسخة في السجل."""
+    messages = packages.update(target, os.getcwd(), index_source)
+    if not messages:
+        print('لا حزم مثبتة لتحديثها')
+        return
+    _print_install(messages)
 
 
 def run_file(path, use_bytecode=True):
@@ -375,6 +509,12 @@ def show_help():
     python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
     python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
     python arabi.py --حزم           عرض المكتبات المثبتة
+    python arabi.py حزمة تثبيت [اسم|مسار|رابط]
+                                    تثبيت حزمة أو تبعيات المشروع (سجل الحزم)
+    python arabi.py حزمة قائمة       عرض الحزم المثبتة في حزم/
+    python arabi.py حزمة إزالة اسم   إزالة حزمة مثبتة
+    python arabi.py حزمة بحث [كلمة]  البحث في فهرس السجل
+    python arabi.py حزمة تحديث [اسم] تحديث إلى أحدث نسخة في السجل
     python arabi.py --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
     python arabi.py --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
     python arabi.py --نسخة | -v     عرض الإصدار
@@ -425,6 +565,8 @@ def main():
         install_package(args[1])
     elif first in ('--حزم', '--packages'):
         list_packages()
+    elif first in ('حزمة', 'packages-manage'):
+        package_cli(args[1:])
     elif first in ('--لغة', '--lsp'):
         # خادم اللغة: يتواصل عبر القنوات القياسية بلا أي مخرجات أخرى
         lsp_module.main()
