@@ -206,6 +206,14 @@
           "match": "(?<![\\u0600-\\u06FF\\w])(عالمي|احذف)(?![\\u0600-\\u06FF\\w])"
         },
         {
+          "name": "keyword.control.generator.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])أنتج(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.other.decorator.arabi",
+          "match": "(?<=^[ \\t]*)@[\\u0600-\\u06FF][\\u0600-\\u06FF\\w.]*"
+        },
+        {
           "name": "keyword.operator.assert.arabi",
           "match": "(?<![\\u0600-\\u06FF\\w])تحقق(?![\\u0600-\\u06FF\\w])"
         },

@@ -68,14 +68,25 @@ class For(Node):
 
 
 class FuncDef(Node):
-    def __init__(self, name, params, body, line=None):
+    def __init__(self, name, params, body, line=None, decorators=None,
+                 is_generator=False):
         super().__init__(line)
         self.name = name
         self.params = params      # [(الاسم، تعبير الافتراضي أو None)، ...]
         self.body = body
+        self.decorators = decorators or []   # [تعبير، ...] بترتيب الكتابة
+        self.is_generator = is_generator     # صح إذا يحوي 'أنتج'
 
 
 class Return(Node):
+    def __init__(self, value, line=None):
+        super().__init__(line)
+        self.value = value          # تعبير أو None
+
+
+class Yield(Node):
+    """جملة أنتج — تُنتج قيمة من مولد وتوقف التنفيذ حتى الطلب التالي."""
+
     def __init__(self, value, line=None):
         super().__init__(line)
         self.value = value          # تعبير أو None
@@ -125,12 +136,12 @@ class Import(Node):
 
 
 class ClassDef(Node):
-    """تعريف صنف: صنف الاسم من الأصل: ..."""
+    """تعريف صنف: صنف الاسم من أصل₁، أصل₂: ... (وراثة متعددة مسموحة)."""
 
     def __init__(self, name, superclass, body, line=None):
         super().__init__(line)
         self.name = name
-        self.superclass = superclass      # اسم الصنف الأصل أو None
+        self.superclass = superclass      # اسم أو قائمة أسماء أو None
         self.body = body                  # [FuncDef | Assign]
 
 

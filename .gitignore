@@ -8,3 +8,8 @@ venv/
 .vscode/
 *.log
 .DS_Store
+
+# ملفات مولّدة من الأمثلة
+examples/مكتبة_مؤقتة.db
+examples/الكتب.csv
+*.db

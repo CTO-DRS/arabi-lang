@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """طبقة التشغيل: البيئات، القيم، الدوال الجاهزة، الوحدات، وطرق الأنواع."""
 
+import base64
+import csv
+import hashlib
 import http.server
+import io
 import json
 import math
 import os
+import queue
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -100,16 +106,19 @@ class ArabiFunc:
 
     params قائمة أزواج (الاسم، القيمة الافتراضية أو NO_DEFAULT) —
     تُقيّم الافتراضات مرة واحدة عند التعريف (كما في بايثون).
+    is_generator صح إذا يحوي الجسم 'أنتج' — استدعاؤها يعيد مولدًا.
     """
 
-    __slots__ = ('name', 'params', 'body', 'env', 'is_lambda')
+    __slots__ = ('name', 'params', 'body', 'env', 'is_lambda', 'is_generator')
 
-    def __init__(self, name, params, body, env, is_lambda=False):
+    def __init__(self, name, params, body, env, is_lambda=False,
+                 is_generator=False):
         self.name = name
         self.params = params
         self.body = body
         self.env = env
         self.is_lambda = is_lambda
+        self.is_generator = is_generator
 
 
 class BuiltinFunc:
@@ -143,15 +152,17 @@ class ClassValue:
     """صنف معرّف من قبل المستخدم — قالب لإنشاء الكائنات.
 
     members يجمع الطرق (ArabiFunc) وثوابت الصنف.
+    mro ترتيب حل الطرق (C3) — قائمة تبدأ بالصنف نفسه، أو None للصنف بلا أصول.
     """
 
-    __slots__ = ('name', 'superclass', 'members', 'env')
+    __slots__ = ('name', 'superclass', 'members', 'env', 'mro')
 
-    def __init__(self, name, superclass, members, env):
+    def __init__(self, name, superclass, members, env, mro=None):
         self.name = name
         self.superclass = superclass      # ClassValue أو None
         self.members = members
         self.env = env
+        self.mro = mro
 
 
 class InstanceValue:
@@ -226,6 +237,146 @@ class EnumValue:
         self.members = members          # {الاسم: EnumMember}
 
 
+# سياق خيوط المولدات: كل خيط عامل يرى مولده فقط
+_gen_tls = threading.local()
+
+
+class GeneratorClose(Exception):
+    """إشارة داخلية لإغلاق مولد قبل انتهائه (كسر خارج حلقة 'لكل')."""
+
+
+class GeneratorValue:
+    """مولد — كائن ينتج قيمًا تباعًا عبر جملة 'أنتج' داخل دالة.
+
+    التنفيذ: خيط عامل يشغل جسم الدالة، وكل 'أنتج' تسلم القيمة
+    للمستهلك وتنتظر إشارة الاستئناف (مصافحة تضمن التنفيذ التسلسلي).
+    """
+
+    __slots__ = ('interp', 'func', 'env', '_queue', '_gate', '_thread',
+                 '_started', '_done', '_error')
+
+    def __init__(self, interp, func, env):
+        self.interp = interp
+        self.func = func
+        self.env = env
+        self._queue = queue.Queue()     # من العامل إلى المستهلك
+        self._gate = queue.Queue()      # إشارات الاستئناف والإغلاق
+        self._thread = None
+        self._started = False
+        self._done = False
+        self._error = None
+
+    # ---------- تشغيل خيط العامل ----------
+
+    def _worker(self):
+        from .interpreter import ReturnSignal, BreakSignal, ContinueSignal
+        _gen_tls.gen = self
+        try:
+            self.interp.exec_statements(self.func.body, self.env)
+        except ReturnSignal:
+            self._queue.put(('نهاية', None))
+        except GeneratorClose:
+            pass                        # إغلاق مبكر — المستهلك بدأه
+        except BreakSignal:
+            self._queue.put(('خطأ', ArabiRuntimeError(
+                "جملة 'كسر' استُخدمت خارج حلقة")))
+        except ContinueSignal:
+            self._queue.put(('خطأ', ArabiRuntimeError(
+                "جملة 'استمر' استُخدمت خارج حلقة")))
+        except ArabiError as exc:
+            self._queue.put(('خطأ', exc))
+        except Exception as exc:        # شبكة أمان — لا يموت الخيط بصمت
+            self._queue.put(('خطأ', ArabiRuntimeError(f'خطأ داخلي: {exc}')))
+        else:
+            self._queue.put(('نهاية', None))
+        finally:
+            _gen_tls.gen = None
+
+    def _start(self):
+        self._started = True
+        self._thread = threading.Thread(
+            target=self._worker, daemon=True,
+            name=f'مولد-{self.func.name}')
+        self._thread.start()
+
+    # ---------- الواجهة ----------
+
+    def next(self, line=None):
+        """القيمة التالية — يرفع خطأ عربي عند النهاية أو عند خطأ داخلي."""
+        if self._error is not None:
+            raise ArabiRuntimeError(self._error.message, line)
+        if not self._started:
+            self._start()
+        elif self._done:
+            raise ArabiRuntimeError('انتهى المولد — لا مزيد من القيم', line)
+        else:
+            self._gate.put('تابع')      # استئناف العامل لطلب القيمة التالية
+        kind, value = self._queue.get()
+        if kind == 'قيمة':
+            return value
+        self._done = True
+        if kind == 'خطأ':
+            self._error = value
+            raise ArabiRuntimeError(value.message, line)
+        raise ArabiRuntimeError('انتهى المولد — لا مزيد من القيم', line)
+
+    def _next_pair(self):
+        """يعيد (صح، القيمة) أو (خطأ، ولا شيء) عند النهاية الطبيعية.
+
+        يرفع الخطأ الحقيقي إذا فشل جسم المولد — للاستخدام الداخلي.
+        """
+        try:
+            return True, self.next()
+        except ArabiRuntimeError as exc:
+            if self._done and self._error is None:
+                return False, None
+            raise
+
+    def _emit(self, value, line=None):
+        """يستقبل قيمة من exec_Yield ويسلمها للمستهلك ثم ينتظر الاستئناف."""
+        self._queue.put(('قيمة', value))
+        cmd = self._gate.get()
+        if cmd == 'أغلق':
+            raise GeneratorClose()
+
+    def close(self):
+        """يغلق المولد مبكرًا وينتظر انتهاء خيط العامل."""
+        if self._done or not self._started:
+            self._done = True
+            return
+        self._gate.put('أغلق')
+        self._thread.join(timeout=5)
+        self._done = True
+
+
+class DBValue:
+    """اتصال قاعدة بيانات SQLite مفتوح من وحدة 'قاعدة'."""
+
+    __slots__ = ('conn', 'name')
+
+    def __init__(self, conn, name):
+        self.conn = conn
+        self.name = name
+
+
+class SuperValue:
+    """الأصل داخل طريقة — يربط صنف الأصل بالكائن الحالي.
+
+    استدعاء الأصل.طريقة(وسائط) ينفذ طريقة الأصل مرتبطة بالكائن تلقائيًا
+    (والنمط القديم الأصل.طريقة(هذا، وسائط) ما زال يعمل).
+    """
+
+    __slots__ = ('cls', 'instance')
+
+    def __init__(self, cls, instance):
+        self.cls = cls
+        self.instance = instance
+
+
+DB_METHODS = {}       # تُملأ بعد تعريف دوال قاعدة البيانات
+GENERATOR_METHODS = {}  # تُملأ بعد تعريف طرق المولدات
+
+
 def typename(v):
     if v is None:
         return 'ولا شيء'
@@ -257,6 +408,12 @@ def typename(v):
         return 'تعداد'
     if isinstance(v, EnumMember):
         return 'عضو تعداد'
+    if isinstance(v, GeneratorValue):
+        return 'مولد'
+    if isinstance(v, DBValue):
+        return 'قاعدة بيانات'
+    if isinstance(v, SuperValue):
+        return 'الأصل'
     return type(v).__name__
 
 
@@ -293,6 +450,12 @@ def display(v):
         return f'<تعداد {v.name}>'
     if isinstance(v, EnumMember):
         return f'{v.enum_name}.{v.name}'
+    if isinstance(v, GeneratorValue):
+        return f'<مولد {v.func.name}>'
+    if isinstance(v, DBValue):
+        return f'<قاعدة بيانات {v.name}>'
+    if isinstance(v, SuperValue):
+        return f'<الأصل {v.cls.name}>'
     return str(v)
 
 
@@ -634,6 +797,9 @@ def _bi_list(args, line):
         return list(v)
     if isinstance(v, dict):
         return list(v.keys())
+    if isinstance(v, GeneratorValue):
+        # استهلاك المولد بالكامل إلى قائمة
+        return _drain_generator(v)
     raise ArabiRuntimeError(f'لا يمكن تحويل {typename(v)} إلى قائمة', line)
 
 
@@ -853,6 +1019,31 @@ def install_builtins(env):
         'كلمات': BuiltinFunc('كلمات', _conv_words),
     }))
 
+    # ============ وحدات الإصدار 1.7 ============
+
+    env.define('قاعدة', ModuleValue('قاعدة', {
+        'افتح': BuiltinFunc('افتح', _db_open),
+        'نفذ': BuiltinFunc('نفذ', _db_execute),
+        'استعلم': BuiltinFunc('استعلم', _db_query),
+        'أعمدة': BuiltinFunc('أعمدة', _db_columns),
+        'أغلق': BuiltinFunc('أغلق', _db_close),
+    }))
+
+    env.define('ترميز', ModuleValue('ترميز', {
+        'شفّر64': BuiltinFunc('شفّر64', _enc_b64encode),
+        'فك64': BuiltinFunc('فك64', _enc_b64decode),
+        'هش256': BuiltinFunc('هش256', _enc_hash('sha256', 'هش256')),
+        'هش1': BuiltinFunc('هش1', _enc_hash('sha1', 'هش1')),
+        'ام_دي_5': BuiltinFunc('ام_دي_5', _enc_hash('md5', 'ام_دي_5')),
+    }))
+
+    env.define('جداول', ModuleValue('جداول', {
+        'اقرأ': BuiltinFunc('اقرأ', _csv_read),
+        'اكتب': BuiltinFunc('اكتب', _csv_write),
+        'حلل': BuiltinFunc('حلل', _csv_parse),
+        'نص': BuiltinFunc('نص', _csv_text),
+    }))
+
     # ============ إطار الاختبارات (الإصدار 1.6) ============
 
     _tests = _TestState()
@@ -947,13 +1138,29 @@ def _callable(value, name, line):
     return value
 
 
+def _drain_generator(gen, line=None):
+    """يستهلك مولدًا بالكامل ويغلق نهائيًا — لتحويله لقائمة."""
+    out = []
+    try:
+        while True:
+            has, item = gen._next_pair()
+            if not has:
+                break
+            out.append(item)
+    finally:
+        gen.close()
+    return out
+
+
 def _iterable(value, name, line):
     if isinstance(value, (list, range)):
         return list(value)
     if isinstance(value, str):
         return list(value)
+    if isinstance(value, GeneratorValue):
+        return _drain_generator(value)
     raise ArabiRuntimeError(
-        f"'{name}' تحتاج قائمة أو نصًا أو مدى لكن استلمت {typename(value)}", line)
+        f"'{name}' تحتاج قائمة أو نصًا أو مدى أو مولدًا لكن استلمت {typename(value)}", line)
 
 
 def _hi_map(interp, args, line):
@@ -1004,9 +1211,13 @@ def _bi_choose(args, line):
     if len(args) != 1:
         raise ArabiRuntimeError("'اختر' تتوقع معاملًا واحدًا", line)
     if not isinstance(args[0], (list, range, str)):
-        raise ArabiRuntimeError(
-            f"'اختر' تحتاج قائمة أو نصًا أو مدى لكن استلمت {typename(args[0])}", line)
-    items = list(args[0])
+        if isinstance(args[0], GeneratorValue):
+            items = _drain_generator(args[0])
+        else:
+            raise ArabiRuntimeError(
+                f"'اختر' تحتاج قائمة أو نصًا أو مدى أو مولدًا لكن استلمت {typename(args[0])}", line)
+    else:
+        items = list(args[0])
     if not items:
         raise ArabiRuntimeError("'اختر' لا تقبل تسلسلًا فارغًا", line)
     return random.choice(items)
@@ -1682,6 +1893,297 @@ def _conv_words(args, line):
         raise ArabiRuntimeError(
             f"'كلمات' تتوقع معاملًا واحدًا لكنها استلمت {len(args)}", line)
     return tafqit(args[0], line)
+
+
+# ================== وحدة قاعدة (SQLite) — الإصدار 1.7 ==================
+
+def _db_open(args, line):
+    """افتح(مسار؟) — يفتح قاعدة SQLite ويعيد اتصالًا.
+
+    بدون معاملات تُنشأ قاعدة في الذاكرة تختفي عند انتهاء البرنامج.
+    """
+    if len(args) > 1:
+        raise ArabiRuntimeError(
+            f"'افتح' تقبل معاملًا واحدًا على الأكثر (مسار الملف) لكنها "
+            f"استلمت {len(args)}", line)
+    if args:
+        path = _path_str(args[0], 'افتح', line)
+        name = os.path.basename(path)
+    else:
+        path = ':memory:'
+        name = 'في الذاكرة'
+    try:
+        # isolation_level=None → تنفيذ تلقائي (لا حاجة لأمر 'احفظ')
+        conn = sqlite3.connect(path, isolation_level=None)
+    except sqlite3.Error as exc:
+        raise ArabiRuntimeError(f"تعذر فتح قاعدة البيانات '{path}': {exc}", line)
+    return DBValue(conn, name)
+
+
+def _db_check(db, line):
+    if not isinstance(db, DBValue):
+        raise ArabiRuntimeError(
+            f"العملية تحتاج اتصال قاعدة بيانات لكن استلمت {typename(db)}", line)
+    return db
+
+
+def _db_sql(value, name, line):
+    if not isinstance(value, str) or not value.strip():
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج استعلامًا نصيًا غير فارغ", line)
+    return value
+
+
+def _db_params(args, name, line):
+    """معاملات الاستعلام الاختيارية — قائمة قيم بسيطة."""
+    if not args:
+        return ()
+    if not isinstance(args[0], (list, tuple)):
+        raise ArabiRuntimeError(
+            f"معاملات '{name}' يجب أن تكون قائمة قيم لكنها "
+            f"{typename(args[0])}", line)
+    for x in args[0]:
+        if isinstance(x, (list, dict, DBValue, GeneratorValue)):
+            raise ArabiRuntimeError(
+                f"معاملات الاستعلام يجب أن تكون قيمًا بسيطة "
+                f'(أعداد ونصوص) لكن وجدت {typename(x)}', line)
+    return tuple(args[0])
+
+
+def _db_execute(args, line):
+    """نفذ(اتصال، استعلام، معاملات؟) — ينفذ أمرًا ويعيد عدد الصفوف المتأثرة."""
+    if not 2 <= len(args) <= 3:
+        raise ArabiRuntimeError(
+            f"'نفذ' تحتاج اتصالًا واستعلامًا (ومعاملات اختياريًا) "
+            f"لكنها استلمت {len(args)}", line)
+    db = _db_check(args[0], line)
+    sql = _db_sql(args[1], 'نفذ', line)
+    params = _db_params(args[2:], 'نفذ', line)
+    try:
+        cur = db.conn.execute(sql, params)
+        return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+    except sqlite3.Error as exc:
+        raise ArabiRuntimeError(f'خطأ في قاعدة البيانات: {exc}', line)
+
+
+def _db_query(args, line):
+    """استعلم(اتصال، استعلام، معاملات؟) — يعيد صفوف النتائج قوائم."""
+    if not 2 <= len(args) <= 3:
+        raise ArabiRuntimeError(
+            f"'استعلم' تحتاج اتصالًا واستعلامًا (ومعاملات اختياريًا) "
+            f"لكنها استلمت {len(args)}", line)
+    db = _db_check(args[0], line)
+    sql = _db_sql(args[1], 'استعلم', line)
+    params = _db_params(args[2:], 'استعلم', line)
+    try:
+        cur = db.conn.execute(sql, params)
+        return [list(row) for row in cur.fetchall()]
+    except sqlite3.Error as exc:
+        raise ArabiRuntimeError(f'خطأ في قاعدة البيانات: {exc}', line)
+
+
+def _db_columns(args, line):
+    """أعمدة(اتصال، استعلام، معاملات؟) — يعيد أسماء أعمدة النتائج."""
+    if not 2 <= len(args) <= 3:
+        raise ArabiRuntimeError(
+            f"'أعمدة' تحتاج اتصالًا واستعلامًا (ومعاملات اختياريًا) "
+            f"لكنها استلمت {len(args)}", line)
+    db = _db_check(args[0], line)
+    sql = _db_sql(args[1], 'أعمدة', line)
+    params = _db_params(args[2:], 'أعمدة', line)
+    try:
+        cur = db.conn.execute(sql, params)
+        cur.fetchall()
+        return [d[0] for d in cur.description or []]
+    except sqlite3.Error as exc:
+        raise ArabiRuntimeError(f'خطأ في قاعدة البيانات: {exc}', line)
+
+
+def _db_close(args, line):
+    """أغلق(اتصال) — يغلق الاتصال ويحرر الملف."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'أغلق' تحتاج اتصال قاعدة بيانات لكنها استلمت {len(args)}", line)
+    db = _db_check(args[0], line)
+    try:
+        db.conn.close()
+    except sqlite3.Error as exc:
+        raise ArabiRuntimeError(f'تعذر إغلاق قاعدة البيانات: {exc}', line)
+    return None
+
+
+DB_METHODS.update({
+    'نفذ': lambda db, args, line: _db_execute([db] + args, line),
+    'استعلم': lambda db, args, line: _db_query([db] + args, line),
+    'أعمدة': lambda db, args, line: _db_columns([db] + args, line),
+    'أغلق': lambda db, args, line: _db_close([db], line),
+})
+
+
+def _gen_next(obj, args, line):
+    """التالي() — القيمة التالية من المولد أو خطأ عند النهاية."""
+    _require_args('التالي', args, 0, 0, line)
+    return obj.next(line)
+
+
+def _gen_close(obj, args, line):
+    """أغلق() — يغلق المولد مبكرًا (ينفذ كتل 'اخيرا' في جسمه)."""
+    _require_args('أغلق', args, 0, 0, line)
+    obj.close()
+    return None
+
+
+GENERATOR_METHODS.update({
+    'التالي': _gen_next,
+    'أغلق': _gen_close,
+})
+
+
+# ================== وحدة ترميز (base64 والبصمات) — الإصدار 1.7 ==================
+
+def _enc_text(value, name, line):
+    if not isinstance(value, str):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج نصًا لكن استلمت {typename(value)}", line)
+    return value
+
+
+def _enc_b64encode(args, line):
+    """شفّر64(نص) — يرمز النص بـ Base64 ويعيد نصًا."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'شفّر64' تحتاج نصًا واحدًا لكنها استلمت {len(args)}", line)
+    text = _enc_text(args[0], 'شفّر64', line)
+    return base64.b64encode(text.encode('utf-8')).decode('ascii')
+
+
+def _enc_b64decode(args, line):
+    """فك64(نص) — يفك ترميز Base64 ويعيد النص الأصلي."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'فك64' تحتاج نصًا واحدًا لكنها استلمت {len(args)}", line)
+    text = _enc_text(args[0], 'فك64', line)
+    try:
+        return base64.b64decode(text, validate=True).decode('utf-8')
+    except (base64.binascii.Error, ValueError):
+        raise ArabiRuntimeError(f"النص '{text}' ليس ترميز Base64 صالحًا", line)
+    except UnicodeDecodeError:
+        raise ArabiRuntimeError(
+            'محتوى Base64 ليس نصًا عربيًا/UTF-8 صالحًا', line)
+
+
+def _enc_hash(algorithm, label):
+    def fn(args, line):
+        if len(args) != 1:
+            raise ArabiRuntimeError(
+                f"'{label}' تحتاج نصًا واحدًا لكنها استلمت {len(args)}", line)
+        text = _enc_text(args[0], label, line)
+        return hashlib.new(algorithm, text.encode('utf-8')).hexdigest()
+    return fn
+
+
+# ================== وحدة جداول (CSV) — الإصدار 1.7 ==================
+
+def _csv_delim(args, index, line):
+    """فاصل اختياري — حرف واحد (الافتراضي الفاصلة الغربية)."""
+    if len(args) <= index:
+        return ','
+    delim = args[index]
+    if not isinstance(delim, str) or len(delim) != 1:
+        raise ArabiRuntimeError(
+            "الفاصل يجب أن يكون حرفًا واحدًا مثل ',' أو '؛'", line)
+    return delim
+
+
+def _csv_rows(value, name, line):
+    """يتأكد أن القيمة قائمة صفوف (قوائم)."""
+    if not isinstance(value, list):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج قائمة صفوف لكن استلمت {typename(value)}", line)
+    for i, row in enumerate(value, 1):
+        if not isinstance(row, list):
+            raise ArabiRuntimeError(
+                f"الصف رقم {i} ليس قائمة — كل صف قائمة خلايا", line)
+        for j, cell in enumerate(row):
+            if isinstance(cell, (list, dict)):
+                raise ArabiRuntimeError(
+                    f"الخلية ({i}، {j + 1}) من نوع {typename(cell)} — "
+                    'الخلايا تكون أعدادًا أو نصوصًا أو صح/خطأ', line)
+    return value
+
+
+def _csv_cell_text(cell):
+    if cell is None:
+        return ''
+    if isinstance(cell, bool):
+        return 'صح' if cell else 'خطأ'
+    return display(cell)
+
+
+def _csv_read(args, line):
+    """اقرأ(مسار، فاصل؟) — يعيد صفوف الملف قوائم نصوص."""
+    if not 1 <= len(args) <= 2:
+        raise ArabiRuntimeError(
+            f"'اقرأ' تحتاج مسارًا (وفاصلًا اختياريًا) لكنها استلمت {len(args)}", line)
+    path = _path_str(args[0], 'اقرأ', line)
+    delim = _csv_delim(args, 1, line)
+    try:
+        with open(path, encoding='utf-8', newline='') as f:
+            return [list(row) for row in csv.reader(f, delimiter=delim)]
+    except FileNotFoundError:
+        raise ArabiRuntimeError(f"الملف '{path}' غير موجود", line)
+    except UnicodeDecodeError:
+        raise ArabiRuntimeError(f"الملف '{path}' يجب أن يكون بترميز UTF-8", line)
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن قراءة الملف '{path}': {exc}", line)
+    except csv.Error as exc:
+        raise ArabiRuntimeError(f"ملف CSV غير صالح '{path}': {exc}", line)
+
+
+def _csv_write(args, line):
+    """اكتب(مسار، صفوف، فاصل؟) — يكتب صفوف القوائم في ملف CSV."""
+    if not 2 <= len(args) <= 3:
+        raise ArabiRuntimeError(
+            f"'اكتب' تحتاج مسارًا وقائمة صفوف (وفاصلًا اختياريًا) "
+            f"لكنها استلمت {len(args)}", line)
+    path = _path_str(args[0], 'اكتب', line)
+    rows = _csv_rows(args[1], 'اكتب', line)
+    delim = _csv_delim(args, 2, line)
+    try:
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f, delimiter=delim)
+            for row in rows:
+                writer.writerow([_csv_cell_text(c) for c in row])
+        return None
+    except OSError as exc:
+        raise ArabiRuntimeError(f"لا يمكن كتابة الملف '{path}': {exc}", line)
+
+
+def _csv_parse(args, line):
+    """حلل(نص، فاصل؟) — يحلل نص CSV ويعيد صفوفه."""
+    if not 1 <= len(args) <= 2:
+        raise ArabiRuntimeError(
+            f"'حلل' تحتاج نصًا (وفاصلًا اختياريًا) لكنها استلمت {len(args)}", line)
+    text = _enc_text(args[0], 'حلل', line)
+    delim = _csv_delim(args, 1, line)
+    try:
+        return [list(row) for row in csv.reader(text.splitlines(), delimiter=delim)]
+    except csv.Error as exc:
+        raise ArabiRuntimeError(f'نص CSV غير صالح: {exc}', line)
+
+
+def _csv_text(args, line):
+    """نص(صفوف، فاصل؟) — يحول صفوف القوائم إلى نص CSV."""
+    if not 1 <= len(args) <= 2:
+        raise ArabiRuntimeError(
+            f"'نص' تحتاج قائمة صفوف (وفاصلًا اختياريًا) لكنها استلمت {len(args)}", line)
+    rows = _csv_rows(args[0], 'نص', line)
+    delim = _csv_delim(args, 1, line)
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter=delim, lineterminator='\n')
+    for row in rows:
+        writer.writerow([_csv_cell_text(c) for c in row])
+    return out.getvalue()
 
 
 # ================== وحدة اختبارات (إطار الاختبارات) ==================

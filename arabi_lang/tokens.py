@@ -50,6 +50,9 @@ class T(Enum):
     ASSERT = auto()    # تحقق
     DELETE = auto()    # احذف
 
+    # ---- كلمات الإصدار 1.7 ----
+    YIELD = auto()     # أنتج (المولدات)
+
     # ---- معاملات ----
     PLUS = auto()          # +
     MINUS = auto()         # -
@@ -77,6 +80,7 @@ class T(Enum):
     COMMA = auto()         # , أو ،
     COLON = auto()         # :
     DOT = auto()           # .
+    AT = auto()            # @
 
     # ---- بنيوية ----
     NEWLINE = auto()

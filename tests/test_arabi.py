@@ -73,7 +73,8 @@ class TestLexer(unittest.TestCase):
         expect_error('أ = "غير مغلق', LexerError, 'نص غير مغلق')
 
     def test_unknown_symbol(self):
-        expect_error('أ = ٣ @ ٤', LexerError, 'رمز غير معروف')
+        # @ أصبح عامل المزخرفات منذ الإصدار 1.7 — نستخدم رمزًا غير معروف فعلاً
+        expect_error('أ = ٣ & ٤', LexerError, 'رمز غير معروف')
 
     def test_inconsistent_indent(self):
         src = 'لو صح:\n    أ = ١\n   ب = ٢\n'
@@ -2657,5 +2658,721 @@ class TestMultilineFString(unittest.TestCase):
         self.assertEqual(print_tok.line, 3)
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+# ================== المولدات ==================
+
+class TestGenerators(unittest.TestCase):
+    """جملة 'أنتج' وقيم المولدات."""
+
+    def test_yield_keyword_token(self):
+        toks = Lexer('أنتج ١').tokenize()
+        self.assertEqual(toks[0].type, T.YIELD)
+
+    def test_basic_generator_for_loop(self):
+        out = run_arabi(
+            'دالة اثنان():\n'
+            '    أنتج 10\n'
+            '    أنتج 20\n'
+            'لكل ق في اثنان():\n'
+            '    اطبع(ق)\n')
+        self.assertEqual(out, '10\n20\n')
+
+    def test_generator_fibonacci(self):
+        out = run_arabi(
+            'دالة فيبوناتشي(الحد):\n'
+            '    أ = 0\n'
+            '    ب = 1\n'
+            '    لكل س في مدى(الحد):\n'
+            '        أنتج أ\n'
+            '        أ، ب = ب، أ + ب\n'
+            'م = قائمة(فيبوناتشي(8))\n'
+            'اطبع(م)\n')
+        self.assertEqual(out, '[0، 1، 1، 2، 3، 5، 8، 13]\n')
+
+    def test_list_consumes_generator(self):
+        out = run_arabi(
+            'دالة أعداد():\n'
+            '    لكل س في مدى(4):\n'
+            '        أنتج س * 10\n'
+            'اطبع(قائمة(أعداد()))\n')
+        self.assertEqual(out, '[0، 10، 20، 30]\n')
+
+    def test_list_empty_generator(self):
+        out = run_arabi(
+            'دالة فارغ():\n'
+            '    لو خطأ:\n'
+            '        أنتج 1\n'
+            'اطبع(قائمة(فارغ()))\n')
+        self.assertEqual(out, '[]\n')
+
+    def test_break_closes_generator(self):
+        out = run_arabi(
+            'دالة أعداد():\n'
+            '    لكل س في مدى(100):\n'
+            '        أنتج س\n'
+            'المجموع = 0\n'
+            'لكل ن في أعداد():\n'
+            '    لو ن > 4:\n'
+            '        كسر\n'
+            '    المجموع += ن\n'
+            'اطبع(المجموع)\n')
+        self.assertEqual(out, '10\n')
+
+    def test_generator_with_return_stops(self):
+        out = run_arabi(
+            'دالة حتى_ثلاثة():\n'
+            '    أنتج 1\n'
+            '    أنتج 2\n'
+            '    أعد\n'
+            '    أنتج 99\n'
+            'اطبع(قائمة(حتى_ثلاثة()))\n')
+        self.assertEqual(out, '[1، 2]\n')
+
+    def test_next_method(self):
+        out = run_arabi(
+            'دالة اثنان():\n'
+            '    أنتج "أ"\n'
+            '    أنتج "ب"\n'
+            'م = اثنان()\n'
+            'اطبع(م.التالي())\n'
+            'اطبع(م.التالي())\n')
+        self.assertEqual(out, 'أ\nب\n')
+
+    def test_next_at_end_raises(self):
+        expect_error(
+            'دالة واحد():\n'
+            '    أنتج 1\n'
+            'م = واحد()\n'
+            'م.التالي()\n'
+            'م.التالي()\n',
+            ArabiRuntimeError, 'انتهى المولد')
+
+    def test_generator_type_and_display(self):
+        out = run_arabi(
+            'دالة م():\n'
+            '    أنتج 1\n'
+            'اطبع(نوع(م()))\n'
+            'اطبع(نص(م()))\n')
+        self.assertEqual(out, 'مولد\n<مولد م>\n')
+
+    def test_generator_is_lazy(self):
+        # المولد لا ينفذ شيئًا قبل أول طلب — لا طباعة حتى التالي
+        out = run_arabi(
+            'دالة كسول():\n'
+            '    اطبع("بدأ")\n'
+            '    أنتج 1\n'
+            'م = كسول()\n'
+            'اطبع("بعد الإنشاء")\n'
+            'م.التالي()\n')
+        self.assertEqual(out, 'بعد الإنشاء\nبدأ\n')
+
+    def test_generator_in_class(self):
+        out = run_arabi(
+            'صنف عدّاد:\n'
+            '    دالة إنشاء(النهاية):\n'
+            '        هذا.النهاية = النهاية\n'
+            '    دالة اعد():\n'
+            '        لكل س في مدى(هذا.النهاية):\n'
+            '            أنتج س\n'
+            'ع = عدّاد(3)\n'
+            'لكل قيمة في ع.اعد():\n'
+            '    اطبع(قيمة)\n')
+        self.assertEqual(out, '0\n1\n2\n')
+
+    def test_generator_error_propagates(self):
+        expect_error(
+            'دالة معطوبة():\n'
+            '    أنتج 1\n'
+            '    ارفع("عطل داخل المولد")\n'
+            'لكل ق في معطوبة():\n'
+            '    اطبع(ق)\n',
+            ArabiRuntimeError, 'عطل داخل المولد')
+
+    def test_generator_error_caught_in_try(self):
+        out = run_arabi(
+            'دالة معطوبة():\n'
+            '    أنتج 1\n'
+            '    ارفع("عطل")\n'
+            'جرب:\n'
+            '    لكل ق في معطوبة():\n'
+            '        اطبع(ق)\n'
+            'باستثناء هـ:\n'
+            '    اطبع("أُمسك")\n')
+        self.assertEqual(out, '1\nأُمسك\n')
+
+    def test_yield_outside_function(self):
+        expect_error('أنتج 5\n', ArabiRuntimeError, 'أنتج')
+
+    def test_bare_yield(self):
+        out = run_arabi(
+            'دالة فارغة():\n'
+            '    أنتج\n'
+            '    أنتج 5\n'
+            'لكل ق في فارغة():\n'
+            '    اطبع(ق)\n')
+        self.assertEqual(out, 'ولا شيء\n5\n')
+
+    def test_generator_with_finally(self):
+        out = run_arabi(
+            'دالة م():\n'
+            '    جرب:\n'
+            '        أنتج 1\n'
+            '    اخيرا:\n'
+            '        اطبع("تغليق")\n'
+            'لكل ق في م():\n'
+            '    اطبع(ق)\n')
+        self.assertEqual(out, '1\nتغليق\n')
+
+    def test_nested_generator_function_not_outer(self):
+        # أنتج داخل دالة داخلية لا يجعل الخارجية مولدًا
+        out = run_arabi(
+            'دالة الخارجية():\n'
+            '    دالة الداخلية():\n'
+            '        أنتج 7\n'
+            '    أعد الداخلية\n'
+            'صانع = الخارجية()\n'
+            'اطبع(نوع(صانع))\n'
+            'اطبع(قائمة(صانع()))\n')
+        self.assertEqual(out, 'دالة\n[7]\n')
+
+    def test_generator_with_filter_map(self):
+        out = run_arabi(
+            'دالة أعداد():\n'
+            '    لكل س في مدى(10):\n'
+            '        أنتج س\n'
+            'زوجية = دالة(س) => س % 2 == 0\n'
+            'اطبع(مرشّح(زوجية، أعداد()))\n'
+            'اطبع(خريطة(دالة(س) => س * س، مرشّح(زوجية، أعداد())))\n')
+        self.assertEqual(out, '[0، 2، 4، 6، 8]\n[0، 4، 16، 36، 64]\n')
+
+    def test_generator_closure_captures(self):
+        out = run_arabi(
+            'دالة صانع(البداية):\n'
+            '    لكل س في مدى(3):\n'
+            '        أنتج البداية + س\n'
+            'اطبع(قائمة(صانع(100)))\n')
+        self.assertEqual(out, '[100، 101، 102]\n')
+
+
+# ================== المزخرفات ==================
+
+class TestDecorators(unittest.TestCase):
+    """علامة @ لتزيين الدوال."""
+
+    def test_at_token(self):
+        toks = Lexer('@مزخرف').tokenize()
+        self.assertEqual(toks[0].type, T.AT)
+
+    def test_basic_decorator(self):
+        out = run_arabi(
+            'دالة مضاعف(د):\n'
+            '    دالة داخلية(س):\n'
+            '        أعد د(س) * 2\n'
+            '    أعد داخلية\n'
+            '@مضاعف\n'
+            'دالة زد(س):\n'
+            '    أعد س + 1\n'
+            'اطبع(زد(5))\n')
+        self.assertEqual(out, '12\n')
+
+    def test_stacked_decorators_order(self):
+        # الأقرب للدالة يُطبق أولًا
+        out = run_arabi(
+            'دالة قوسان(د):\n'
+            '    دالة داخلية(نص):\n'
+            '        أعد "[" + د(نص) + "]"\n'
+            '    أعد داخلية\n'
+            'دالة نجمتان(د):\n'
+            '    دالة داخلية(نص):\n'
+            '        أعد "**" + د(نص) + "**"\n'
+            '    أعد داخلية\n'
+            '@قوسان\n'
+            '@نجمتان\n'
+            'دالة تحية(اسم):\n'
+            '    أعد "مرحبا"\n'
+            'اطبع(تحية(""))\n')
+        self.assertEqual(out, '[**مرحبا**]\n')
+
+    def test_decorator_with_call_expression(self):
+        out = run_arabi(
+            'دالة بتكرار(د):\n'
+            '    دالة داخلية(س):\n'
+            '        أعد د(س) + د(س)\n'
+            '    أعد داخلية\n'
+            '@بتكرار\n'
+            'دالة اسمي(س):\n'
+            '    أعد نص(س)\n'
+            'اطبع(اسمي(7))\n')
+        self.assertEqual(out, '77\n')
+
+    def test_decorator_logging_args(self):
+        out = run_arabi(
+            'دالة سجل(د):\n'
+            '    دالة داخلية(أ، ب):\n'
+            '        اطبع("قبل")\n'
+            '        نتيجة = د(أ، ب)\n'
+            '        اطبع("بعد")\n'
+            '        أعد نتيجة\n'
+            '    أعد داخلية\n'
+            '@سجل\n'
+            'دالة اجمع(أ، ب):\n'
+            '    أعد أ + ب\n'
+            'اطبع(اجمع(2، 3))\n')
+        self.assertEqual(out, 'قبل\nبعد\n5\n')
+
+    def test_decorator_caching_counter(self):
+        out = run_arabi(
+            'استدعاءات = 0\n'
+            'دالة عدّاد(د):\n'
+            '    دالة داخلية(س):\n'
+            '        عالمي استدعاءات\n'
+            '        استدعاءات += 1\n'
+            '        أعد د(س)\n'
+            '    أعد داخلية\n'
+            '@عدّاد\n'
+            'دالة تربيع(س):\n'
+            '    أعد س * س\n'
+            'تربيع(3)\n'
+            'تربيع(4)\n'
+            'اطبع(استدعاءات)\n')
+        self.assertEqual(out, '2\n')
+
+    def test_decorator_on_class_method(self):
+        out = run_arabi(
+            'دالة هادئ(د):\n'
+            '    دالة داخلية():\n'
+            '        أعد د() + "!"\n'
+            '    أعد داخلية\n'
+            'صنف مطرقة:\n'
+            '    دالة إنشاء(صوت):\n'
+            '        هذا.صوت = صوت\n'
+            '    @هادئ\n'
+            '    دالة اطرق():\n'
+            '        أعد هذا.صوت\n'
+            'م = مطرقة("طق")\n'
+            'اطبع(م.اطرق())\n')
+        self.assertEqual(out, 'طق!\n')
+
+    def test_decorator_must_return_callable(self):
+        expect_error(
+            'دالة سيئ(د):\n'
+            '    أعد 5\n'
+            '@سيئ\n'
+            'دالة م():\n'
+            '    أعد 1\n',
+            ArabiRuntimeError, 'المزخرف')
+
+    def test_decorator_requires_function(self):
+        expect_error(
+            '@متغير\n'
+            'أ = 5\n',
+            ParseError, 'المزخرف')
+
+    def test_undefined_decorator(self):
+        expect_error(
+            '@غير_موجود\n'
+            'دالة م():\n'
+            '    أعد 1\n',
+            ArabiRuntimeError, 'غير معرّف')
+
+
+# ================== الوراثة المتعددة ==================
+
+class TestMultipleInheritance(unittest.TestCase):
+    """صنف ابن من أصل₁، أصل₂ — مع MRO (ترتيب C3)."""
+
+    def test_two_parents_methods(self):
+        out = run_arabi(
+            'صنف طائر:\n'
+            '    دالة طِر():\n'
+            '        أعد "أطير"\n'
+            'صنف سباح:\n'
+            '    دالة اسبح():\n'
+            '        أعد "أسبح"\n'
+            'صنف بطريق من طائر، سباح:\n'
+            '    تجاهل\n'
+            'ك = بطريق()\n'
+            'اطبع(ك.طِر())\n'
+            'اطبع(ك.اسبح())\n')
+        self.assertEqual(out, 'أطير\nأسبح\n')
+
+    def test_method_resolution_order(self):
+        # الميراث يبدأ من الأصل الأول عند التعارض
+        out = run_arabi(
+            'صنف أ:\n'
+            '    دالة هوية():\n'
+            '        أعد "أ"\n'
+            'صنف ب:\n'
+            '    دالة هوية():\n'
+            '        أعد "ب"\n'
+            'صنف ج من أ، ب:\n'
+            '    تجاهل\n'
+            'اطبع(ج().هوية())\n')
+        self.assertEqual(out, 'أ\n')
+
+    def test_diamond_not_broken(self):
+        out = run_arabi(
+            'صنف أساس:\n'
+            '    دالة صوت():\n'
+            '        أعد "أساس"\n'
+            'صنف أ من أساس:\n'
+            '    تجاهل\n'
+            'صنف ب من أساس:\n'
+            '    دالة صوت():\n'
+            '        أعد "ب"\n'
+            'صنف ج من أ، ب:\n'
+            '    تجاهل\n'
+            'اطبع(ج().صوت())\n')
+        self.assertEqual(out, 'ب\n')
+
+    def test_first_parent_is_super(self):
+        out = run_arabi(
+            'صنف أ:\n'
+            '    دالة اسمي():\n'
+            '        أعد "أ"\n'
+            'صنف ب:\n'
+            '    دالة اسمي():\n'
+            '        أعد "ب"\n'
+            'صنف ج من أ، ب:\n'
+            '    دالة كاملة():\n'
+            '        أعد الأصل.اسمي(هذا)\n'
+            'اطبع(ج().كاملة())\n')
+        self.assertEqual(out, 'أ\n')
+
+    def test_constants_from_both_parents(self):
+        out = run_arabi(
+            'صنف أ:\n'
+            '    لون = "أحمر"\n'
+            'صنف ب:\n'
+            '    حجم = 10\n'
+            'صنف ج من أ، ب:\n'
+            '    تجاهل\n'
+            'اطبع(ج.لون + " " + نص(ج.حجم))\n')
+        self.assertEqual(out, 'أحمر 10\n')
+
+    def test_single_inheritance_still_works(self):
+        out = run_arabi(
+            'صنف أب:\n'
+            '    دالة تحية():\n'
+            '        أعد "مرحبا"\n'
+            'صنف ابن من أب:\n'
+            '    تجاهل\n'
+            'اطبع(ابن().تحية())\n')
+        self.assertEqual(out, 'مرحبا\n')
+
+    def test_circular_inheritance(self):
+        # إعادة تعريف الصنف بوراثة نفسه (النسخة القديمة موجودة)
+        expect_error(
+            'صنف س:\n'
+            '    تجاهل\n'
+            'صنف س من س:\n'
+            '    تجاهل\n',
+            ArabiRuntimeError, 'دائرية')
+
+    def test_parent_must_be_class(self):
+        expect_error(
+            'س = 5\n'
+            'صنف م من س:\n'
+            '    تجاهل\n',
+            ArabiRuntimeError, 'ليس صنفًا')
+
+    def test_parse_three_parents(self):
+        out = run_arabi(
+            'صنف أ:\n'
+            '    تجاهل\n'
+            'صنف ب:\n'
+            '    تجاهل\n'
+            'صنف ج:\n'
+            '    تجاهل\n'
+            'صنف د من أ، ب، ج:\n'
+            '    تجاهل\n'
+            'اطبع(نوع(د()))\n')
+        self.assertEqual(out, 'كائن\n')
+
+    def test_auto_super_binding(self):
+        # الأصل.طريقة() بلا هذا — ربط تلقائي من السياق (جديد 1.7)
+        out = run_arabi(
+            'صنف أ:\n'
+            '    دالة اسمي():\n'
+            '        أعد "أ"\n'
+            'صنف ب:\n'
+            '    تجاهل\n'
+            'صنف ج من أ، ب:\n'
+            '    دالة كاملة():\n'
+            '        أعد الأصل.اسمي()\n'
+            'اطبع(ج().كاملة())\n')
+        self.assertEqual(out, 'أ\n')
+
+    def test_auto_super_binding_with_args(self):
+        out = run_arabi(
+            'صنف شكل:\n'
+            '    دالة إنشاء(الاسم):\n'
+            '        هذا.الاسم = الاسم\n'
+            'صنف مربع من شكل:\n'
+            '    دالة إنشاء(الاسم، الطول):\n'
+            '        الأصل.إنشاء(الاسم)\n'
+            '        هذا.الطول = الطول\n'
+            'م = مربع("م1", 5)\n'
+            'اطبع(م.الاسم + " " + نص(م.الطول))\n')
+        self.assertEqual(out, 'م1 5\n')
+
+    def test_override_with_super_call(self):
+        out = run_arabi(
+            'صنف أ:\n'
+            '    دالة صوت():\n'
+            '        أعد "مواء"\n'
+            'صنف ب:\n'
+            '    تجاهل\n'
+            'صنف قط من أ، ب:\n'
+            '    دالة صوت():\n'
+            '        أعد الأصل.صوت(هذا) + " مياو"\n'
+            'اطبع(قط().صوت())\n')
+        self.assertEqual(out, 'مواء مياو\n')
+
+
+# ================== وحدة قاعدة ==================
+
+class TestDatabaseModule(unittest.TestCase):
+    """وحدة قاعدة — SQLite."""
+
+    def test_open_memory(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'اطبع(نوع(ق))\n'
+            'ق.أغلق()\n')
+        self.assertEqual(out, 'قاعدة بيانات\n')
+
+    def test_create_insert_query(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.نفذ("CREATE TABLE ن (الاسم TEXT, العمر INTEGER)")\n'
+            'ق.نفذ("INSERT INTO ن VALUES (?, ?)", ["سارة", 30])\n'
+            'صفوف = ق.استعلم("SELECT الاسم, العمر FROM ن")\n'
+            'اطبع(صفوف)\n'
+            'ق.أغلق()\n')
+        self.assertEqual(out, "[[سارة، 30]]\n")
+
+    def test_rowcount(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.نفذ("CREATE TABLE ن (س INTEGER)")\n'
+            'ن = ق.نفذ("INSERT INTO ن VALUES (?), (?), (?)", [1, 2, 3])\n'
+            'اطبع(ن)\n'
+            'ق.أغلق()\n')
+        self.assertEqual(out, '3\n')
+
+    def test_parameterized_query(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.نفذ("CREATE TABLE ن (س INTEGER)")\n'
+            'ق.نفذ("INSERT INTO ن VALUES (?)", [5])\n'
+            'ق.نفذ("INSERT INTO ن VALUES (?)", [9])\n'
+            'صفوف = ق.استعلم("SELECT س FROM ن WHERE س > ?", [6])\n'
+            'اطبع(صفوف)\n'
+            'ق.أغلق()\n')
+        self.assertEqual(out, '[[9]]\n')
+
+    def test_columns(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.نفذ("CREATE TABLE أصحاب (الاسم TEXT, العمر INTEGER)")\n'
+            'أعمدة = ق.أعمدة("SELECT * FROM أصحاب")\n'
+            'اطبع(أعمدة)\n'
+            'ق.أغلق()\n')
+        self.assertEqual(out, "[الاسم، العمر]\n")
+
+    def test_empty_query_returns_empty_list(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.نفذ("CREATE TABLE ن (س INTEGER)")\n'
+            'اطبع(ق.استعلم("SELECT س FROM ن"))\n'
+            'ق.أغلق()\n')
+        self.assertEqual(out, '[]\n')
+
+    def test_function_form(self):
+        out = run_arabi(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'قاعدة.نفذ(ق, "CREATE TABLE ن (س INTEGER)")\n'
+            'قاعدة.نفذ(ق, "INSERT INTO ن VALUES (?)", [7])\n'
+            'اطبع(قاعدة.استعلم(ق, "SELECT س FROM ن"))\n'
+            'قاعدة.أغلق(ق)\n')
+        self.assertEqual(out, '[[7]]\n')
+
+    def test_closed_connection_error(self):
+        expect_error(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.أغلق()\n'
+            'ق.استعلم("SELECT 1")\n',
+            ArabiRuntimeError, 'قاعدة البيانات')
+
+    def test_bad_sql_error(self):
+        expect_error(
+            'استورد قاعدة\n'
+            'ق = قاعدة.افتح()\n'
+            'ق.نفذ("SELECT * FROM غير_موجود")\n',
+            ArabiRuntimeError, 'قاعدة البيانات')
+
+    def test_needs_connection(self):
+        expect_error(
+            'استورد قاعدة\n'
+            'قاعدة.نفذ("CREATE TABLE ن (س INTEGER)")\n',
+            ArabiRuntimeError, 'اتصال')
+
+
+# ================== وحدة ترميز ==================
+
+class TestEncodingModule(unittest.TestCase):
+    """وحدة ترميز — Base64 والبصمات."""
+
+    def test_base64_roundtrip(self):
+        out = run_arabi(
+            'استورد ترميز\n'
+            'م = ترميز.شفّر64("مرحبا بالعالم")\n'
+            'اطبع(ترميز.فك64(م))\n')
+        self.assertEqual(out, 'مرحبا بالعالم\n')
+
+    def test_base64_known_value(self):
+        out = run_arabi(
+            'استورد ترميز\n'
+            'اطبع(ترميز.شفّر64("abc"))\n')
+        self.assertEqual(out, 'YWJj\n')
+
+    def test_base64_invalid(self):
+        expect_error(
+            'استورد ترميز\n'
+            'ترميز.فك64("!!!ليس ترميز!!!")\n',
+            ArabiRuntimeError, 'Base64')
+
+    def test_sha256_length_and_stability(self):
+        out = run_arabi(
+            'استورد ترميز\n'
+            'أ = ترميز.هش256("نص")\n'
+            'ب = ترميز.هش256("نص")\n'
+            'اطبع(طول(أ) == 64 و أ == ب)\n')
+        self.assertEqual(out, 'صح\n')
+
+    def test_sha256_known(self):
+        # بصمة "abc" القياسية
+        out = run_arabi(
+            'استورد ترميز\n'
+            'اطبع(ترميز.هش256("abc"))\n')
+        self.assertEqual(
+            out,
+            'ba7816bf8f01cfea414140de5dae2223'
+            'b00361a396177a9cb410ff61f20015ad\n')
+
+    def test_sha1_known(self):
+        out = run_arabi(
+            'استورد ترميز\n'
+            'اطبع(ترميز.هش1("abc"))\n')
+        self.assertEqual(
+            out, 'a9993e364706816aba3e25717850c26c9cd0d89d\n')
+
+    def test_md5_known(self):
+        out = run_arabi(
+            'استورد ترميز\n'
+            'اطبع(ترميز.ام_دي_5("abc"))\n')
+        self.assertEqual(out, '900150983cd24fb0d6963f7d28e17f72\n')
+
+    def test_different_hashes_for_different_text(self):
+        out = run_arabi(
+            'استورد ترميز\n'
+            'اطبع(ترميز.هش256("أ") != ترميز.هش256("ب"))\n')
+        self.assertEqual(out, 'صح\n')
+
+    def test_requires_text(self):
+        expect_error(
+            'استورد ترميز\n'
+            'ترميز.هش256(123)\n',
+            ArabiRuntimeError, 'نص')
+
+
+# ================== وحدة جداول ==================
+
+class TestCsvModule(unittest.TestCase):
+    """وحدة جداول — قراءة وكتابة CSV."""
+
+    def test_parse_basic(self):
+        out = run_arabi(
+            'استورد جداول\n'
+            'صفوف = جداول.حلل("الاسم,العمر\\nأحمد,25")\n'
+            'اطبع(صفوف)\n')
+        self.assertEqual(out, "[[الاسم، العمر]، [أحمد، 25]]\n")
+
+    def test_text_from_rows(self):
+        out = run_arabi(
+            'استورد جداول\n'
+            'ن = جداول.نص([["أ", "ب"], ["ج", 2]])\n'
+            'اطبع(ن)\n')
+        self.assertEqual(out, 'أ,ب\nج,2\n\n')
+
+    def test_roundtrip(self):
+        out = run_arabi(
+            'استورد جداول\n'
+            'نصي = جداول.نص([["الاسم", "العمر"], ["نورة", 22]])\n'
+            'صفوف = جداول.حلل(نصي)\n'
+            'اطبع(صفوف[1][0])\n'
+            'اطبع(صفوف[1][1])\n')
+        self.assertEqual(out, 'نورة\n22\n')
+
+    def test_custom_delimiter(self):
+        out = run_arabi(
+            'استورد جداول\n'
+            'صفوف = جداول.حلل("أ؛ب؛ج", "؛")\n'
+            'اطبع(صفوف)\n'
+            'ن = جداول.نص([["أ", "ب"]], "؛")\n'
+            'اطبع(ن)\n')
+        self.assertEqual(out, "[[أ، ب، ج]]\nأ؛ب\n\n")
+
+    def test_quoted_cell_with_comma(self):
+        out = run_arabi(
+            'استورد جداول\n'
+            'صفوف = جداول.حلل(\'"مرحبا، عالم",ثاني\')\n'
+            'اطبع(صفوف[0][0])\n'
+            'اطبع(طول(صفوف[0]))\n')
+        self.assertEqual(out, 'مرحبا، عالم\n2\n')
+
+    def test_bool_and_empty_cells(self):
+        out = run_arabi(
+            'استورد جداول\n'
+            'ن = جداول.نص([["س", "ف"], [صح, ولا شيء]])\n'
+            'اطبع(ن)\n')
+        self.assertEqual(out, 'س,ف\nصح,\n\n')
+
+    def test_file_write_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'بيانات.csv')
+            out = run_arabi(
+                'استورد جداول\n'
+                f"جداول.اكتب(\"{path}\", [[\"أ\", 1], [\"ب\", 2]])\n"
+                f'صفوف = جداول.اقرأ("{path}")\n'
+                'اطبع(صفوف)\n')
+            self.assertEqual(out, "[[أ، 1]، [ب، 2]]\n")
+
+    def test_read_missing_file(self):
+        expect_error(
+            'استورد جداول\n'
+            'جداول.اقرأ("/غير/موجود_إطلاقًا.csv")\n',
+            ArabiRuntimeError, 'غير موجود')
+
+    def test_write_needs_rows(self):
+        expect_error(
+            'استورد جداول\n'
+            'جداول.اكتب("/tmp/ن.csv", "ليس قائمة")\n',
+            ArabiRuntimeError, 'قائمة صفوف')
+
+    def test_delimiter_must_be_one_char(self):
+        expect_error(
+            'استورد جداول\n'
+            'جداول.حلل("أ،ب", "اب")\n',
+            ArabiRuntimeError, 'حرفًا واحدًا')
+
+
+if __name__ == '__main__':    unittest.main(verbosity=2)

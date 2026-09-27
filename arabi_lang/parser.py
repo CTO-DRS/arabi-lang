@@ -9,7 +9,7 @@ from .tokens import T
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
     Break, Continue, Pass, Try, Raise, Import, ClassDef, Lambda, Switch,
-    EnumDef, PropertyDef, Global, Assert, Delete,
+    EnumDef, PropertyDef, Global, Assert, Delete, Yield,
     Num, Str, FString, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
     Call, Index, Slice, MethodCall, Attribute, This, Super, Ternary,
 )
@@ -44,6 +44,7 @@ STMT_KEYWORDS = {
     T.SWITCH: 'بدّل', T.CASE: 'حالة', T.DEFAULT: 'افتراض',
     T.ENUM: 'تعداد', T.PROPERTY: 'خاصية', T.GLOBAL: 'عالمي',
     T.ASSERT: 'تحقق', T.DELETE: 'احذف',
+    T.YIELD: 'أنتج',
 }
 
 # كلمات مفتاحية يُسمح بظهورها كأسماء خصائص/طرق بعد النقطة
@@ -80,6 +81,8 @@ class Parser:
     def __init__(self, tokens):
         self.toks = tokens
         self.i = 0
+        # كومة تتبع المولدات: صحيح إذا جسم الدالة الحالي يحوي 'أنتج'
+        self._yield_scopes = []
 
     # ---------- أدوات ----------
 
@@ -142,6 +145,8 @@ class Parser:
 
     def _statement(self):
         t = self.cur().type
+        if t is T.AT:
+            return self.decorated_def()
         if t is T.DEF:
             return self.func_def()
         if t is T.IF:
@@ -181,6 +186,8 @@ class Parser:
             return self.assert_stmt()
         if t is T.DELETE:
             return self.delete_stmt()
+        if t is T.YIELD:
+            return self.yield_stmt()
         # «من وحدة استورد ...» — 'من' كلمة سياقية في بداية الجملة
         if (t is T.IDENT and self.cur().value == 'من'
                 and self.peek(1).type in (T.IDENT, T.STRING)):
@@ -210,8 +217,43 @@ class Parser:
         tok = self.advance()                       # دالة
         name = self.expect_ident("متوقع اسم الدالة بعد 'دالة'")
         params = self.parse_params()
-        body = self.block()
-        return FuncDef(name, params, body, tok.line)
+        self._yield_scopes.append(False)
+        try:
+            body = self.block()
+        finally:
+            is_generator = self._yield_scopes.pop()
+        return FuncDef(name, params, body, tok.line,
+                       is_generator=is_generator)
+
+    def decorated_def(self):
+        """مزخرفات فوق الدالة:
+        @اسم
+        @اسم(وسيط)
+        دالة ..."""
+        tok = self.advance()                       # @
+        decorators = [self.expression()]
+        self.skip_newlines()
+        while self.check(T.AT):
+            self.advance()
+            decorators.append(self.expression())
+            self.skip_newlines()
+        if not self.check(T.DEF):
+            self.error("المزخرف @ يجب أن يسبق تعريف دالة 'دالة' مباشرة")
+        func = self.func_def()
+        func.decorators = decorators
+        func.line = tok.line
+        return func
+
+    def yield_stmt(self):
+        """أنتج [تعبير] — يُنتج قيمة من المولد."""
+        tok = self.advance()                       # أنتج
+        if self.cur().type in (T.NEWLINE, T.EOF, T.DEDENT):
+            if self._yield_scopes:
+                self._yield_scopes[-1] = True
+            return Yield(None, tok.line)
+        if self._yield_scopes:
+            self._yield_scopes[-1] = True
+        return Yield(self.expression(), tok.line)
 
     def parse_params(self):
         """يقرأ قائمة المعاملات مع الافتراضيات: (أ، ب = ٥)"""
@@ -333,10 +375,15 @@ class Parser:
         tok = self.advance()                       # صنف
         name = self.expect_ident("متوقع اسم الصنف بعد 'صنف'")
         superclass = None
-        # الوراثة: صنف ابن من أصل — 'من' كلمة سياقية
+        # الوراثة: صنف ابن من أصل — 'من' كلمة سياقية، والوراثة المتعددة بفواصل
         if self.check(T.IDENT) and self.cur().value == 'من':
             self.advance()
             superclass = self.expect_ident("متوقع اسم الصنف الأصل بعد 'من'")
+            if self.match(T.COMMA):
+                superclass = [superclass]
+                superclass.append(self.expect_ident('متوقع اسم صنف الأصل الثاني'))
+                while self.match(T.COMMA):
+                    superclass.append(self.expect_ident('متوقع اسم صنف أصل'))
         body = self.block()
         return ClassDef(name, superclass, body, tok.line)
 

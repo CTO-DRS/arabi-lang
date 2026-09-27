@@ -9,6 +9,7 @@
 
 import os
 import sys
+import threading
 
 from . import nodes as N
 from .errors import ArabiRuntimeError, ArabiUserError
@@ -18,8 +19,10 @@ from .runtime import (
     Env, ArabiFunc, BuiltinFunc, ModuleValue,
     ClassValue, InstanceValue, BoundMethod,
     EnumValue, EnumMember, Property, NativeCtor,
+    GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
     typename, display, install_builtins, NO_DEFAULT,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
+    GENERATOR_METHODS, DB_METHODS,
 )
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
@@ -34,7 +37,8 @@ CATCHABLE = (
 
 # الوحدات الجاهزة المدمجة في اللغة
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
-                   'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم')
+                   'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم',
+                   'قاعدة', 'ترميز', 'جداول')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -72,6 +76,8 @@ class Interpreter:
         self._module_cache = {}
         # مسارات قيد التحميل حاليًا — لكشف الاستيراد الدائري
         self._loading = set()
+        # سياق لكل خيط: مكدس 'هذا' الحالي (للدوال المستدعاة من طرق)
+        self._tls = threading.local()
 
     # ================== التنفيذ ==================
 
@@ -174,20 +180,29 @@ class Interpreter:
             items = list(iterable)
         elif isinstance(iterable, str):
             items = list(iterable)
+        elif isinstance(iterable, GeneratorValue):
+            # التكرار على مولد: قيم تباعًا مع إغلاقه عند الخروج (كسر/خطأ)
+            try:
+                while True:
+                    has, item = iterable._next_pair()
+                    if not has:
+                        break
+                    self._for_bind(node, item, env)
+                    try:
+                        self.exec_statements(node.body, env)
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
+            finally:
+                iterable.close()
+            return
         else:
             raise ArabiRuntimeError(
                 f'لا يمكن التكرار على {typename(iterable)} — استخدم قائمة أو نصًا أو مدى',
                 node.line)
         for item in items:
-            if len(node.targets) == 1:
-                env.set(node.targets[0], item)
-            else:
-                if not isinstance(item, (list, tuple)) or len(item) != len(node.targets):
-                    raise ArabiRuntimeError(
-                        f'لا يمكن تفكيك العنصر {display(item)} على {len(node.targets)} متغيرات',
-                        node.line)
-                for target, part in zip(node.targets, item):
-                    env.set(target, part)
+            self._for_bind(node, item, env)
             try:
                 self.exec_statements(node.body, env)
             except BreakSignal:
@@ -195,10 +210,33 @@ class Interpreter:
             except ContinueSignal:
                 continue
 
+    def _for_bind(self, node, item, env):
+        """يربط عنصر حلقة 'لكل' بمتغير أو متغيرات التفكيك."""
+        if len(node.targets) == 1:
+            env.set(node.targets[0], item)
+            return
+        if not isinstance(item, (list, tuple)) or len(item) != len(node.targets):
+            raise ArabiRuntimeError(
+                f'لا يمكن تفكيك العنصر {display(item)} على {len(node.targets)} متغيرات',
+                node.line)
+        for target, part in zip(node.targets, item):
+            env.set(target, part)
+
     def exec_FuncDef(self, node, env):
         params = [(name, self._eval_default(default, env))
                   for name, default in node.params]
-        env.set(node.name, ArabiFunc(node.name, params, node.body, env))
+        value = ArabiFunc(node.name, params, node.body, env,
+                          is_generator=node.is_generator)
+        # تطبيق المزخرفات من الأسفل إلى الأعلى (كما في بايثون)
+        for dec in reversed(node.decorators):
+            func_value = self.evaluate(dec, env)
+            value = self._call_value(func_value, [value], {},
+                                     getattr(dec, 'line', node.line))
+            if not isinstance(value, (ArabiFunc, BuiltinFunc, BoundMethod)):
+                raise ArabiRuntimeError(
+                    f"المزخرف يجب أن يعيد دالة لكنه أعاد {typename(value)}",
+                    getattr(dec, 'line', node.line))
+        env.set(node.name, value)
 
     def _eval_default(self, node, env):
         """يقيّم تعبير القيمة الافتراضية عند التعريف، أو يعيد NO_DEFAULT."""
@@ -207,25 +245,30 @@ class Interpreter:
         return self.evaluate(node, env)
 
     def exec_ClassDef(self, node, env):
-        """تعريف صنف: يجمع الطرق والثوابت ويربط الصنف بأصله إن وجد."""
-        superclass = None
+        """تعريف صنف: يجمع الطرق والثوابت ويربطه بأصوله (وراثة متعددة)."""
+        parents = []
         if node.superclass is not None:
-            superclass = env.get(node.superclass, node.line)
-            if not isinstance(superclass, ClassValue):
-                raise ArabiRuntimeError(
-                    f"'{node.superclass}' ليس صنفًا — الوراثة تكون من صنف فقط",
-                    node.line)
-            ancestor = superclass
-            while ancestor is not None:
+            names = (node.superclass if isinstance(node.superclass, list)
+                     else [node.superclass])
+            for pname in names:
+                parent = env.get(pname, node.line)
+                if not isinstance(parent, ClassValue):
+                    raise ArabiRuntimeError(
+                        f"'{pname}' ليس صنفًا — الوراثة تكون من صنف فقط",
+                        node.line)
+                parents.append(parent)
+        # فحص الوراثة الدائرية عبر أسلاف كل أصل
+        for parent in parents:
+            for ancestor in self._class_chain(parent):
                 if ancestor.name == node.name:
                     raise ArabiRuntimeError(
-                        f"وراثة دائرية: الصنف '{node.name}' يرث نفسه",
-                        node.line)
-                ancestor = ancestor.superclass
+                        f"وراثة دائرية: الصنف '{node.name}' يرث نفسه "
+                        f'عبر الصنف {ancestor.name}', node.line)
+        mro_ancestors = self._merge_mro(node.name, parents, node.line)
         members = {}
-        # نطاق الصنف: تُبحث فيه الأسماء داخل الطرق، ويحمل 'الأصل'
+        # نطاق الصنف: تُبحث فيه الأسماء داخل الطرق، ويحمل 'الأصل' (الأول)
         class_env = Env(env)
-        class_env.define('الأصل', superclass)
+        class_env.define('الأصل', parents[0] if parents else None)
         for stmt in node.body:
             if isinstance(stmt, N.FuncDef):
                 if stmt.name in members:
@@ -234,8 +277,18 @@ class Interpreter:
                         stmt.line)
                 params = [(name, self._eval_default(default, env))
                           for name, default in stmt.params]
-                members[stmt.name] = ArabiFunc(
-                    stmt.name, params, stmt.body, class_env)
+                method = ArabiFunc(stmt.name, params, stmt.body, class_env,
+                                   is_generator=stmt.is_generator)
+                # تطبيق مزخرفات الطرق إن وجدت
+                for dec in reversed(stmt.decorators):
+                    func_value = self.evaluate(dec, env)
+                    method = self._call_value(func_value, [method], {},
+                                              getattr(dec, 'line', stmt.line))
+                    if not isinstance(method, (ArabiFunc, BuiltinFunc, BoundMethod)):
+                        raise ArabiRuntimeError(
+                            f"المزخرف يجب أن يعيد دالة لكنه أعاد {typename(method)}",
+                            getattr(dec, 'line', stmt.line))
+                members[stmt.name] = method
             elif isinstance(stmt, N.PropertyDef):
                 if stmt.name in members:
                     raise ArabiRuntimeError(
@@ -255,7 +308,48 @@ class Interpreter:
                 raise ArabiRuntimeError(
                     "داخل 'صنف' لا يُسمح إلا بتعريف دوال وخصائص وثوابت",
                     stmt.line)
-        env.set(node.name, ClassValue(node.name, superclass, members, class_env))
+        new_class = ClassValue(node.name, parents[0] if parents else None,
+                               members, class_env)
+        if parents:
+            new_class.mro = [new_class] + mro_ancestors
+        env.set(node.name, new_class)
+
+    def _class_chain(self, cls):
+        """يتكرر على سلسلة الصنف (MRO إن حُسب، وإلا سلسلة superclass)."""
+        if cls.mro is not None:
+            yield from cls.mro
+            return
+        scope = cls
+        while scope is not None:
+            yield scope
+            scope = scope.superclass
+
+    def _merge_mro(self, name, parents, line):
+        """يحسب ترتيب حل الطرق C3 للأصول — بلا الصنف نفسه.
+
+        يعيد قائمة الأصول بترتيب لا يكسر ترتيب أي أصل ولا يعيد
+        ترتيبًا متناقضًا (كالمعينات المتعارضة).
+        """
+        if not parents:
+            return []
+        seqs = [list(self._class_chain(p)) for p in parents]
+        seqs.append(list(parents))
+        result = []
+        while any(seqs):
+            head = None
+            for seq in seqs:
+                candidate = seq[0]
+                if not any(candidate in s[1:] for s in seqs):
+                    head = candidate
+                    break
+            if head is None:
+                raise ArabiRuntimeError(
+                    f"لا يمكن بناء ترتيب الوراثة للصنف '{name}' — "
+                    'تسلسل الأصول متناقض (وراثة معينية متعارضة)', line)
+            result.append(head)
+            seqs = [[x for x in seq if x is not head] for seq in seqs]
+            seqs = [s for s in seqs if s]
+        return result
 
     def exec_Return(self, node, env):
         value = None if node.value is None else self.evaluate(node.value, env)
@@ -314,11 +408,9 @@ class Interpreter:
         """صح إذا كان الكائن من الصنف المدمج 'استثناء' أو صنف يرثه."""
         if not isinstance(value, InstanceValue):
             return False
-        cls = value.cls
-        while cls is not None:
+        for cls in self._class_chain(value.cls):
             if cls is self.error_class:
                 return True
-            cls = cls.superclass
         return False
 
     def exec_Import(self, node, env):
@@ -397,6 +489,16 @@ class Interpreter:
             raise ArabiRuntimeError(
                 f"لا يمكن حذف '{target.name}' من {typename(obj)}", target.line)
         raise ArabiRuntimeError('هدف حذف غير صالح', node.line)
+
+    def exec_Yield(self, node, env):
+        """أنتج [تعبير] — يسلم القيمة للمستهلك ويوقف حتى الطلب التالي."""
+        value = None if node.value is None else self.evaluate(node.value, env)
+        gen = getattr(_gen_tls, 'gen', None)
+        if gen is None:
+            raise ArabiRuntimeError(
+                "جملة 'أنتج' تُستخدم داخل مولد فقط — الدالة التي تحوي "
+                "'أنتج' تعيد كائن مولد عند استدعائها ولا تُنفذ فورًا", node.line)
+        gen._emit(value, node.line)
 
     def _delete_index(self, obj, index, line):
         if isinstance(obj, list):
@@ -581,12 +683,22 @@ class Interpreter:
     def eval_Null(self, node, env):
         return None
 
-    def eval_This(self, node, env):
+    def _current_this(self, env):
+        """يجد 'هذا' الحالي: من سلسلة النطاق ثم من مكدس الخيط."""
         scope = env
         while scope is not None:
             if 'هذا' in scope.vars:
                 return scope.vars['هذا']
             scope = scope.parent
+        stack = getattr(self._tls, 'this_stack', None)
+        if stack:
+            return stack[-1]
+        return None
+
+    def eval_This(self, node, env):
+        this_val = self._current_this(env)
+        if this_val is not None:
+            return this_val
         raise ArabiRuntimeError(
             "لا يمكن استخدام 'هذا' إلا داخل طرق صنف", node.line)
 
@@ -599,6 +711,11 @@ class Interpreter:
                     raise ArabiRuntimeError(
                         "هذا الصنف لا يرث من صنف آخر — لا يوجد 'الأصل'",
                         node.line)
+                if isinstance(value, ClassValue):
+                    # اربط الأصل بالكائن الحالي إن وُجد (الأصل.طريقة(...))
+                    this_val = self._current_this(env)
+                    if isinstance(this_val, InstanceValue):
+                        return SuperValue(value, this_val)
                 return value
             scope = scope.parent
         raise ArabiRuntimeError(
@@ -718,11 +835,24 @@ class Interpreter:
                     f"'{name}' خاصية من نوع {typename(func)} — لا يمكن استدعاؤها كدالة",
                     line)
             return self._call_class_method(obj.cls, obj, name, args, kwargs, line)
+        # الأصل المرتبط بالكائن: الأصل.طريقة(...) — النمطان معًا مدعومان
+        if isinstance(obj, SuperValue):
+            args2 = args
+            if args2 and args2[0] is obj.instance:
+                args2 = args2[1:]      # النمط القديم: الأصل.طريقة(هذا، ...)
+            return self._call_class_method(obj.cls, obj.instance, name,
+                                           args2, kwargs, line)
         # استدعاء غير مرتبط من الصنف نفسه: الأصل.إنشاء(هذا، ...)
+        # أو ربط تلقائي: الأصل.طريقة() داخل طريقة ترى 'هذا' الحالي
         if isinstance(obj, ClassValue):
             if not args and not kwargs:
-                raise ArabiRuntimeError(
-                    f"استدعاء '{obj.name}.{name}' يحتاج الكائن كأول معامل", line)
+                stack = getattr(self._tls, 'this_stack', None)
+                if not stack:
+                    raise ArabiRuntimeError(
+                        f"استدعاء '{obj.name}.{name}' يحتاج الكائن كأول معامل",
+                        line)
+                return self._call_class_method(obj, stack[-1], name, [],
+                                               kwargs, line)
             this_val = args[0]
             if not isinstance(this_val, InstanceValue):
                 raise ArabiRuntimeError(
@@ -744,6 +874,10 @@ class Interpreter:
             table = STR_METHODS
         elif isinstance(obj, dict):
             table = DICT_METHODS
+        elif isinstance(obj, GeneratorValue):
+            table = GENERATOR_METHODS
+        elif isinstance(obj, DBValue):
+            table = DB_METHODS
         else:
             raise ArabiRuntimeError(
                 f"النوع '{typename(obj)}' لا يدعم الطرق — لا توجد طريقة اسمها '{name}'",
@@ -791,6 +925,18 @@ class Interpreter:
                 return self._invoke_bound(member.func, obj, [], {}, node.line)
             if isinstance(member, ArabiFunc):
                 return BoundMethod(obj, member)
+            return member
+        if isinstance(obj, SuperValue):
+            member, _owner = self._lookup_member(obj.cls, node.name)
+            if member is None:
+                raise ArabiRuntimeError(
+                    f"الصنف '{obj.cls.name}' لا يحتوي على '{node.name}'",
+                    node.line)
+            if isinstance(member, Property):
+                return self._invoke_bound(member.func, obj.instance, [], {},
+                                          node.line)
+            if isinstance(member, ArabiFunc):
+                return BoundMethod(obj.instance, member)
             return member
         if isinstance(obj, ClassValue):
             member, _owner = self._lookup_member(obj, node.name)
@@ -908,6 +1054,8 @@ class Interpreter:
     def _call_value(self, func, args, kwargs, line):
         if isinstance(func, ArabiFunc):
             local = self._bind_call_args(func, args, kwargs, line)
+            if func.is_generator:
+                return GeneratorValue(self, func, local)
             try:
                 self.exec_statements(func.body, local)
             except ReturnSignal as signal:
@@ -997,23 +1145,34 @@ class Interpreter:
     # ================== أدوات الأصناف ==================
 
     def _lookup_member(self, cls, name):
-        """يبحث عن عضو في سلسلة الصنف ويعيد (العضو، الصنف المالك)."""
-        scope = cls
-        while scope is not None:
+        """يبحث عن عضو في سلسلة الصنف (MRO للوراثة المتعددة) ويعيد (العضو، الصنف المالك)."""
+        for scope in self._class_chain(cls):
             if name in scope.members:
                 return scope.members[name], scope
-            scope = scope.superclass
         return None, None
 
     def _invoke_bound(self, func, this_val, args, kwargs, line):
-        """ينفذ طريقة مع ربط 'هذا' بالكائن الممرر."""
+        """ينفذ طريقة مع ربط 'هذا' بالكائن الممرر.
+
+        يدفع 'هذا' على مكدس الخيط الحالي لتصله الدوال المستدعاة منه.
+        """
         local = self._bind_call_args(func, args, kwargs, line)
         local.define('هذا', this_val)
+        stack = getattr(self._tls, 'this_stack', None)
+        if stack is None:
+            stack = []
+            self._tls.this_stack = stack
+        stack.append(this_val)
         try:
-            self.exec_statements(func.body, local)
-        except ReturnSignal as signal:
-            return signal.value
-        return None
+            if func.is_generator:
+                return GeneratorValue(self, func, local)
+            try:
+                self.exec_statements(func.body, local)
+            except ReturnSignal as signal:
+                return signal.value
+            return None
+        finally:
+            stack.pop()
 
     def _call_class_method(self, cls, instance, name, args, kwargs, line):
         """يبحث عن الطريقة في سلسلة الصنف وينفذها مرتبطة بالكائن."""

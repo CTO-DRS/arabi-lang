@@ -439,6 +439,11 @@ class _Linter:
                 scope.mark_use(stmt.target.name)
             else:
                 self._walk_target_read(stmt.target, scope)
+        elif isinstance(stmt, N.Yield):
+            if not in_function:
+                self.report(stmt.line, 'خطأ', "جملة 'أنتج' خارج الدالة")
+            if stmt.value is not None:
+                self._walk_expr(stmt.value, scope)
         # Pass: لا شيء
 
     def _walk_target_read(self, target, scope):
@@ -576,6 +581,38 @@ def _render_params(params):
     return '، '.join(parts)
 
 
+def _fn_tags(fn):
+    """وسوم الدالة في التوثيق: مولد ومزخرفات."""
+    tags = []
+    if getattr(fn, 'is_generator', False):
+        tags.append('مولد')
+    for dec in getattr(fn, 'decorators', None) or []:
+        tags.append(f'@{_decorator_name(dec)}')
+    if not tags:
+        return ''
+    return ' — ' + '، '.join(f'`{t}`' for t in tags)
+
+
+def _decorator_name(expr):
+    """يستخرج اسم المزخرف من تعبيره (اسم أو استدعاء)."""
+    if isinstance(expr, N.Name):
+        return expr.name
+    if isinstance(expr, N.Call):
+        return _decorator_name(expr.func)
+    if isinstance(expr, N.Attribute):
+        return expr.name
+    return 'مزخرف'
+
+
+def _render_parents(superclass):
+    """يعرض أصول الصنف للتوثيق — أصل واحد أو قائمة وراثة متعددة."""
+    if superclass is None:
+        return ''
+    if isinstance(superclass, list):
+        return ' (يرث ' + '، '.join(f'`{s}`' for s in superclass) + ')'
+    return f' (يرث `{superclass}`)'
+
+
 def generate_docs(filename, source):
     """يولد توثيق Markdown لملف لغة عربي ويعيده نصًا."""
     tokens = Lexer(source).tokenize()
@@ -619,7 +656,8 @@ def generate_docs(filename, source):
         out.append('## الدوال')
         out.append('')
         for fn in funcs:
-            out.append(f'### {fn.name}({_render_params(fn.params)})')
+            tags = _fn_tags(fn)
+            out.append(f'### {fn.name}({_render_params(fn.params)}){tags}')
             out.append('')
             doc = _docstring(fn.body)
             if doc:
@@ -632,7 +670,7 @@ def generate_docs(filename, source):
         out.append('## الأصناف')
         out.append('')
         for cls in classes:
-            parent = f' (يرث `{cls.superclass}`)' if cls.superclass else ''
+            parent = _render_parents(cls.superclass)
             out.append(f'### {cls.name}{parent}')
             out.append('')
             doc = _docstring(cls.body)
@@ -652,7 +690,8 @@ def generate_docs(filename, source):
                 out.append('**الطرق:**')
                 out.append('')
                 for m in methods:
-                    out.append(f'- `{m.name}({_render_params(m.params)})`')
+                    tags = _fn_tags(m)
+                    out.append(f'- `{m.name}({_render_params(m.params)})`{tags}')
                     mdoc = _docstring(m.body)
                     if mdoc:
                         out.append(f'  - {mdoc}')
