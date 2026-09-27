@@ -13,6 +13,7 @@ import sys
 import threading
 
 from . import nodes as N
+from . import vm as _vm
 from .errors import ArabiRuntimeError, ArabiUserError
 from .lexer import Lexer
 from .parser import Parser
@@ -23,6 +24,8 @@ from .runtime import (
     GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
     ThreadValue, LockValue, QueueValue, DateValue,
     typename, display, install_builtins, NO_DEFAULT,
+    BreakSignal, ContinueSignal, ReturnSignal,
+    _VM_PENDING, _VM_NO,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
     GENERATOR_METHODS, DB_METHODS,
     THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS,
@@ -47,23 +50,8 @@ BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عش
 _SKIP = object()
 
 
-class BreakSignal(Exception):
-    """إشارة داخلية لجملة كسر."""
-
-
-class ContinueSignal(Exception):
-    """إشارة داخلية لجملة استمر."""
-
-
-class ReturnSignal(Exception):
-    """إشارة داخلية لجملة أعد."""
-
-    def __init__(self, value):
-        self.value = value
-
-
 class Interpreter:
-    def __init__(self, script_dir=None, use_bytecode=True):
+    def __init__(self, script_dir=None, use_bytecode=True, use_vm=True):
         self.globals = Env()
         install_builtins(self.globals)
         # الصنف المدمج 'استثناء' — أصله لأخطاء المستخدم المخصصة
@@ -75,6 +63,9 @@ class Interpreter:
         self.script_dir = script_dir or os.getcwd()
         # الكود الوسيط: تحميل الوحدات من ذاكرة __بايت__ عند صلاحيتها
         self.use_bytecode = use_bytecode
+        # الدولاب الافتراضي: تنفيذ أجسام الدوال عبر بايت-كود مترجم
+        # (كل جملة/تعبير غير مدعوم يعود للممسح الشجري تلقائيًا)
+        self.use_vm = use_vm
         # كومة مجلدات الوحدات قيد التحميل (للاستيراد المتداخل)
         self._module_stack = []
         # ذاكرة الوحدات المحمّلة: مسار ← ModuleValue
@@ -247,7 +238,10 @@ class Interpreter:
         raise ArabiRuntimeError('نمط غير مدعوم', getattr(pat, 'line', None))
 
     def exec_For(self, node, env):
-        iterable = self.evaluate(node.iterable, env)
+        self._for_iterate(node, self.evaluate(node.iterable, env), env)
+
+    def _for_iterate(self, node, iterable, env):
+        """يتكرر على قيمة محسوبة مسبقًا (يشاركه الدولاب في المسارات البطيئة)."""
         if isinstance(iterable, dict):
             items = list(iterable.keys())
         elif isinstance(iterable, (list, range)):
@@ -1073,20 +1067,24 @@ class Interpreter:
                            self.evaluate(node.right, env), node.line)
 
     def eval_UnaryOp(self, node, env):
-        value = self.evaluate(node.operand, env)
-        if node.op == '-':
+        return self._unary_op(node.op, self.evaluate(node.operand, env),
+                              node.line)
+
+    def _unary_op(self, op, value, line):
+        """عملية أحادية على قيمة محسوبة (يشاركه الدولاب)."""
+        if op == '-':
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 # كائن يعرّف الطريقة الخاصة 'سالب'
                 if isinstance(value, InstanceValue):
                     func, _owner = self._lookup_member(value.cls, 'سالب')
                     if isinstance(func, ArabiFunc):
-                        return self._invoke_bound(func, value, [], {}, node.line)
+                        return self._invoke_bound(func, value, [], {}, line)
                 raise ArabiRuntimeError(
-                    f'لا يمكن وضع سالب أمام {typename(value)}', node.line)
+                    f'لا يمكن وضع سالب أمام {typename(value)}', line)
             return -value
-        if node.op == 'ليس':
+        if op == 'ليس':
             return not self._truthy(value)
-        raise ArabiRuntimeError(f"معامل أحادي غير معروف: {node.op}", node.line)
+        raise ArabiRuntimeError(f"معامل أحادي غير معروف: {op}", line)
 
     def eval_Ternary(self, node, env):
         """التعبير الثلاثي: لو شرط: قيمة1 وإلا قيمة2"""
@@ -1154,8 +1152,11 @@ class Interpreter:
     def eval_MethodCall(self, node, env):
         obj = self.evaluate(node.obj, env)
         args, kwargs = self._evaluate_args(node.args, env)
-        name = node.name
-        line = node.line
+        return self._call_method_value(obj, node.name, args, kwargs,
+                                       node.line)
+
+    def _call_method_value(self, obj, name, args, kwargs, line):
+        """يستدعي طريقة على قيمة محسوبة (يشاركه الدولاب)."""
         # كائن من صنف معرف من قبل المستخدم
         if isinstance(obj, InstanceValue):
             if name in obj.fields:
@@ -1236,77 +1237,81 @@ class Interpreter:
                          rest=node.rest)
 
     def eval_Attribute(self, node, env):
-        obj = self.evaluate(node.obj, env)
+        return self._get_attribute(self.evaluate(node.obj, env),
+                                   node.name, node.line)
+
+    def _get_attribute(self, obj, name, line):
+        """قراءة خاصية من قيمة محسوبة (يشاركه الدولاب)."""
         if isinstance(obj, EnumMember):
-            if node.name == 'الاسم':
+            if name == 'الاسم':
                 return obj.name
-            if node.name == 'القيمة':
+            if name == 'القيمة':
                 return obj.value
             raise ArabiRuntimeError(
-                f"عضو التعداد لا يحتوي على '{node.name}' — المتوفر: الاسم، القيمة",
-                node.line)
+                f"عضو التعداد لا يحتوي على '{name}' — المتوفر: الاسم، القيمة",
+                line)
         if isinstance(obj, DateValue):
-            method = DATE_METHODS.get(node.name)
+            method = DATE_METHODS.get(name)
             if method is None:
                 raise ArabiRuntimeError(
-                    f"التاريخ لا يحتوي على '{node.name}' — المتوفر: السنة، "
+                    f"التاريخ لا يحتوي على '{name}' — المتوفر: السنة، "
                     'الشهر، اليوم، الساعة، الدقيقة، الثانية، يوم_الأسبوع، نسق',
-                    node.line)
-            if node.name != 'نسق':                # الخصائص تُقرأ بلا أقواس
-                return method(obj, [], node.line)
+                    line)
+            if name != 'نسق':                # الخصائص تُقرأ بلا أقواس
+                return method(obj, [], line)
             # نسق طريقة تستدعى بأقواس — دالة جاهزة مرتبطة بهذا التاريخ
-            def bound(args, line, _obj=obj, _m=method, _n=node.name):
+            def bound(args, line, _obj=obj, _m=method, _n=name):
                 return _m(_obj, args, line)
-            return BuiltinFunc(node.name, bound)
+            return BuiltinFunc(name, bound)
         if isinstance(obj, EnumValue):
-            member = obj.members.get(node.name)
+            member = obj.members.get(name)
             if member is None:
                 available = '، '.join(obj.members) or 'لا شيء'
                 raise ArabiRuntimeError(
-                    f"التعداد '{obj.name}' لا يحتوي على '{node.name}' — "
-                    f'الأعضاء: {available}', node.line)
+                    f"التعداد '{obj.name}' لا يحتوي على '{name}' — "
+                    f'الأعضاء: {available}', line)
             return member
         if isinstance(obj, InstanceValue):
-            if node.name in obj.fields:
-                return obj.fields[node.name]
-            member, _owner = self._lookup_member(obj.cls, node.name)
+            if name in obj.fields:
+                return obj.fields[name]
+            member, _owner = self._lookup_member(obj.cls, name)
             if member is None:
                 raise ArabiRuntimeError(
-                    f"الكائن من صنف '{obj.cls.name}' لا يحتوي على '{node.name}'",
-                    node.line)
+                    f"الكائن من صنف '{obj.cls.name}' لا يحتوي على '{name}'",
+                    line)
             if isinstance(member, Property):
-                return self._invoke_bound(member.func, obj, [], {}, node.line)
+                return self._invoke_bound(member.func, obj, [], {}, line)
             if isinstance(member, ArabiFunc):
                 return BoundMethod(obj, member)
             return member
         if isinstance(obj, SuperValue):
-            member, _owner = self._lookup_member(obj.cls, node.name)
+            member, _owner = self._lookup_member(obj.cls, name)
             if member is None:
                 raise ArabiRuntimeError(
-                    f"الصنف '{obj.cls.name}' لا يحتوي على '{node.name}'",
-                    node.line)
+                    f"الصنف '{obj.cls.name}' لا يحتوي على '{name}'",
+                    line)
             if isinstance(member, Property):
                 return self._invoke_bound(member.func, obj.instance, [], {},
-                                          node.line)
+                                          line)
             if isinstance(member, ArabiFunc):
                 return BoundMethod(obj.instance, member)
             return member
         if isinstance(obj, ClassValue):
-            member, _owner = self._lookup_member(obj, node.name)
+            member, _owner = self._lookup_member(obj, name)
             if member is None:
                 raise ArabiRuntimeError(
-                    f"الصنف '{obj.name}' لا يحتوي على '{node.name}'", node.line)
+                    f"الصنف '{obj.name}' لا يحتوي على '{name}'", line)
             return member
         if isinstance(obj, ModuleValue):
-            member = obj.members.get(node.name)
+            member = obj.members.get(name)
             if member is None:
                 raise ArabiRuntimeError(
-                    f"الوحدة '{obj.name}' لا تحتوي على '{node.name}'", node.line)
+                    f"الوحدة '{obj.name}' لا تحتوي على '{name}'", line)
             return member
-        if isinstance(obj, dict) and node.name in obj:
-            return obj[node.name]
+        if isinstance(obj, dict) and name in obj:
+            return obj[name]
         raise ArabiRuntimeError(
-            f"النوع '{typename(obj)}' لا يدعم الوصول للخاصية '{node.name}'", node.line)
+            f"النوع '{typename(obj)}' لا يدعم الوصول للخاصية '{name}'", line)
 
     # ================== العمليات ==================
 
@@ -1409,11 +1414,7 @@ class Interpreter:
             local = self._bind_call_args(func, args, kwargs, line)
             if func.is_generator:
                 return GeneratorValue(self, func, local)
-            try:
-                self.exec_statements(func.body, local)
-            except ReturnSignal as signal:
-                return signal.value
-            return None
+            return self._run_func(func, local)
         if isinstance(func, BuiltinFunc):
             if kwargs:
                 names = '، '.join(kwargs)
@@ -1566,13 +1567,41 @@ class Interpreter:
         try:
             if func.is_generator:
                 return GeneratorValue(self, func, local)
+            return self._run_func(func, local)
+        finally:
+            stack.pop()
+
+    def _run_func(self, func, env):
+        """ينفذ جسم دالة: عبر الدولاب الافتراضي إن ترجم، وإلا الممسح الشجري.
+
+        الترجمة تتم عند أول استدعاء وتخزن على الدالة نفسها (vm_code)،
+        وفشلها يعلّم الدالة بالممسح الشجري الدائم — الشفافية أولًا.
+        """
+        if not self.use_vm:
             try:
-                self.exec_statements(func.body, local)
+                self.exec_statements(func.body, env)
             except ReturnSignal as signal:
                 return signal.value
             return None
-        finally:
-            stack.pop()
+        code = func.vm_code
+        if code is _VM_PENDING:
+            try:
+                code = _vm.compile_function(func.body)
+            except Exception:            # أي عطل في الترجمة — أمان كامل
+                code = _VM_NO
+            func.vm_code = code
+        if code is _VM_NO:
+            try:
+                self.exec_statements(func.body, env)
+            except ReturnSignal as signal:
+                return signal.value
+            return None
+        try:
+            return _vm.vm_exec(self, code, env)
+        except ReturnSignal as signal:
+            # أعد من جمل احتياطية (مثل أعد داخل جرب) — المسار الأصلي
+            return signal.value
+        return None
 
     def _call_class_method(self, cls, instance, name, args, kwargs, line):
         """يبحث عن الطريقة في سلسلة الصنف وينفذها مرتبطة بالكائن."""

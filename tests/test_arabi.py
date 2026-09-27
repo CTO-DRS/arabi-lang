@@ -5000,7 +5000,512 @@ class TestLSPServer(unittest.TestCase):
         self.assertEqual(loc['uri'], uri_a)
 
 
-if __name__ == '__main__':    unittest.main(verbosity=2)
+# ================== الدولاب الافتراضي (الإصدار 1.13) ==================
+
+class TestVmDifferential(unittest.TestCase):
+    """تكافؤ الدولاب الافتراضي مع الممسح الشجري: نفس الكود — نفس المخرجات.
+
+    كل مقتطف ينفذ مرتين (بدولاب وبلا دولاب) ويجب أن تتطابق المخرجات
+    حرفيًا، أو تتطابق الأخطاء بنوعها ورسائلها وأسطرها.
+    """
+
+    def _run(self, source, use_vm, script_dir=None):
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                tree = Parser(Lexer(source).tokenize()).parse()
+                Interpreter(script_dir=script_dir,
+                            use_vm=use_vm).run(tree)
+            return ('ok', out.getvalue())
+        except ArabiError as exc:
+            return ('error', f'{type(exc).__name__}: {exc}')
+
+    def assert_same(self, source, script_dir=None):
+        vm_kind, vm_out = self._run(source, True, script_dir)
+        ast_kind, ast_out = self._run(source, False, script_dir)
+        self.assertEqual((vm_kind, vm_out), (ast_kind, ast_out))
+        return vm_out if vm_kind == 'ok' else None
+
+    # ---------- الحلقات والتحكم ----------
+
+    def test_while_accumulate(self):
+        self.assert_same(
+            'دالة مجموعة(ن):\n'
+            '    مج = ٠\n'
+            '    س = ١\n'
+            '    طالما س <= ن:\n'
+            '        مج = مج + س\n'
+            '        س = س + ١\n'
+            '    أعد مج\n'
+            'اطبع(مجموعة(١٠٠))\n'
+            'اطبع(مجموعة(٢٥٠))\n')
+
+    def test_while_break_continue(self):
+        self.assert_same(
+            'س = ٠\n'
+            'مج = ٠\n'
+            'طالما صح:\n'
+            '    س = س + ١\n'
+            '    لو س % ٢ == ٠:\n'
+            '        استمر\n'
+            '    لو س > ٢٠:\n'
+            '        كسر\n'
+            '    مج = مج + س\n'
+            'اطبع(مج، س)\n')
+
+    def test_for_list_dict_str_range(self):
+        self.assert_same(
+            'لكل ع في [١٠، ٢٠، ٣٠]:\n'
+            '    اطبع(ع * ٢)\n'
+            'لكل حرف في "عربي":\n'
+            '    اطبع(حرف)\n'
+            'لكل س في مدى(٣، ٠، -١):\n'
+            '    اطبع(س)\n'
+            'لكل مفتاح في {"أ": ١، "ب": ٢}:\n'
+            '    اطبع(مفتاح)\n')
+
+    def test_for_destructure_break_continue(self):
+        self.assert_same(
+            'لكل أ، ب في [[١، ٢]، [٣، ٤]، [٥، ٦]]:\n'
+            '    لو أ == ٣:\n'
+            '        استمر\n'
+            '    لو ب == ٦:\n'
+            '        كسر\n'
+            '    اطبع(أ + ب)\n')
+
+    def test_nested_loops_break_inner(self):
+        self.assert_same(
+            'لكل س في مدى(٣):\n'
+            '    لكل ص في مدى(٣):\n'
+            '        لو ص == ٢:\n'
+            '            كسر\n'
+            '        اطبع(س، ص)\n'
+            'طالما س < ٥:\n'
+            '    طالما صح:\n'
+            '        كسر\n'
+            '    س = س + ١\n'
+            'اطبع(س)\n')
+
+    def test_break_in_switch_inside_loop(self):
+        self.assert_same(
+            'لكل س في [١، ٢، ٣، ٤]:\n'
+            '    بدّل س:\n'
+            '        حالة ٣:\n'
+            '            كسر\n'
+            '        افتراض:\n'
+            '            اطبع(س)\n')
+
+    def test_break_in_try_inside_loop(self):
+        self.assert_same(
+            'لكل س في مدى(٥):\n'
+            '    جرب:\n'
+            '        لو س == ٣:\n'
+            '            كسر\n'
+            '        اطبع(س)\n'
+            '    باستثناء هـ:\n'
+            '        اطبع("خطأ")\n')
+
+    def test_if_elif_else_chain(self):
+        self.assert_same(
+            'دالة درجة(ن):\n'
+            '    لو ن >= ٩٠:\n'
+            '        أعد "ممتاز"\n'
+            '    وإلا إذا ن >= ٧٠:\n'
+            '        أعد "جيد"\n'
+            '    وإلا إذا ن >= ٥٠:\n'
+            '        أعد "مقبول"\n'
+            '    وإلا:\n'
+            '        أعد "راسب"\n'
+            'لكل ن في [٩٥، ٨٠، ٦٠، ٣٠]:\n'
+            '    اطبع(درجة(ن))\n')
+
+    def test_short_circuit_values(self):
+        self.assert_same(
+            'دالة جانبية(ق):\n'
+            '    اطبع("نُفذت")\n'
+            '    أعد ق\n'
+            'اطبع(خطأ و جانبية(١))\n'
+            'اطبع(صح و جانبية(٧))\n'
+            'اطبع(صح أو جانبية(٢))\n'
+            'اطبع(خطأ أو جانبية(٩))\n'
+            'اطبع(لا شيء و "س")\n')
+
+    def test_ternary_and_unary(self):
+        self.assert_same(
+            'دالة علامة(ن):\n'
+            '    أعد لو ن >= ٠: "موجب" وإلا "سالب"\n'
+            'اطبع(علامة(٥)، علامة(-٣))\n'
+            'اطبع(ليس صح، لا شيء، -٢ ** ٢)\n')
+
+    # ---------- التعبيرات والبيانات ----------
+
+    def test_collections_and_fstring(self):
+        self.assert_same(
+            'الاسم = "عربي"\n'
+            'النسخة = ١.١٣\n'
+            'اطبع(ق"لغة {الاسم} إصدار {النسخة} عدد {٢ + ٣}")\n'
+            'م = {"أ": [١، ٢]، "ب": {"ج": ٣}}\n'
+            'اطبع(م["أ"][١]، م["ب"]["ج"])\n'
+            'اطبع([١، ٢] + [٣])\n'
+            'اطبع("أب" * ٢)\n')
+
+    def test_methods_on_builtins(self):
+        self.assert_same(
+            'نص = "مرحبا بالعالم"\n'
+            'اطبع(نص.افصل(" "))\n'
+            'اطبع(نص.استبدل("بالعالم", "باللغة"))\n'
+            'ق = [٣، ١، ٢]\n'
+            'ق.رتب()\n'
+            'اطبع(ق، ق.اعكس())\n'
+            'اطبع({"أ": ١}.مفاتيح())\n')
+
+    def test_index_and_augassign_targets(self):
+        self.assert_same(
+            'ق = [١، ٢، ٣]\n'
+            'ق[٠] += ١٠\n'
+            'ق[٢] *= ٥\n'
+            'اطبع(ق)\n'
+            'د = {"عدد": ١}\n'
+            'د["عدد"] += ٤١\n'
+            'اطبع(د["عدد"])\n'
+            'اطبع(ق[٠:٢])\n')
+
+    # ---------- الدوال والأصناف ----------
+
+    def test_recursion_and_closures(self):
+        self.assert_same(
+            'دالة مضروب(ن):\n'
+            '    لو ن <= ١:\n'
+            '        أعد ١\n'
+            '    أعد ن * مضروب(ن - ١)\n'
+            'اطبع(مضروب(١٠))\n'
+            'دالة صنّاع(بداية):\n'
+            '    دالة زد(س):\n'
+            '        أعد بداية + س\n'
+            '    أعد زد\n'
+            'خمسة = صنّاع(٥)\n'
+            'اطبع(خمسة(١٠)، خمسة(١))\n')
+
+    def test_defaults_kwargs_rest(self):
+        self.assert_same(
+            'دالة تحية(الاسم، تحية = "مرحبا"):\n'
+            '    أعد تحية + " " + الاسم\n'
+            'اطبع(تحية("سالم"))\n'
+            'اطبع(تحية("سالم"، تحية = "أهلا"))\n'
+            'دالة جمع(...الكل):\n'
+            '    مج = ٠\n'
+            '    لكل س في الكل:\n'
+            '        مج += س\n'
+            '    أعد مج\n'
+            'اطبع(جمع(١، ٢، ٣، ٤))\n')
+
+    def test_classes_inheritance_super_property(self):
+        self.assert_same(
+            'صنف حيوان:\n'
+            '    دالة إنشاء(الاسم):\n'
+            '        هذا.الاسم = الاسم\n'
+            '    دالة صوت():\n'
+            '        أعد "صوت"\n'
+            '    دالة تعريف():\n'
+            '        أعد هذا.الاسم + ": " + هذا.صوت()\n'
+            'صنف كلب من حيوان:\n'
+            '    دالة صوت():\n'
+            '        أعد "هواء"\n'
+            'صنف قطة من حيوان:\n'
+            '    دالة إنشاء(الاسم):\n'
+            '        الأصل.إنشاء(هذا، الاسم)\n'
+            '    خاصية جاهزة:\n'
+            '        أعد صح\n'
+            'ك = كلب("ريكس")\n'
+            'ط = قطة("مشمش")\n'
+            'اطبع(ك.تعريف())\n'
+            'اطبع(ط.تعريف()، ط.جاهزة)\n')
+
+    def test_enum_and_overloads(self):
+        self.assert_same(
+            'تعداد لون:\n'
+            '    أحمر، أخضر\n'
+            'صنف متجه:\n'
+            '    دالة إنشاء(س، ص):\n'
+            '        هذا.س = س\n'
+            '        هذا.ص = ص\n'
+            '    دالة اجمع(هذا، آخر):\n'
+            '        أعد متجه(هذا.س + آخر.س، هذا.ص + آخر.ص)\n'
+            '    دالة نص():\n'
+            '        أعد ق"({هذا.س}، {هذا.ص})"\n'
+            'اطبع(متجه(١، ٢) + متجه(٣، ٤))\n'
+            'اطبع(لون.أحمر.الاسم، لون.أخضر.القيمة)\n')
+
+    def test_global_stmt(self):
+        self.assert_same(
+            'العدد = ١\n'
+            'دالة زد():\n'
+            '    عالمي العدد\n'
+            '    العدد = العدد + ١\n'
+            'زد()\n'
+            'زد()\n'
+            'اطبع(العدد)\n')
+
+    # ---------- الأخطاء والاستثناءات ----------
+
+    def test_error_messages_and_lines_identical(self):
+        src = ('دالة انقسام(س):\n'
+               '    أعد س / ٠\n'
+               'انقسام(٥)\n')
+        self.assert_same(src)
+
+    def test_try_except_finally_raise(self):
+        self.assert_same(
+            'صنف خطأي من استثناء:\n'
+            '    تمر\n'
+            'دالة خطِر():\n'
+            '    ارفع خطأي("انفجر")\n'
+            'جرب:\n'
+            '    خطِر()\n'
+            'باستثناء هـ:\n'
+            '    اطبع("أمسكت: " + هـ.رسالة)\n'
+            'أخيرًا:\n'
+            '    اطبع("نظّفت")\n'
+            'جرب:\n'
+            '    اطبع(١ / ٠)\n'
+            'باستثناء هـ:\n'
+            '    اطبع(هـ)\n')
+
+    def test_match_statement_in_function(self):
+        self.assert_same(
+            'دالة فحص(ق):\n'
+            '    طابق ق\n'
+            '    حالة [أ، ب]:\n'
+            '        أعد أ + ب\n'
+            '    حالة {"الاسم": اس}:\n'
+            '        أعد اس\n'
+            '    حالة _:\n'
+            '        أعد "مجهول"\n'
+            'اطبع(فحص([١، ٢]))\n'
+            'اطبع(فحص({"الاسم": "سالم"}))\n'
+            'اطبع(فحص(٤٢))\n')
+
+    def test_stray_break_outside_loop(self):
+        self.assert_same(
+            'دالة مخالفة():\n'
+            '    كسر\n'
+            'مخالفة()\n')
+
+    # ---------- مسارات الاحتياط (فهم وسهمية وتقطيع وتفكيك) ----------
+
+    def test_fallback_expressions(self):
+        self.assert_same(
+            'دالة جهّز(ق):\n'
+            '    مربعات = [س * س لكل س في ق إن س % ٢ == ٠]\n'
+            '    مقلوبة = {س: -س لكل س في ق}\n'
+            '    سهمية = دالة(س) => س + ١٠٠\n'
+            '    أعد [مربعات، مقلوبة، سهمية(ق[٠])] + ق[١:]\n'
+            'اطبع(جهّز([١، ٢، ٣، ٤]))\n'
+            'أ، ب = [٧، ٨]\n'
+            'اطبع(أ، ب)\n'
+            'اطبع(خريطة(دالة(س) => س * ٢، [١، ٢]))\n')
+
+    def test_call_with_kwargs_and_spread(self):
+        self.assert_same(
+            'دالة عرض(أ، ب، ج):\n'
+            '    اطبع(أ، ب، ج)\n'
+            'عرض(١، ب = ٢، ج = ٣)\n'
+            'عناصر = [٤، ٥]\n'
+            'عرض(٠، ...عناصر)\n'
+            'اطبع([٠، ...مدى(٢)])\n')
+
+    def test_generators_through_vm(self):
+        self.assert_same(
+            'دالة أعداد():\n'
+            '    أنتج ١\n'
+            '    أنتج ٢\n'
+            '    أنتج ٣\n'
+            'لكل س في أعداد():\n'
+            '    اطبع(س)\n'
+            'دالة مربعات(ن):\n'
+            '    لكل س في مدى(ن):\n'
+            '        أنتج س * س\n'
+            'اطبع([...مربعات(٤)])\n'
+            'طالما خطأ:\n'
+            '    أنتج ٩٩\n')
+
+    def test_threads_and_modules_paths(self):
+        self.assert_same(
+            'من خيوط استورد خيط\n'
+            'النتيجة = []\n'
+            'دالة عاملة():\n'
+            '    النتيجة.أضف(٢ + ٢)\n'
+            'خ = خيط(عاملة)\n'
+            'خ.ابدأ()\n'
+            'خ.انتظر()\n'
+            'اطبع(النتيجة[٠])\n')
+
+
+class TestVmExamplesEquivalence(unittest.TestCase):
+    """كل مثال يعطي نفس المخرجات تمامًا بالدولاب وبدونه."""
+
+    EXAMPLES_DIR = os.path.join(ROOT, 'examples')
+    INTERACTIVE = {'10_لعبة_التخمين.عربي'}
+    # أمثلة مخرجاتها غير حتمية (عشوائية أو منفذ خادم أو زمن قياس/توازٍ)
+    NONDET = {'11_الوحدات.عربي', '22_الخادم.عربي',
+              '24_المزخرفات_والوراثة_المتعددة.عربي', '28_الخيوط.عربي'}
+
+    def _run_file(self, path, use_vm):
+        with open(path, encoding='utf-8') as f:
+            source = f.read()
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                tree = Parser(Lexer(source).tokenize()).parse()
+                Interpreter(script_dir=self.EXAMPLES_DIR,
+                            use_vm=use_vm).run(tree)
+            return ('ok', out.getvalue())
+        except ArabiError as exc:
+            return ('error', str(exc))
+
+    def test_examples_vm_matches_ast(self):
+        names = sorted(os.listdir(self.EXAMPLES_DIR))
+        checked = 0
+        for name in names:
+            if not name.endswith('.عربي') or name in self.INTERACTIVE \
+                    or name in self.NONDET:
+                continue
+            vm_kind, vm_out = self._run_file(
+                os.path.join(self.EXAMPLES_DIR, name), True)
+            ast_kind, ast_out = self._run_file(
+                os.path.join(self.EXAMPLES_DIR, name), False)
+            self.assertEqual(
+                (vm_kind, vm_out), (ast_kind, ast_out),
+                f'اختلاف بين الدولاب والممسح في المثال {name}')
+            checked += 1
+        self.assertGreaterEqual(checked, 30)
+
+
+class TestVmInternals(unittest.TestCase):
+    """الداخل: الترجمة والتخزين المؤقت للأكواد والأعلام."""
+
+    def _compile_src(self, body_src):
+        tree = Parser(Lexer(body_src).tokenize()).parse()
+        return tree.statements[0]
+
+    def test_opcode_count(self):
+        from arabi_lang.vm import OPCODE_COUNT
+        self.assertEqual(OPCODE_COUNT, 28)
+
+    def test_compile_simple_function(self):
+        from arabi_lang.vm import compile_function, VmCode, OP_LOAD_NAME
+        func_node = self._compile_src(
+            'دالة زد(س):\n    أعد س + ١\n')
+        code = compile_function(func_node.body)
+        self.assertIsInstance(code, VmCode)
+        self.assertIn('س', code.names)
+        self.assertIn(1, code.consts)
+        ops = [i[0] for i in code.instrs]
+        self.assertIn(OP_LOAD_NAME, ops)
+
+    def test_compile_never_fails_on_exotic(self):
+        # كل الجمل غير المدعومة تُغلّف بلا فشل — تعليمات احتياطية فقط
+        from arabi_lang.vm import compile_function, VmCode, OP_EXEC_STMT
+        src = ('دالة غريبة(ق):\n'
+               '    طابق ق\n'
+               '    حالة _:\n'
+               '        أعد ١\n')
+        func_node = self._compile_src(src)
+        code = compile_function(func_node.body)
+        self.assertIsInstance(code, VmCode)
+        self.assertTrue(any(i[0] == OP_EXEC_STMT for i in code.instrs))
+
+    def test_vm_code_cached_on_first_call(self):
+        from arabi_lang.runtime import ArabiFunc, _VM_PENDING
+        from arabi_lang.vm import VmCode
+        interp = Interpreter(use_vm=True)
+        tree = Parser(Lexer('دالة ضاعف(س):\n    أعد س * ٢\nضاعف(٥)\n').tokenize()).parse()
+        interp.run(tree)
+        func = interp.globals.vars['ضاعف']
+        self.assertIsInstance(func, ArabiFunc)
+        self.assertIsInstance(func.vm_code, VmCode)
+        # استدعاء ثانٍ يعيد استخدام نفس الكود
+        first = func.vm_code
+        interp._call_value(func, [3], {}, 0)
+        self.assertIs(func.vm_code, first)
+
+    def test_no_vm_never_compiles(self):
+        from arabi_lang.runtime import _VM_PENDING
+        interp = Interpreter(use_vm=False)
+        tree = Parser(Lexer('دالة ضاعف(س):\n    أعد س * ٢\nاطبع(ضاعف(٤))\n').tokenize()).parse()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            interp.run(tree)
+        self.assertEqual(out.getvalue(), '8\n')
+        self.assertIs(interp.globals.vars['ضاعف'].vm_code, _VM_PENDING)
+
+    def test_line_numbers_preserved_in_errors(self):
+        src = ('دالة انقسام(س):\n'
+               '    أعد س / ٠\n'
+               '\n'
+               'انقسام(٨)\n')
+        results = []
+        for use_vm in (True, False):
+            try:
+                with redirect_stdout(io.StringIO()):
+                    tree = Parser(Lexer(src).tokenize()).parse()
+                    Interpreter(use_vm=use_vm).run(tree)
+            except ArabiRuntimeError as exc:
+                results.append((exc.message, exc.line))
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0][1], 2)
+
+    def test_vm_state_isolated_between_interpreters(self):
+        # كل مفسّر يترجم دواله بنفسه — لا تشترك في ذاكرات
+        i1 = Interpreter(use_vm=True)
+        i2 = Interpreter(use_vm=True)
+        tree = Parser(Lexer('دالة المطبقة(س):\n    أعد س\nالمطبقة(١)\n').tokenize()).parse()
+        for interp in (i1, i2):
+            with redirect_stdout(io.StringIO()):
+                interp.run(tree)
+        f1 = i1.globals.vars['المطبقة']
+        f2 = i2.globals.vars['المطبقة']
+        self.assertIsNot(f1, f2)
+        self.assertIsNot(f1.vm_code, f2.vm_code)
+
+
+class TestVmCliFlags(unittest.TestCase):
+    """أعلام سطر الأوامر للدولاب الافتراضي."""
+
+    def _run_cli(self, source, *flags):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'برنامج.عربي')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(source)
+            return subprocess.run(
+                [sys.executable, os.path.join(ROOT, 'arabi.py'), *flags, path],
+                capture_output=True, text=True, timeout=60)
+
+    def test_no_vm_flag_runs(self):
+        src = 'دالة زد(س):\n    أعد س + ١\nاطبع(زد(٤١))\n'
+        r = self._run_cli(src, '--لا-دولاب')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('42', r.stdout)
+
+    def test_vm_and_no_vm_same_output(self):
+        src = ('دالة مجموعة(ن):\n'
+               '    مج = ٠\n'
+               '    لكل س في مدى(١، ن + ١):\n'
+               '        مج += س\n'
+               '    أعد مج\n'
+               'اطبع(مجموعة(٥٠))\n')
+        with_vm = self._run_cli(src)
+        without_vm = self._run_cli(src, '--لا-دولاب')
+        self.assertEqual(with_vm.returncode, 0, with_vm.stderr)
+        self.assertEqual(without_vm.returncode, 0, without_vm.stderr)
+        self.assertEqual(with_vm.stdout, without_vm.stdout)
+
+    def test_no_vm_flag_requires_file(self):
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'arabi.py'), '--لا-دولاب'],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("''--لا-دولاب''".replace("''", "'"), r.stderr)
 
 
 class TestCustomIteration(unittest.TestCase):
@@ -6406,3 +6911,7 @@ class TestPackageCLI(unittest.TestCase):
         r = self._cli(self.project, 'تثبيت')
         self.assertEqual(r.returncode, 1)
         self.assertIn('حدّد حزمة', r.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

@@ -45,6 +45,34 @@ def ar2en(text):
     return str(text).translate(AR2EN)
 
 
+# ================== إشارات التحكم الداخلية ==================
+
+# تُرفع لكسر تدفق التنفيذ وتلتقط في المواضع الصحيحة فقط (حلقات/دوال).
+# تعيش هنا ليستوردها المفسّر والدولاب الافتراضي معًا بلا استيراد دائري.
+
+class BreakSignal(Exception):
+    """إشارة داخلية لجملة كسر."""
+
+
+class ContinueSignal(Exception):
+    """إشارة داخلية لجملة استمر."""
+
+
+class ReturnSignal(Exception):
+    """إشارة داخلية لجملة أعد."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+# حالات ترجمة الدولاب الافتراضي لدالة عربي:
+# _VM_PENDING — لم تُترجم بعد (تُترجم عند أول استدعاء)
+# VmCode     — مترجمة وتنفذ عبر الدولاب
+# _VM_NO     — فشلت الترجمة، تنفذ دائمًا عبر الممسح الشجري
+_VM_PENDING = object()
+_VM_NO = object()
+
+
 # ================== البيئات (النطاقات) ==================
 
 class Env:
@@ -112,7 +140,7 @@ class ArabiFunc:
     """
 
     __slots__ = ('name', 'params', 'body', 'env', 'is_lambda',
-                 'is_generator', 'rest')
+                 'is_generator', 'rest', 'vm_code')
 
     def __init__(self, name, params, body, env, is_lambda=False,
                  is_generator=False, rest=None):
@@ -123,6 +151,7 @@ class ArabiFunc:
         self.is_lambda = is_lambda
         self.is_generator = is_generator
         self.rest = rest
+        self.vm_code = _VM_PENDING       # الدولاب الافتراضي: ترجمة عند الطلب
 
 
 class BuiltinFunc:
@@ -279,7 +308,6 @@ class GeneratorValue:
     # ---------- تشغيل خيط العامل ----------
 
     def _worker(self):
-        from .interpreter import ReturnSignal, BreakSignal, ContinueSignal
         _gen_tls.gen = self
         try:
             self.interp.exec_statements(self.func.body, self.env)

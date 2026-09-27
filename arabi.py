@@ -324,7 +324,7 @@ def _package_update(packages, target, index_source):
     _print_install(messages)
 
 
-def run_file(path, use_bytecode=True):
+def run_file(path, use_bytecode=True, use_vm=True):
     try:
         with open(path, encoding='utf-8') as f:
             source = f.read()
@@ -350,7 +350,7 @@ def run_file(path, use_bytecode=True):
         # مجلد الملف هو أساس البحث عن الوحدات المستوردة
         script_dir = os.path.dirname(os.path.abspath(path))
         Interpreter(script_dir=script_dir,
-                    use_bytecode=use_bytecode).run(tree)
+                    use_bytecode=use_bytecode, use_vm=use_vm).run(tree)
     except ArabiError as error:
         print_error(error, lines)
         sys.exit(1)
@@ -517,6 +517,7 @@ def show_help():
     python arabi.py حزمة تحديث [اسم] تحديث إلى أحدث نسخة في السجل
     python arabi.py --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
     python arabi.py --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
+    python arabi.py --لا-دولاب ملف  تشغيل معطّلًا الدولاب الافتراضي (ممسح شجري)
     python arabi.py --نسخة | -v     عرض الإصدار
     python arabi.py --مساعدة | -h   عرض هذه المساعدة
 
@@ -582,6 +583,12 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         run_file(args[1], use_bytecode=False)
+    elif first in ('--لا-دولاب', '--no-vm'):
+        if len(args) < 2:
+            print("خطأ: الخيار '--لا-دولاب' يحتاج مسار ملف بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        run_file(args[1], use_vm=False)
     elif first in ('-c', '--كود', '--تنفيذ'):
         if len(args) < 2:
             print("خطأ: الخيار '-c' يحتاج كودًا بعده", file=sys.stderr)
