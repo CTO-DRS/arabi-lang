@@ -1171,6 +1171,17 @@ def install_builtins(env):
         'يوم_الأسبوع': BuiltinFunc('يوم_الأسبوع', _dt_weekday),
     }))
 
+    # ============ وحدة الإحصاء (الإصدار 1.10) ============
+
+    env.define('إحصاء', ModuleValue('إحصاء', {
+        'معدل': BuiltinFunc('معدل', _st_mean),
+        'وسيط': BuiltinFunc('وسيط', _st_median),
+        'منوال': BuiltinFunc('منوال', _st_mode),
+        'تباين': BuiltinFunc('تباين', _st_variance),
+        'انحراف': BuiltinFunc('انحراف', _st_stddev),
+        'مدى': BuiltinFunc('مدى', _st_range),
+    }))
+
     # ============ إطار الاختبارات (الإصدار 1.6) ============
 
     _tests = _TestState()
@@ -2964,3 +2975,71 @@ class _ArabiHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         self._run()
+
+
+# ================== وحدة إحصاء (الإصدار 1.10) ==================
+
+def _st_numbers(args, name, line):
+    """يتحقق من معامل واحد قائمة أعداد غير فارغة ويعيدها."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(f"'{name}' تتوقع معاملًا واحدًا", line)
+    values = args[0]
+    if not isinstance(values, list):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج قائمة أعداد لكنها استلمت {typename(values)}", line)
+    for v in values:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ArabiRuntimeError(
+                f"'{name}' تحتاج قائمة أعداد لكنها تحوي {typename(v)}", line)
+    if not values:
+        raise ArabiRuntimeError(f"'{name}' لا تقبل قائمة فارغة", line)
+    return values
+
+
+def _st_mean(args, line):
+    """معدل(أعداد) — المتوسط الحسابي."""
+    values = _st_numbers(args, 'معدل', line)
+    return sum(values) / len(values)
+
+
+def _st_median(args, line):
+    """وسيط(أعداد) — القيمة الوسطى بعد الترتيب."""
+    values = sorted(_st_numbers(args, 'وسيط', line))
+    n = len(values)
+    mid = n // 2
+    if n % 2 == 1:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2
+
+
+def _st_mode(args, line):
+    """منوال(أعداد) — القيمة الأكثر تكرارًا (الأولى ظهورًا عند التعادل)."""
+    values = _st_numbers(args, 'منوال', line)
+    counts = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    best = None
+    best_count = 0
+    for v in values:                    # الأولى ظهورًا عند التعادل
+        if counts[v] > best_count:
+            best = v
+            best_count = counts[v]
+    return best
+
+
+def _st_variance(args, line):
+    """تباين(أعداد) — التباين المجتمعي (القسمة على العدد)."""
+    values = _st_numbers(args, 'تباين', line)
+    mean = sum(values) / len(values)
+    return sum((v - mean) ** 2 for v in values) / len(values)
+
+
+def _st_stddev(args, line):
+    """انحراف(أعداد) — الجذر التربيعي للتباين."""
+    return math.sqrt(_st_variance(args, line))
+
+
+def _st_range(args, line):
+    """مدى(أعداد) — الفرق بين أكبر قيمة وأصغرها."""
+    values = _st_numbers(args, 'مدى', line)
+    return max(values) - min(values)

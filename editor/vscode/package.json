@@ -1,11 +1,16 @@
 {
   "name": "arabi-lang",
   "displayName": "لغة عربي — Arabi Language",
-  "description": "دعم لغة عربي البرمجية: تلوين بناء الجملة، مقتطفات كود، وأدوات تحرير للملفات ذات الامتداد .عربي",
-  "version": "1.9.0",
+  "description": "دعم لغة عربي البرمجية: تلوين بناء الجملة، مقتطفات كود، وخادم لغة (LSP) يوفر التشخيص اللحظي والإكمال الذكي والتلميحات والانتقال إلى التعريف للملفات ذات الامتداد .عربي",
+  "version": "1.10.0",
   "publisher": "arabi-lang",
   "license": "MIT",
   "icon": null,
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:arabi",
+    "onCommand:arabi.restartServer"
+  ],
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -18,7 +23,8 @@
     "arabi",
     "عربي",
     "برمجة",
-    "لغة عربية"
+    "لغة عربية",
+    "lsp"
   ],
   "contributes": {
     "languages": [
@@ -47,6 +53,38 @@
         "language": "arabi",
         "path": "./snippets/arabi.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "arabi.restartServer",
+        "title": "عربي: إعادة تشغيل خادم اللغة",
+        "category": "عربي"
+      },
+      {
+        "command": "arabi.toggleServer",
+        "title": "عربي: تشغيل/إيقاف خادم اللغة",
+        "category": "عربي"
+      }
+    ],
+    "configuration": {
+      "title": "لغة عربي",
+      "properties": {
+        "arabi.languageServer.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "تشغيل خادم اللغة (تشخيص لحظي وإكمال ذكي وتلميحات وانتقال للتعريف)"
+        },
+        "arabi.languageServer.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "مسار مفسر بايثون المستخدم لتشغيل خادم اللغة"
+        },
+        "arabi.languageServer.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "المسار الكامل لمجلد لغة عربي (يحتوي arabi.py). اتركه فارغًا لاستخدام المجلد الحالي للمساحة"
+        }
+      }
+    }
   }
 }

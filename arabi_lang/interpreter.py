@@ -40,7 +40,7 @@ CATCHABLE = (
 # الوحدات الجاهزة المدمجة في اللغة
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
                    'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم',
-                   'قاعدة', 'ترميز', 'جداول', 'خيوط', 'تواريخ')
+                   'قاعدة', 'ترميز', 'جداول', 'خيوط', 'تواريخ', 'إحصاء')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -268,10 +268,27 @@ class Interpreter:
             finally:
                 iterable.close()
             return
+        elif isinstance(iterable, InstanceValue):
+            # بروتوكول التكرار المخصص: صنف يعرّف 'تالٍ' (و'أول' اختياريًا).
+            # أول() إن وُجدت تعيد كائن التكرار، وإلا فالكائن نفسه هو المؤشر.
+            # تالٍ() تعيد القيمة التالية، وعودة 'لا شيء' تنهي التكرار.
+            iterator, next_func = self._custom_iterator(iterable, node.line)
+            while True:
+                item = self._invoke_bound(next_func, iterator, [], {}, node.line)
+                if item is None:
+                    break
+                self._for_bind(node, item, env)
+                try:
+                    self.exec_statements(node.body, env)
+                except BreakSignal:
+                    break
+                except ContinueSignal:
+                    continue
+            return
         else:
             raise ArabiRuntimeError(
-                f'لا يمكن التكرار على {typename(iterable)} — استخدم قائمة أو نصًا أو مدى',
-                node.line)
+                f'لا يمكن التكرار على {typename(iterable)} — استخدم قائمة أو نصًا '
+                'أو مدى أو صنفًا يعرّف طريقة تالٍ', node.line)
         for item in items:
             self._for_bind(node, item, env)
             try:
@@ -280,6 +297,27 @@ class Interpreter:
                 break
             except ContinueSignal:
                 continue
+
+    def _custom_iterator(self, obj, line):
+        """يعيد (كائن التكرار، دالة تالٍ) وفق البروتوكول المخصص أو يرفع خطأ.
+
+        الصنف يعرّف 'تالٍ' للتكرار على نفسه، أو 'أول' تعيد كائنًا آخر يعرّف 'تالٍ'.
+        """
+        first_func, _owner = self._lookup_member(obj.cls, 'أول')
+        if isinstance(first_func, ArabiFunc):
+            target = self._invoke_bound(first_func, obj, [], {}, line)
+            if not isinstance(target, InstanceValue):
+                raise ArabiRuntimeError(
+                    f"الطريقة 'أول' يجب أن تعيد كائنًا يعرّف طريقة 'تالٍ' — "
+                    f'استلمت {typename(target)}', line)
+        else:
+            target = obj
+        next_func, _owner = self._lookup_member(target.cls, 'تالٍ')
+        if not isinstance(next_func, ArabiFunc):
+            raise ArabiRuntimeError(
+                f'لا يمكن التكرار على {typename(obj)} — استخدم قائمة أو نصًا '
+                'أو مدى أو صنفًا يعرّف طريقة تالٍ', line)
+        return target, next_func
 
     def _for_bind(self, node, item, env):
         """يربط عنصر حلقة 'لكل' بمتغير أو متغيرات التفكيك."""
@@ -868,7 +906,7 @@ class Interpreter:
         return result
 
     def _spread_into(self, target, value, line):
-        """يفتّ القيمة القابلة للتكرار (قائمة/نص/مدى/مولد) في قائمة هدف."""
+        """يفتّ القيمة القابلة للتكرار (قائمة/نص/مدى/مولد/كائن بتالٍ) في قائمة هدف."""
         if isinstance(value, list):
             target.extend(value)
         elif isinstance(value, str):
@@ -879,6 +917,14 @@ class Interpreter:
             while True:
                 ok, item = value._next_pair()
                 if not ok:
+                    break
+                target.append(item)
+        elif isinstance(value, InstanceValue):
+            # بروتوكول التكرار المخصص: تفكيك كائن يعرّف 'تالٍ' (و'أول' اختياريًا)
+            iterator, next_func = self._custom_iterator(value, line)
+            while True:
+                item = self._invoke_bound(next_func, iterator, [], {}, line)
+                if item is None:
                     break
                 target.append(item)
         else:
@@ -1551,11 +1597,23 @@ class Interpreter:
         return left == right
 
     def _membership(self, left, right, line):
-        # كائن يعرّف الطريقة الخاصة 'يحتوي'
+        # كائن يعرّف الطريقة الخاصة 'يحتوي' (بحث مباشر)
         if isinstance(right, InstanceValue):
             func, _owner = self._lookup_member(right.cls, 'يحتوي')
             if isinstance(func, ArabiFunc):
                 return bool(self._invoke_bound(func, right, [left], {}, line))
+        # كائن يعرّف بروتوكول التكرار 'تالٍ' بلا 'يحتوي' — بحث بالمرور على العناصر
+        if isinstance(right, InstanceValue):
+            _first, has_first = self._lookup_member(right.cls, 'أول')
+            _next, has_next = self._lookup_member(right.cls, 'تالٍ')
+            if has_first is not None or has_next is not None:
+                iterator, next_func = self._custom_iterator(right, line)
+                while True:
+                    item = self._invoke_bound(next_func, iterator, [], {}, line)
+                    if item is None:
+                        return False
+                    if self._values_equal(item, left):
+                        return True
         if isinstance(right, str):
             if not isinstance(left, str):
                 raise ArabiRuntimeError(

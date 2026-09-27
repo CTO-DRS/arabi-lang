@@ -237,10 +237,12 @@ class _Linter:
         elif isinstance(stmt, N.EnumDef):
             self._define(scope, stmt.name, stmt.line, 'تعداد')
         elif isinstance(stmt, N.Import):
-            if stmt.bound_name:
+            if stmt.names is not None:
+                # صيغة «من...استورد»: المرتبط فعليًا هو الأسماء المستوردة فقط
+                for name in stmt.names:
+                    self._define(scope, name, stmt.line, 'استيراد')
+            elif stmt.bound_name:
                 self._define(scope, stmt.bound_name, stmt.line, 'استيراد')
-            for name in (stmt.names or []):
-                self._define(scope, name, stmt.line, 'استيراد')
         elif isinstance(stmt, N.Assign):
             for target in stmt.targets:
                 self._register_target(target, scope)

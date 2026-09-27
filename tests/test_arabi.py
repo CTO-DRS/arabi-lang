@@ -4584,4 +4584,691 @@ class TestDatesModule(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestStatisticsModule(unittest.TestCase):
+    """وحدة الإحصاء (الإصدار 1.10)."""
+
+    def test_import_from(self):
+        code = """
+من إحصاء استورد معدل
+درجات = [70، 80، 90]
+اطبع(معدل(درجات))
+"""
+        self.assertEqual(run_arabi(code).strip(), '80.0')
+
+    def test_module_access(self):
+        code = """
+اطبع(إحصاء.معدل([2، 4، 6]))
+"""
+        self.assertEqual(run_arabi(code).strip(), '4.0')
+
+    def test_median_odd(self):
+        code = """
+من إحصاء استورد وسيط
+اطبع(وسيط([3، 1، 2]))
+"""
+        self.assertEqual(run_arabi(code).strip(), '2')
+
+    def test_median_even(self):
+        code = """
+من إحصاء استورد وسيط
+اطبع(وسيط([4، 1، 3، 2]))
+"""
+        self.assertEqual(run_arabi(code).strip(), '2.5')
+
+    def test_mode(self):
+        code = """
+من إحصاء استورد منوال
+اطبع(منوال([5، 3، 5، 2، 5، 3]))
+"""
+        self.assertEqual(run_arabi(code).strip(), '5')
+
+    def test_mode_tie_first_wins(self):
+        code = """
+من إحصاء استورد منوال
+اطبع(منوال([1، 2]))
+"""
+        self.assertEqual(run_arabi(code).strip(), '1')
+
+    def test_variance_stddev(self):
+        code = """
+من إحصاء استورد تباين، انحراف
+أ = [2، 4، 4، 4، 5، 5، 7، 9]
+اطبع(تباين(أ))
+اطبع(انحراف(أ) == 2)
+"""
+        self.assertEqual(run_arabi(code).strip(), '4.0\nصح')
+
+    def test_range(self):
+        code = """
+من إحصاء استورد مدى
+اطبع(مدى([15، 3، 11، 7]))
+"""
+        self.assertEqual(run_arabi(code).strip(), '12')
+
+    def test_error_empty_list(self):
+        expect_error(
+            "من إحصاء استورد معدل\nمعدل([])",
+            ArabiRuntimeError, 'فارغة')
+
+    def test_error_non_list(self):
+        expect_error(
+            "من إحصاء استورد معدل\nمعدل(5)",
+            ArabiRuntimeError, 'قائمة')
+
+    def test_error_mixed_types(self):
+        expect_error(
+            'من إحصاء استورد معدل\nمعدل([1، "اثنان"])',
+            ArabiRuntimeError, 'أعداد')
+
+    def test_error_no_args(self):
+        expect_error(
+            "من إحصاء استورد وسيط\nوسيط()",
+            ArabiRuntimeError, 'معاملًا')
+
+    def test_builtin_module_count(self):
+        from arabi_lang.interpreter import BUILTIN_MODULES
+        self.assertIn('إحصاء', BUILTIN_MODULES)
+        self.assertEqual(len(BUILTIN_MODULES), 17)
+
+
+
+class TestLSPServer(unittest.TestCase):
+    """خادم لغة عربي — بروتوكول LSP (الإصدار 1.10)."""
+
+    @staticmethod
+    def _session(messages):
+        import io as _io
+        import json as _json
+        from arabi_lang.lsp import ArabiLanguageServer, read_message
+        stream_in = _io.BytesIO()
+        for m in messages:
+            body = _json.dumps(m, ensure_ascii=False).encode('utf-8')
+            stream_in.write(f'Content-Length: {len(body)}\r\n\r\n'
+                            .encode('ascii'))
+            stream_in.write(body)
+        stream_in.seek(0)
+        out = _io.BytesIO()
+        ArabiLanguageServer(input_stream=stream_in, output_stream=out).run()
+        out.seek(0)
+        responses = []
+        while True:
+            r = read_message(out)
+            if r is None:
+                break
+            responses.append(r)
+        return responses
+
+    @staticmethod
+    def _msg(method, params=None, msg_id=None):
+        m = {'jsonrpc': '2.0', 'method': method}
+        if params is not None:
+            m['params'] = params
+        if msg_id is not None:
+            m['id'] = msg_id
+        return m
+
+    def _open(self, uri, text):
+        return self._msg('textDocument/didOpen', {
+            'textDocument': {'uri': uri, 'languageId': 'عربي',
+                             'version': 1, 'text': text}})
+
+    # ---------- الناقل ----------
+
+    def test_transport_roundtrip(self):
+        from arabi_lang.lsp import read_message, write_message
+        import io as _io
+        out = _io.BytesIO()
+        write_message(out, {'jsonrpc': '2.0', 'id': 1, 'result': 'سلام'})
+        out.seek(0)
+        message = read_message(out)
+        self.assertEqual(message, {'jsonrpc': '2.0', 'id': 1,
+                                   'result': 'سلام'})
+
+    def test_initialize_capabilities(self):
+        responses = self._session([self._msg('initialize', {}, 1)])
+        caps = responses[0]['result']['capabilities']
+        for cap in ('textDocumentSync', 'completionProvider',
+                    'hoverProvider', 'definitionProvider',
+                    'documentSymbolProvider'):
+            self.assertIn(cap, caps)
+
+    def test_unknown_method_returns_error(self):
+        responses = self._session([self._msg('textDocument/مجهول', {}, 7)])
+        self.assertEqual(responses[0]['error']['code'], -32601)
+
+    def test_exit_ends_loop(self):
+        responses = self._session([
+            self._msg('initialize', {}, 1),
+            self._msg('shutdown', None, 2),
+            self._msg('exit'),
+        ])
+        ids = [r.get('id') for r in responses if 'id' in r]
+        self.assertEqual(ids, [1, 2])
+
+    # ---------- التشخيصات ----------
+
+    def test_diagnostics_clean(self):
+        uri = 'file:///سليم.عربي'
+        responses = self._session([
+            self._open(uri, 'س = 1 + 2\nاطبع(س)\n')])
+        diag = [r for r in responses
+                if r.get('method') == 'textDocument/publishDiagnostics']
+        self.assertEqual(diag[0]['params']['diagnostics'], [])
+
+    def test_diagnostics_syntax_error(self):
+        uri = 'file:///معطوب.عربي'
+        responses = self._session([
+            self._open(uri, 'صنف :\n    تجاهل\n')])
+        diag = [r for r in responses
+                if r.get('method') == 'textDocument/publishDiagnostics']
+        items = diag[0]['params']['diagnostics']
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['severity'], 1)
+        self.assertEqual(items[0]['range']['start']['line'], 0)
+
+    def test_diagnostics_cleared_on_close(self):
+        uri = 'file:///معطوب.عربي'
+        responses = self._session([
+            self._open(uri, 'صنف :\n'),
+            self._msg('textDocument/didClose',
+                      {'textDocument': {'uri': uri}}),
+        ])
+        diag = [r for r in responses
+                if r.get('method') == 'textDocument/publishDiagnostics']
+        self.assertEqual(diag[-1]['params']['diagnostics'], [])
+
+    # ---------- الإكمال ----------
+
+    def test_completion_default_includes_keywords_and_modules(self):
+        uri = 'file:///كود.عربي'
+        responses = self._session([
+            self._open(uri, 'س = 1\n'),
+            self._msg('textDocument/completion', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 1, 'character': 0}}, 2),
+        ])
+        items = responses[-1]['result']['items']
+        labels = [i['label'] for i in items]
+        for word in ('صنف', 'دالة', 'لكل', 'طابق', 'إحصاء', 'تواريخ'):
+            self.assertIn(word, labels)
+
+    def test_completion_module_members(self):
+        uri = 'file:///كود.عربي'
+        responses = self._session([
+            self._open(uri, 'من إحصاء استورد معدل\nإحصاء.\n'),
+            self._msg('textDocument/completion', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 1, 'character': 6}}, 2),
+        ])
+        items = responses[-1]['result']['items']
+        labels = [i['label'] for i in items]
+        for member in ('معدل', 'وسيط', 'منوال', 'تباين', 'انحراف', 'مدى'):
+            self.assertIn(member, labels)
+
+    def test_completion_class_members_and_inference(self):
+        uri = 'file:///كود.عربي'
+        code = ('صنف نقطة:\n'
+                '    دالة إنشاء(س):\n'
+                '        هذا.س = س\n'
+                '    دالة مسافة():\n'
+                '        أعد 0\n'
+                '\n'
+                'ن = نقطة(3)\n'
+                'اطبع(ن.\n')
+        responses = self._session([
+            self._open(uri, code),
+            self._msg('textDocument/completion', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 7, 'character': 7}}, 2),
+        ])
+        items = responses[-1]['result']['items']
+        labels = [i['label'] for i in items]
+        self.assertIn('إنشاء', labels)
+        self.assertIn('مسافة', labels)
+        self.assertNotIn('اطبع', labels)
+
+    def test_completion_incomplete_line_repair(self):
+        uri = 'file:///كود.عربي'
+        code = 'صنف أ:\n    دالة ف():\n        أعد 1\n\nك = أ()\nك.\n'
+        responses = self._session([
+            self._open(uri, code),
+            self._msg('textDocument/completion', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 5, 'character': 2}}, 2),
+        ])
+        items = responses[-1]['result']['items']
+        labels = [i['label'] for i in items]
+        self.assertIn('ف', labels)
+
+    # ---------- التلميح ----------
+
+    def test_hover_module(self):
+        uri = 'file:///كود.عربي'
+        responses = self._session([
+            self._open(uri, 'إحصاء.معدل([1])\n'),
+            self._msg('textDocument/hover', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 0, 'character': 1}}, 2),
+        ])
+        value = responses[-1]['result']['contents']['value']
+        self.assertIn('وحدة قياسية', value)
+        self.assertIn('معدل', value)
+
+    def test_hover_user_function_with_doc(self):
+        uri = 'file:///كود.عربي'
+        code = ('دالة مجموع_مربعات(أ، ب):\n'
+                '    """يجمع مربعي العددين."""\n'
+                '    أعد أ * أ + ب * ب\n'
+                '\n'
+                'مجموع_مربعات(1، 2)\n')
+        responses = self._session([
+            self._open(uri, code),
+            self._msg('textDocument/hover', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 4, 'character': 2}}, 2),
+        ])
+        value = responses[-1]['result']['contents']['value']
+        self.assertIn('مجموع_مربعات', value)
+        self.assertIn('أ، ب', value)
+        self.assertIn('يجمع مربعي العددين', value)
+
+    def test_hover_unknown_returns_none(self):
+        uri = 'file:///كود.عربي'
+        responses = self._session([
+            self._open(uri, 'اطبع("سلام")\n'),
+            self._msg('textDocument/hover', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 0, 'character': 6}}, 2),
+        ])
+        result = responses[-1].get('result')
+        self.assertTrue(result is None or result is False
+                        or 'result' not in responses[-1]
+                        or result is None)
+
+    # ---------- الرموز ----------
+
+    def test_document_symbols(self):
+        uri = 'file:///كود.عربي'
+        code = ('دالة رئيسية():\n'
+                '    أعد 1\n'
+                '\n'
+                'صنف حيوان:\n'
+                '    دالة صوت():\n'
+                '        تجاهل\n'
+                '\n'
+                'تعداد لون:\n'
+                '    أحمر\n'
+                '    أخضر\n'
+                '\n'
+                'ثابت = 5\n')
+        responses = self._session([
+            self._open(uri, code),
+            self._msg('textDocument/documentSymbol',
+                      {'textDocument': {'uri': uri}}, 2),
+        ])
+        symbols = responses[-1]['result']
+        names = {s['name']: s['kind'] for s in symbols}
+        self.assertEqual(names['رئيسية'], 12)      # دالة
+        self.assertEqual(names['حيوان'], 5)        # صنف
+        self.assertEqual(names['لون'], 10)         # تعداد
+        self.assertEqual(names['ثابت'], 13)        # متغير
+        animal = [s for s in symbols if s['name'] == 'حيوان'][0]
+        children = {c['name']: c['kind'] for c in animal['children']}
+        self.assertEqual(children.get('صوت'), 6)   # طريقة
+
+    # ---------- التعريف ----------
+
+    def test_definition_function(self):
+        uri = 'file:///كود.عربي'
+        code = 'دالة تحية():\n    أعد "مرحبا"\n\nتحية()\n'
+        responses = self._session([
+            self._open(uri, code),
+            self._msg('textDocument/definition', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 3, 'character': 1}}, 2),
+        ])
+        loc = responses[-1]['result']
+        self.assertEqual(loc['uri'], uri)
+        self.assertEqual(loc['range']['start']['line'], 0)
+
+    def test_definition_method(self):
+        uri = 'file:///كود.عربي'
+        code = ('صنف بوابة:\n'
+                '    دالة افتح():\n'
+                '        أعد صح\n'
+                '\n'
+                'ب = بوابة()\n'
+                'ب.افتح()\n')
+        responses = self._session([
+            self._open(uri, code),
+            self._msg('textDocument/definition', {
+                'textDocument': {'uri': uri},
+                'position': {'line': 5, 'character': 2}}, 2),
+        ])
+        loc = responses[-1]['result']
+        self.assertEqual(loc['range']['start']['line'], 1)
+
+    # ---------- أدوات المساعدة ----------
+
+    def test_word_at(self):
+        from arabi_lang.lsp import word_at
+        lines = ['اطبع(المعدل)']
+        self.assertEqual(word_at(lines, 0, 8), ('المعدل', 5))
+        # عند بداية الكلمة تُختار الكلمة نفسها
+        self.assertEqual(word_at(lines, 0, 0), ('اطبع', 0))
+        # عند غير الحرفي تُختار الكلمة التالية
+        self.assertEqual(word_at(lines, 0, 5), ('المعدل', 5))
+
+    def test_word_at_diacritics(self):
+        from arabi_lang.lsp import word_at
+        lines = ['مُعلّم = 1']
+        word, start = word_at(lines, 0, 4)
+        self.assertTrue(word and word.startswith('م'))
+
+    def test_line_range(self):
+        from arabi_lang.lsp import line_range
+        lines = ['سلام', 'عليكم']
+        rng = line_range(lines, 0)
+        self.assertEqual(rng['start'], {'line': 0, 'character': 0})
+        self.assertEqual(rng['end'], {'line': 0, 'character': 4})
+
+    def test_server_isolates_documents(self):
+        uri_a = 'file:///أ.عربي'
+        uri_b = 'file:///ب.عربي'
+        responses = self._session([
+            self._open(uri_a, 'أ = 1\n'),
+            self._open(uri_b, 'ب = 2\nأ\n'),
+            self._msg('textDocument/definition', {
+                'textDocument': {'uri': uri_b},
+                'position': {'line': 1, 'character': 0}}, 3),
+        ])
+        # 'أ' مذكورة في ب لكنها غير معرفة فيه — لا تعريف
+        self.assertIsNone(responses[-1].get('result'))
+
+    def test_definition_within_same_document_only(self):
+        uri_a = 'file:///أ.عربي'
+        uri_b = 'file:///ب.عربي'
+        responses = self._session([
+            self._open(uri_a, 'أ = 1\n'),
+            self._open(uri_b, 'ب = 2\nأ\n'),
+            self._msg('textDocument/definition', {
+                'textDocument': {'uri': uri_a},
+                'position': {'line': 0, 'character': 0}}, 3),
+        ])
+        loc = responses[-1]['result']
+        self.assertEqual(loc['uri'], uri_a)
+
+
 if __name__ == '__main__':    unittest.main(verbosity=2)
+
+
+class TestCustomIteration(unittest.TestCase):
+    """بروتوكول التكرار المخصص: تالٍ وأول (الإصدار 1.10)."""
+
+    def test_for_with_tali(self):
+        code = '''
+صنف عداد:
+    دالة إنشاء(ن):
+        هذا.ن = ن
+        هذا.ح = 0
+    دالة تالٍ():
+        هذا.ح = هذا.ح + 1
+        لو هذا.ح > هذا.ن:
+            أعد ولا شيء
+        أعد هذا.ح
+
+نتيجة = []
+لكل س في عداد(4):
+    نتيجة.أضف(س)
+اطبع(نتيجة)
+'''
+        self.assertEqual(run_arabi(code).strip(), '[1، 2، 3، 4]')
+
+    def test_for_with_awal_fresh_iterator(self):
+        code = '''
+صنف صندوق:
+    دالة إنشاء(عناصر):
+        هذا.عناصر = عناصر
+    دالة أول():
+        أعد مؤشر_صندوق(هذا.عناصر)
+
+صنف مؤشر_صندوق:
+    دالة إنشاء(عناصر):
+        هذا.عناصر = عناصر
+        هذا.موقع = 0
+    دالة تالٍ():
+        لو هذا.موقع >= طول(هذا.عناصر):
+            أعد ولا شيء
+        القيمة = هذا.عناصر[هذا.موقع]
+        هذا.موقع = هذا.موقع + 1
+        أعد القيمة
+
+ص = صندوق(["أ"، "ب"، "ج"])
+مجموع = ""
+لكل حرف في ص:
+    مجموع = مجموع + حرف
+لكل حرف في ص:
+    مجموع = مجموع + حرف
+اطبع(مجموع)
+'''
+        self.assertEqual(run_arabi(code).strip(), 'أبجأبج')
+
+    def test_break_continue(self):
+        code = '''
+صنف عداد:
+    دالة إنشاء(ن):
+        هذا.ن = ن
+        هذا.ح = 0
+    دالة تالٍ():
+        هذا.ح = هذا.ح + 1
+        لو هذا.ح > هذا.ن:
+            أعد ولا شيء
+        أعد هذا.ح
+
+مجموع = 0
+لكل س في عداد(10):
+    لو س > 5:
+        كسر
+    لو س % 2 == 0:
+        استمر
+    مجموع = مجموع + س
+اطبع(مجموع)
+'''
+        self.assertEqual(run_arabi(code).strip(), '9')
+
+    def test_in_operator_tali(self):
+        code = '''
+صنف عداد:
+    دالة إنشاء(ن):
+        هذا.ن = ن
+        هذا.ح = 0
+    دالة تالٍ():
+        هذا.ح = هذا.ح + 1
+        لو هذا.ح > هذا.ن:
+            أعد ولا شيء
+        أعد هذا.ح
+
+اطبع(3 في عداد(5))
+اطبع(9 في عداد(5))
+'''
+        self.assertEqual(run_arabi(code).strip(), 'صح\nخطأ')
+
+    def test_in_operator_awal(self):
+        code = '''
+صنف صندوق:
+    دالة إنشاء(عناصر):
+        هذا.عناصر = عناصر
+    دالة أول():
+        أعد مؤشر_صندوق(هذا.عناصر)
+
+صنف مؤشر_صندوق:
+    دالة إنشاء(عناصر):
+        هذا.عناصر = عناصر
+        هذا.موقع = 0
+    دالة تالٍ():
+        لو هذا.موقع >= طول(هذا.عناصر):
+            أعد ولا شيء
+        القيمة = هذا.عناصر[هذا.موقع]
+        هذا.موقع = هذا.موقع + 1
+        أعد القيمة
+
+ص = صندوق([10، 20، 30])
+اطبع(20 في ص)
+اطبع(50 في ص)
+'''
+        self.assertEqual(run_arabi(code).strip(), 'صح\nخطأ')
+
+    def test_spread_tali(self):
+        code = '''
+صنف عداد:
+    دالة إنشاء(ن):
+        هذا.ن = ن
+        هذا.ح = 0
+    دالة تالٍ():
+        هذا.ح = هذا.ح + 1
+        لو هذا.ح > هذا.ن:
+            أعد ولا شيء
+        أعد هذا.ح
+
+اطبع([...عداد(3)])
+'''
+        self.assertEqual(run_arabi(code).strip(), '[1، 2، 3]')
+
+    def test_destructuring_in_for(self):
+        code = '''
+صنف أزواج:
+    دالة إنشاء():
+        هذا.قائمة = [[1، 2]، [3، 4]، [5، 6]]
+        هذا.موقع = 0
+    دالة تالٍ():
+        لو هذا.موقع >= طول(هذا.قائمة):
+            أعد ولا شيء
+        القيمة = هذا.قائمة[هذا.موقع]
+        هذا.موقع = هذا.موقع + 1
+        أعد القيمة
+
+مجموع = 0
+لكل أ، ب في أزواج():
+    مجموع = مجموع + أ * ب
+اطبع(مجموع)
+'''
+        self.assertEqual(run_arabi(code).strip(), '44')
+
+    def test_inheritance_tali(self):
+        code = '''
+صنف أساس:
+    دالة إنشاء(ن):
+        هذا.ن = ن
+        هذا.ح = 0
+    دالة تالٍ():
+        هذا.ح = هذا.ح + 1
+        لو هذا.ح > هذا.ن:
+            أعد ولا شيء
+        أعد هذا.ح
+
+صنف مضاعف من أساس:
+    دالة تالٍ():
+        القيمة = الأصل.تالٍ()
+        لو القيمة == ولا شيء:
+            أعد ولا شيء
+        أعد القيمة * 2
+
+نتيجة = []
+لكل س في مضاعف(3):
+    نتيجة.أضف(س)
+اطبع(نتيجة)
+'''
+        self.assertEqual(run_arabi(code).strip(), '[2، 4، 6]')
+
+    def test_empty_iterator(self):
+        code = '''
+صنف فارغ:
+    دالة إنشاء():
+        هذا.انتهى = خطأ
+    دالة تالٍ():
+        لو هذا.انتهى:
+            أعد ولا شيء
+        هذا.انتهى = صح
+        أعد ولا شيء
+
+عدد_الدورات = 0
+لكل س في فارغ():
+    عدد_الدورات = عدد_الدورات + 1
+اطبع(عدد_الدورات)
+'''
+        self.assertEqual(run_arabi(code).strip(), '0')
+
+    def test_error_no_tali(self):
+        code = '''
+صنف عادي:
+    دالة إنشاء():
+        هذا.س = 1
+
+لكل س في عادي():
+    تجاهل
+'''
+        exc = expect_error(code, ArabiRuntimeError, 'تالٍ')
+        self.assertIn('لا يمكن التكرار', str(exc))
+
+    def test_error_awal_returns_non_instance(self):
+        code = '''
+صنف خاطئ:
+    دالة إنشاء():
+        هذا.س = 1
+    دالة أول():
+        أعد 42
+    دالة تالٍ():
+        أعد ولا شيء
+
+لكل س في خاطئ():
+    تجاهل
+'''
+        expect_error(code, ArabiRuntimeError, 'أول')
+
+    def test_generator_inside_iterator(self):
+        code = '''
+صنف مؤجل:
+    دالة إنشاء():
+        هذا.تم = خطأ
+    دالة تالٍ():
+        لو هذا.تم:
+            أعد ولا شيء
+        هذا.تم = صح
+        أعد 99
+
+اطبع([...مؤجل()])
+'''
+        self.assertEqual(run_arabi(code).strip(), '[99]')
+
+    def test_iterator_with_membership_and_len(self):
+        code = '''
+صنف عداد:
+    دالة إنشاء(ن):
+        هذا.ن = ن
+        هذا.ح = 0
+    دالة تالٍ():
+        هذا.ح = هذا.ح + 1
+        لو هذا.ح > هذا.ن:
+            أعد ولا شيء
+        أعد هذا.ح
+
+مجموع = 0
+لكل س في عداد(5):
+    لو 2 في عداد(3):
+        مجموع = مجموع + س
+اطبع(مجموع)
+'''
+        self.assertEqual(run_arabi(code).strip(), '15')
+
+    def test_list_still_works(self):
+        code = '''
+مجموع = ""
+لكل س في [1، 2، 3]:
+    مجموع = مجموع + نص(س)
+لكل حرف في "أبج":
+    مجموع = مجموع + حرف
+لكل س في مدى(2، 5):
+    مجموع = مجموع + نص(س)
+اطبع(مجموع)
+'''
+        self.assertEqual(run_arabi(code).strip(), '123أبج234')

@@ -12,6 +12,7 @@
     python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
     python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
     python arabi.py --حزم           عرض المكتبات المثبتة
+    python arabi.py --لغة           تشغيل خادم اللغة (LSP) للمحررات
     python arabi.py --نسخة          عرض الإصدار
 """
 
@@ -28,6 +29,7 @@ from arabi_lang.parser import Parser
 from arabi_lang.interpreter import Interpreter
 from arabi_lang.errors import ArabiError
 from arabi_lang import tools
+from arabi_lang import lsp as lsp_module
 
 BANNER = rf"""
   ____              _____
@@ -353,7 +355,7 @@ def show_help():
     python arabi.py --نسخة | -v     عرض الإصدار
     python arabi.py --مساعدة | -h   عرض هذه المساعدة
 
-الوحدات المدمجة: رياضيات، وقت، ملفات، جيسون، عشوائية، نظام، تنظيم، شبكة، تحويل، اختبارات، خادم، قاعدة، ترميز، جداول، خيوط، تواريخ
+الوحدات المدمجة: رياضيات، وقت، ملفات، جيسون، عشوائية، نظام، تنظيم، شبكة، تحويل، اختبارات، خادم، قاعدة، ترميز، جداول، خيوط، تواريخ، إحصاء
 الأمثلة موجودة في مجلد examples/""")
     sys.exit(0)
 
@@ -398,6 +400,9 @@ def main():
         install_package(args[1])
     elif first in ('--حزم', '--packages'):
         list_packages()
+    elif first in ('--لغة', '--lsp'):
+        # خادم اللغة: يتواصل عبر القنوات القياسية بلا أي مخرجات أخرى
+        lsp_module.main()
     elif first in ('-c', '--كود', '--تنفيذ'):
         if len(args) < 2:
             print("خطأ: الخيار '-c' يحتاج كودًا بعده", file=sys.stderr)
