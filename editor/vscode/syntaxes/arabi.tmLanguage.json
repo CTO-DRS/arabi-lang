@@ -58,6 +58,51 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.quoted.double.raw.multiline.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])خ(\"\"\"|\\'\\'\\')(?:[^\\\\]|\\\\.)*?(\\1)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.arabi"
+            },
+            "2": {
+              "name": "punctuation.definition.string.end.arabi"
+            }
+          }
+        },
+        {
+          "name": "string.quoted.double.raw.multiline.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])خ(\"\"\"|\\'\\'\\')(?:[^\\\\]|\\\\.)*?(\\1)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.arabi"
+            },
+            "2": {
+              "name": "punctuation.definition.string.end.arabi"
+            }
+          }
+        },
+        {
+          "name": "string.quoted.double.raw.arabi",
+          "begin": "(?<![\\u0600-\\u06FF\\w])خ(['\"])",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.arabi"
+            }
+          },
+          "end": "\\1",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.arabi"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.raw.arabi",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
           "name": "string.interpolated.multiline.arabi",
           "match": "ق(\"\"\"|\\'\\'\\')(?:[^\\\\]|\\\\.)*?(\\1)",
           "captures": {
@@ -68,6 +113,27 @@
               "name": "punctuation.definition.string.end.arabi"
             }
           }
+        },
+        {
+          "name": "string.quoted.double.raw.arabi",
+          "begin": "(?<![\\u0600-\\u06FF\\w])خ(['\"])",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.arabi"
+            }
+          },
+          "end": "\\1",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.arabi"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.raw.arabi",
+              "match": "\\\\."
+            }
+          ]
         },
         {
           "name": "string.interpolated.arabi",
@@ -200,6 +266,14 @@
           "match": "(?<![\\u0600-\\u06FF\\w])(بدّل|حالة|افتراض)(?![\\u0600-\\u06FF\\w])"
         },
         {
+          "name": "keyword.control.match.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(طابق|غير ذلك)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
+          "name": "keyword.control.match.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])(طابق|غير ذلك|غير[ \\t]+ذلك)(?![\\u0600-\\u06FF\\w])"
+        },
+        {
           "name": "keyword.declaration.enum.arabi",
           "match": "(?<![\\u0600-\\u06FF\\w])(تعداد)\\s+([\\u0600-\\u06FF][\\u0600-\\u06FF\\w]*)",
           "captures": {
@@ -279,7 +353,7 @@
     },
     "modules": {
       "name": "entity.other.module.arabi",
-      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت|ملفات|جيسون|عشوائية|نظام|تنظيم|شبكة|تحويل|اختبارات|خادم|قاعدة|ترميز|جداول|خيوط)(?![\\u0600-\\u06FF\\w])"
+      "match": "(?<![\\u0600-\\u06FF\\w])(رياضيات|وقت|ملفات|جيسون|عشوائية|نظام|تنظيم|شبكة|تحويل|اختبارات|خادم|قاعدة|ترميز|جداول|خيوط|تواريخ)(?![\\u0600-\\u06FF\\w])"
     },
     "numbers": {
       "patterns": [

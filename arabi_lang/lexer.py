@@ -7,9 +7,11 @@
 - كلمات مفتاحية مركبة من كلمتين: «وإلا إذا» و«ولا شيء»
 - كتل بمسافات بادئة مثل بايثون (INDENT / DEDENT)
 - النصوص المنسقة: ق"مرحبا {الاسم}" — البادئة ق (قالب)
+- السلاسل الخام: خ"..." — البادئة خ (خام) بلا معالجة رموز الهروب
 - النصوص متعددة الأسطر: ثلاث علامات اقتباس مزدوجة أو مفردة
 - كلمات الإصدار 1.5: تعداد، خاصية، عالمي، تحقق، احذف
 - كلمات الإصدار 1.7: أنتج (المولدات) وعلامة @ (المزخرفات)
+- كلمات الإصدار 1.9: طابق (مطابقة الأنماط) وغير ذلك
 """
 
 import re
@@ -59,11 +61,14 @@ KEYWORDS = {
     'أنتج': T.YIELD,
     # كلمات الإصدار 1.8
     'واجهة': T.INTERFACE,
+    # كلمات الإصدار 1.9
+    'طابق': T.MATCH,
 }
 
 # كلمات مفتاحية مركبة
 ELIF_HINT = re.compile(r'[ \t]+إذا(?!\w)')     # وإلا إذا
 NONE_HINT = re.compile(r'[ \t]+شيء(?!\w)')     # ولا شيء
+OTHERWISE_HINT = re.compile(r'[ \t]+ذلك(?!\w)')  # غير ذلك
 
 IDENT_RE = re.compile(r'[\w\u064B-\u0655\u0670]+')          # يسمح بالتشكيل داخل الاسم
 IDENT_START_RE = re.compile(r'[^\W\d]')
@@ -366,6 +371,44 @@ class Lexer:
             self.pos += 1
         self.add(T.STRING, ''.join(buf))
 
+    def _read_rawstring(self, quote):
+        """يقرأ سلسلة خام: خ"..." — لا معالجة لرموز الهروب إطلاقًا.
+
+        الشرطة المائلة المعكوسة حرف عادي، وهذا مفيد لأنماط التعبيرات
+        النمطية والمسارات. يدعم أيضًا الشكل الممتد بثلاث علامات اقتباس.
+        """
+        start_line = self.line
+        self.pos += 1                     # تخطَّ علامة الاقتباس الافتتاحية
+        n = len(self.src)
+
+        # ---- سلسلة خام متعددة الأسطر: خ"""...""" ----
+        if self.src[self.pos:self.pos + 2] == quote * 2:
+            self.pos += 2
+            closer = quote * 3
+            end = self.src.find(closer, self.pos)
+            if end == -1:
+                self.error('سلسلة خام غير مغلقة — أنسيت ثلاث علامات اقتباس')
+            text = self.src[self.pos:end]
+            self.line += text.count('\n')
+            self.pos = end + 3
+            self.tokens.append(Token(T.STRING, text, start_line))
+            return
+
+        # ---- سلسلة خام سطرية: خ"..." ----
+        buf = []
+        while True:
+            if self.pos >= n:
+                self.error('سلسلة خام غير مغلقة — أنسيت علامة الاقتباس')
+            c = self.src[self.pos]
+            if c == quote:
+                self.pos += 1
+                break
+            if c == '\n':
+                self.error('سلسلة خام غير مغلقة — النصوص لا تمتد على عدة أسطر')
+            buf.append(c)
+            self.pos += 1
+        self.add(T.STRING, ''.join(buf))
+
     def _read_fstring(self, quote):
         """يقرأ نصًا منسقًا: ق"..." — البادئة ق اختصار لـ«قالب».
 
@@ -456,12 +499,23 @@ class Lexer:
                 self.add(T.NONE, 'ولا شيء')
                 self.pos = m2.end()
                 return
+        if word == 'غير':
+            m2 = OTHERWISE_HINT.match(self.src, end)
+            if m2:
+                self.add(T.OTHERWISE, 'غير ذلك')
+                self.pos = m2.end()
+                return
 
         self.pos = end
 
         # بادئة النص المنسق: ق متبوعة مباشرة بعلامة اقتباس
         if word == 'ق' and self.pos < len(self.src) and self.src[self.pos] in '"\'':
             self._read_fstring(self.src[self.pos])
+            return
+
+        # بادئة السلسلة الخام: خ متبوعة مباشرة بعلامة اقتباس
+        if word == 'خ' and self.pos < len(self.src) and self.src[self.pos] in '"\'':
+            self._read_rawstring(self.src[self.pos])
             return
 
         kw = KEYWORDS.get(word)

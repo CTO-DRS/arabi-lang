@@ -279,6 +279,51 @@ class _Linter:
                 self._register_block(body, scope)
             if stmt.default_body:
                 self._register_block(stmt.default_body, scope)
+        elif isinstance(stmt, N.Match):
+            for pattern, _guard, body in stmt.cases:
+                self._register_pattern(pattern, scope)
+                self._register_block(body, scope)
+            if stmt.default_body:
+                self._register_block(stmt.default_body, scope)
+
+    def _register_pattern(self, pat, scope):
+        """يسجل أسماء الالتقاط في النمط حتى لا تُعد غير معرفة."""
+        if isinstance(pat, N.PLiteral):
+            return                      # تعبير قيمة — يُمشى في المرحلة الثانية
+        if isinstance(pat, N.PCapture):
+            if pat.name is not None:
+                self._define(scope, pat.name, pat.line, 'متغير')
+        elif isinstance(pat, N.POr):
+            for sub in pat.patterns:
+                self._register_pattern(sub, scope)
+        elif isinstance(pat, N.PList):
+            for item in pat.items:
+                self._register_pattern(item, scope)
+            if isinstance(pat.rest, str):
+                self._define(scope, pat.rest, pat.line, 'متغير')
+        elif isinstance(pat, N.PDict):
+            for sub in pat.patterns:
+                self._register_pattern(sub, scope)
+
+    def _walk_pattern(self, pat, scope):
+        """يمشي على تعبيرات النمط (أنماط القيمة) ويعلم الالتقاط مستخدمة."""
+        if isinstance(pat, N.PLiteral):
+            self._walk_expr(pat.expr, scope)
+        elif isinstance(pat, N.PCapture):
+            if pat.name is not None:
+                scope.mark_use(pat.name)
+        elif isinstance(pat, N.POr):
+            for sub in pat.patterns:
+                self._walk_pattern(sub, scope)
+        elif isinstance(pat, N.PList):
+            for item in pat.items:
+                self._walk_pattern(item, scope)
+            if isinstance(pat.rest, str):
+                scope.mark_use(pat.rest)
+        elif isinstance(pat, N.PDict):
+            for key, sub in zip(pat.keys, pat.patterns):
+                self._walk_expr(key, scope)
+                self._walk_pattern(sub, scope)
 
     def _assign_name(self, name, scope, line):
         """دلالات الإسناد في عربي: إن وُجد الاسم في نطاق خارجي فيُعدّل
@@ -444,6 +489,16 @@ class _Linter:
             self._walk_expr(stmt.subject, scope)
             for value, body in stmt.cases:
                 self._walk_expr(value, scope)
+                self._walk_block(body, scope, in_function, loop_depth)
+            if stmt.default_body:
+                self._walk_block(stmt.default_body, scope, in_function,
+                                 loop_depth)
+        elif isinstance(stmt, N.Match):
+            self._walk_expr(stmt.subject, scope)
+            for pattern, guard, body in stmt.cases:
+                self._walk_pattern(pattern, scope)
+                if guard is not None:
+                    self._walk_expr(guard, scope)
                 self._walk_block(body, scope, in_function, loop_depth)
             if stmt.default_body:
                 self._walk_block(stmt.default_body, scope, in_function,

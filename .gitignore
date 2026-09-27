@@ -13,3 +13,4 @@ venv/
 examples/مكتبة_مؤقتة.db
 examples/الكتب.csv
 *.db
+*.csv

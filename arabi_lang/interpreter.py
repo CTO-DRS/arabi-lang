@@ -20,11 +20,11 @@ from .runtime import (
     ClassValue, InstanceValue, BoundMethod,
     EnumValue, EnumMember, Property, NativeCtor,
     GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
-    ThreadValue, LockValue, QueueValue,
+    ThreadValue, LockValue, QueueValue, DateValue,
     typename, display, install_builtins, NO_DEFAULT,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
     GENERATOR_METHODS, DB_METHODS,
-    THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS,
+    THREAD_METHODS, LOCK_METHODS, QUEUE_METHODS, DATE_METHODS,
 )
 
 # للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
@@ -40,7 +40,7 @@ CATCHABLE = (
 # الوحدات الجاهزة المدمجة في اللغة
 BUILTIN_MODULES = ('رياضيات', 'وقت', 'ملفات', 'جيسون', 'عشوائية',
                    'نظام', 'تنظيم', 'شبكة', 'تحويل', 'اختبارات', 'خادم',
-                   'قاعدة', 'ترميز', 'جداول', 'خيوط')
+                   'قاعدة', 'ترميز', 'جداول', 'خيوط', 'تواريخ')
 
 # علامة داخلية: لا يوجد تحميل عامل مطبق (يستخدمها _try_overload)
 _SKIP = object()
@@ -173,6 +173,75 @@ class Interpreter:
                 return
         if node.default_body is not None:
             self.exec_statements(node.default_body, env)
+
+    def exec_Match(self, node, env):
+        """مطابقة الأنماط: يجرب الأنماط بالترتيب حتى أول تطابق.
+
+        روابط الالتقاط تُطبق على النطاق الحالي فور نجاح النمط (كما في
+        بايثون)، ثم يُفحص الحارس إن وُجد — وفشل الحارس لا يُلغي الروابط.
+        """
+        subject = self.evaluate(node.subject, env)
+        for pattern, guard, body in node.cases:
+            bindings = {}
+            if not self._match_pattern(pattern, subject, bindings, env):
+                continue
+            for name, value in bindings.items():
+                env.set(name, value)
+            if guard is not None and not self._truthy(
+                    self.evaluate(guard, env)):
+                continue
+            self.exec_statements(body, env)
+            return
+        if node.default_body is not None:
+            self.exec_statements(node.default_body, env)
+
+    def _match_pattern(self, pat, subject, bindings, env):
+        """يجرب نمطًا على قيمة — يعيد صح ويمتلئ bindings عند النجاح."""
+        if isinstance(pat, N.PLiteral):
+            return self._values_equal(subject, self.evaluate(pat.expr, env))
+        if isinstance(pat, N.PCapture):
+            if pat.name is None:                    # الرمز البديل '_'
+                return True
+            # التقاط مكرر داخل النمط الواحد يعني مطابقة تساوي: [أ، أ]
+            if pat.name in bindings:
+                return self._values_equal(bindings[pat.name], subject)
+            bindings[pat.name] = subject
+            return True
+        if isinstance(pat, N.POr):
+            for sub in pat.patterns:
+                trial = {}
+                if self._match_pattern(sub, subject, trial, env):
+                    bindings.update(trial)
+                    return True
+            return False
+        if isinstance(pat, N.PList):
+            if not isinstance(subject, list):
+                return False
+            if pat.rest is None and len(subject) != len(pat.items):
+                return False
+            if pat.rest is not None and len(subject) < len(pat.items):
+                return False
+            trial = {}
+            for item_pat, item in zip(pat.items, subject):
+                if not self._match_pattern(item_pat, item, trial, env):
+                    return False
+            if isinstance(pat.rest, str):
+                trial[pat.rest] = subject[len(pat.items):]
+            bindings.update(trial)
+            return True
+        if isinstance(pat, N.PDict):
+            if not isinstance(subject, dict):
+                return False
+            trial = {}
+            for key_expr, val_pat in zip(pat.keys, pat.patterns):
+                key = self.evaluate(key_expr, env)
+                if key not in subject:
+                    return False
+                if not self._match_pattern(val_pat, subject[key], trial, env):
+                    return False
+            bindings.update(trial)
+            return True
+        raise ArabiRuntimeError('نمط غير مدعوم', getattr(pat, 'line', None))
 
     def exec_For(self, node, env):
         iterable = self.evaluate(node.iterable, env)
@@ -985,6 +1054,8 @@ class Interpreter:
             table = LOCK_METHODS
         elif isinstance(obj, QueueValue):
             table = QUEUE_METHODS
+        elif isinstance(obj, DateValue):
+            table = DATE_METHODS
         else:
             raise ArabiRuntimeError(
                 f"النوع '{typename(obj)}' لا يدعم الطرق — لا توجد طريقة اسمها '{name}'",
@@ -1013,6 +1084,19 @@ class Interpreter:
             raise ArabiRuntimeError(
                 f"عضو التعداد لا يحتوي على '{node.name}' — المتوفر: الاسم، القيمة",
                 node.line)
+        if isinstance(obj, DateValue):
+            method = DATE_METHODS.get(node.name)
+            if method is None:
+                raise ArabiRuntimeError(
+                    f"التاريخ لا يحتوي على '{node.name}' — المتوفر: السنة، "
+                    'الشهر، اليوم، الساعة، الدقيقة، الثانية، يوم_الأسبوع، نسق',
+                    node.line)
+            if node.name != 'نسق':                # الخصائص تُقرأ بلا أقواس
+                return method(obj, [], node.line)
+            # نسق طريقة تستدعى بأقواس — دالة جاهزة مرتبطة بهذا التاريخ
+            def bound(args, line, _obj=obj, _m=method, _n=node.name):
+                return _m(_obj, args, line)
+            return BuiltinFunc(node.name, bound)
         if isinstance(obj, EnumValue):
             member = obj.members.get(node.name)
             if member is None:

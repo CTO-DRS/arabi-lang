@@ -174,6 +174,63 @@ class Switch(Node):
         self.default_body = default_body  # [stmt] أو None
 
 
+class Match(Node):
+    """مطابقة الأنماط: طابق تعبير ثم كتل حالة بنمط وربما حارس.
+
+    cases: [(نمط، حارس أو None، [جمل])، ...]
+    """
+
+    def __init__(self, subject, cases, default_body, line=None):
+        super().__init__(line)
+        self.subject = subject
+        self.cases = cases
+        self.default_body = default_body  # [stmt] أو None
+
+
+# ================== عقد أنماط المطابقة (الإصدار 1.9) ==================
+
+class PLiteral(Node):
+    """نمط قيمة: حرفية أو مسار خصائص (تعداد.عضو) — يُقارن بالمساواة."""
+
+    def __init__(self, expr, line=None):
+        super().__init__(line)
+        self.expr = expr
+
+
+class PCapture(Node):
+    """نمط التقاط: اسم يربط القيمة، أو الاسم '_' للرمز البديل (لا يربط)."""
+
+    def __init__(self, name, line=None):
+        super().__init__(line)
+        self.name = name          # None يعني '_' — يطابق كل شيء بلا ربط
+
+
+class POr(Node):
+    """نمط بديل: ١ أو ٢ أو ٣ — أول نمط يطابق هو المعتمد بروابطه."""
+
+    def __init__(self, patterns, line=None):
+        super().__init__(line)
+        self.patterns = patterns
+
+
+class PList(Node):
+    """نمط قائمة: [أ، ب] أو [أ، ...الباقي] أو [أ، ...]."""
+
+    def __init__(self, items, rest, line=None):
+        super().__init__(line)
+        self.items = items        # [نمط]
+        self.rest = rest          # اسم ربط أو False (…) أو None (لا يوجد)
+
+
+class PDict(Node):
+    """نمط قاموس: {الاسم: نمط، ...} — المفاتيح يجب أن توجد، والزائد مسموح."""
+
+    def __init__(self, keys, patterns, line=None):
+        super().__init__(line)
+        self.keys = keys          # [تعبير]
+        self.patterns = patterns  # [نمط]
+
+
 class EnumDef(Node):
     """تعريف تعداد: أعضاء [(الاسم، تعبير القيمة أو None) للقراءة التلقائية]."""
 

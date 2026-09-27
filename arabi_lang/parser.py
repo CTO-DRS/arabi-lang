@@ -10,6 +10,7 @@ from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
     Break, Continue, Pass, Try, Raise, Import, ClassDef, InterfaceDef,
     Lambda, Switch, EnumDef, PropertyDef, Global, Assert, Delete, Yield,
+    Match, PLiteral, PCapture, POr, PList, PDict,
     Num, Str, FString, Bool, Null, Name, ListLit, DictLit, BinOp, UnaryOp,
     Call, Index, Slice, MethodCall, Attribute, This, Super, Ternary,
     SpreadArg,
@@ -46,6 +47,7 @@ STMT_KEYWORDS = {
     T.ENUM: 'تعداد', T.PROPERTY: 'خاصية', T.GLOBAL: 'عالمي',
     T.ASSERT: 'تحقق', T.DELETE: 'احذف',
     T.YIELD: 'أنتج', T.INTERFACE: 'واجهة',
+    T.MATCH: 'طابق', T.OTHERWISE: 'غير ذلك',
 }
 
 # كلمات مفتاحية يُسمح بظهورها كأسماء خصائص/طرق بعد النقطة
@@ -137,10 +139,11 @@ class Parser:
         t = self.cur().type
         if t in (T.NEWLINE, T.EOF, T.DEDENT):
             return stmt
-        # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب/صنف/بدّل) تستهلك DEDENT
+        # الجمل التي تنتهي بكتلة (لو/طالما/لكل/دالة/جرب/صنف/بدّل/طابق) تستهلك DEDENT
         # داخل block()، لذا الجملة التالية تبدأ مباشرة
         if isinstance(stmt, (If, While, For, FuncDef, Try, ClassDef,
-                             Switch, PropertyDef, EnumDef, InterfaceDef)):
+                             Switch, PropertyDef, EnumDef, InterfaceDef,
+                             Match)):
             return stmt
         self.error('متوقع نهاية السطر بعد الجملة')
 
@@ -179,6 +182,8 @@ class Parser:
             return self.interface_def()
         if t is T.SWITCH:
             return self.switch_stmt()
+        if t is T.MATCH:
+            return self.match_stmt()
         if t is T.ENUM:
             return self.enum_stmt()
         if t is T.PROPERTY:
@@ -509,6 +514,139 @@ class Parser:
         if not cases and default_body is None:
             self.error("'بدّل' يحتاج 'حالة' واحدة على الأقل أو 'افتراض'")
         return Switch(subject, cases, default_body, tok.line)
+
+    # ---------- مطابقة الأنماط (الإصدار 1.9) ----------
+
+    def match_stmt(self):
+        """طابق تعبير — كتل حالة بنفس مستوى 'طابق' وربما فرع غير ذلك:
+
+        طابق قيمة
+        حالة ١ أو ٢:
+            ...
+        حالة [أ، ...الباقي] إن أ > ٠:
+            ...
+        غير ذلك:
+            ...
+        """
+        tok = self.advance()                       # طابق
+        subject = self.expression()
+        self.expect(T.NEWLINE,
+                    "متوقع سطرًا جديدًا بعد تعبير 'طابق'")
+        cases = []
+        default_body = None
+        while self.check(T.CASE):
+            self.advance()
+            pattern = self._parse_pattern()
+            guard = None
+            # الحارس: حالة نمط إن شرط — 'إن' كلمة سياقية بعد النمط
+            if self.check(T.IDENT) and self.cur().value == 'إن':
+                self.advance()
+                guard = self.expression()
+            body = self.block()
+            cases.append((pattern, guard, body))
+        if self.check(T.OTHERWISE):
+            self.advance()
+            default_body = self.block()
+        if not cases and default_body is None:
+            self.error("'طابق' يحتاج 'حالة' واحدة على الأقل أو 'غير ذلك'")
+        return Match(subject, cases, default_body, tok.line)
+
+    def _parse_pattern(self):
+        """نمط كامل: نمط مغلق أو بدائل بأو."""
+        first = self._parse_closed_pattern()
+        if not self.check(T.OR):
+            return first
+        pats = [first]
+        while self.match(T.OR):
+            pats.append(self._parse_closed_pattern())
+        return POr(pats, first.line)
+
+    def _parse_closed_pattern(self):
+        """نمط مغلق: حرفية، التقاط، رمز بديل، مسار قيمة، قائمة، أو قاموس."""
+        tok = self.cur()
+        t = tok.type
+        if t in (T.INT, T.FLOAT):
+            self.advance()
+            return PLiteral(Num(tok.value, tok.line), tok.line)
+        if t is T.STRING:
+            self.advance()
+            return PLiteral(Str(tok.value, tok.line), tok.line)
+        if t in (T.TRUE, T.FALSE):
+            self.advance()
+            return PLiteral(Bool(t is T.TRUE, tok.line), tok.line)
+        if t is T.NONE:
+            self.advance()
+            return PLiteral(Null(tok.line), tok.line)
+        if t is T.MINUS and self.peek(1).type in (T.INT, T.FLOAT):
+            self.advance()
+            num = self.advance()
+            return PLiteral(UnaryOp('-', Num(num.value, num.line), tok.line),
+                            tok.line)
+        if t is T.LBRACKET:
+            return self._list_pattern()
+        if t is T.LBRACE:
+            return self._dict_pattern()
+        if t is T.IDENT:
+            self.advance()
+            if tok.value == '_':
+                return PCapture(None, tok.line)     # الرمز البديل
+            if self.check(T.DOT):
+                # نمط قيمة: مسار خصائص مثل تعداد.عضو — يُقارن بالمساواة
+                obj = Name(tok.value, tok.line)
+                while self.check(T.DOT):
+                    self.advance()
+                    name_tok = self.cur()
+                    if (name_tok.type is not T.IDENT
+                            and name_tok.type not in KEYWORD_AS_NAME):
+                        self.error("متوقع اسمًا بعد '.' في نمط القيمة")
+                    self.advance()
+                    obj = Attribute(obj, name_tok.value, tok.line)
+                return PLiteral(obj, tok.line)
+            return PCapture(tok.value, tok.line)
+        self.error('نمط غير صالح — المتوقع حرفية أو اسم أو قائمة أو قاموس')
+
+    def _list_pattern(self):
+        """نمط قائمة: [أ، ب] أو [أ، ...الباقي] — '...' يجمع ما تبقى."""
+        tok = self.advance()                       # [
+        items = []
+        rest = None
+        if not self.check(T.RBRACKET):
+            while True:
+                if self.check(T.ELLIPSIS):
+                    self.advance()
+                    if self.check(T.IDENT):
+                        rest = self.advance().value
+                    else:
+                        rest = False               # ... بلا اسم — تجاهل البقية
+                    if not self.check(T.RBRACKET):
+                        self.error("'...' يجب أن يكون آخر عنصر في نمط القائمة")
+                    break
+                items.append(self._parse_pattern())
+                if self.match(T.COMMA):
+                    if self.check(T.RBRACKET):     # فاصلة أخيرة مسموحة
+                        break
+                    continue
+                break
+        self.expect(T.RBRACKET, "متوقع ']' لإغلاق نمط القائمة")
+        return PList(items, rest, tok.line)
+
+    def _dict_pattern(self):
+        """نمط قاموس: {الاسم: ن، العمر: ع} — مفاتيحه نصية افتراضيًا."""
+        tok = self.advance()                       # {
+        keys = []
+        patterns = []
+        if not self.check(T.RBRACE):
+            while True:
+                keys.append(self._dict_key())
+                self.expect(T.COLON, "متوقع ':' بين مفتاح النمط وقيمته")
+                patterns.append(self._parse_pattern())
+                if self.match(T.COMMA):
+                    if self.check(T.RBRACE):       # فاصلة أخيرة مسموحة
+                        break
+                    continue
+                break
+        self.expect(T.RBRACE, "متوقع '}' لإغلاق نمط القاموس")
+        return PDict(keys, patterns, tok.line)
 
     def enum_stmt(self):
         """تعداد الاسم: عضو، عضو = قيمة — كل عضو في سطر مستقل.

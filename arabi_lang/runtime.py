@@ -3,6 +3,7 @@
 
 import base64
 import csv
+import datetime
 import hashlib
 import http.server
 import io
@@ -450,6 +451,15 @@ class QueueValue:
         self.q = queue.Queue()
 
 
+class DateValue:
+    """قيمة تاريخ ووقت — تغلف datetime.datetime (الإصدار 1.9)."""
+
+    __slots__ = ('dt',)
+
+    def __init__(self, dt):
+        self.dt = dt
+
+
 DB_METHODS = {}       # تُملأ بعد تعريف دوال قاعدة البيانات
 GENERATOR_METHODS = {}  # تُملأ بعد تعريف طرق المولدات
 THREAD_METHODS = {}   # تُملأ بعد تعريف طرق الخيوط
@@ -500,6 +510,8 @@ def typename(v):
         return 'قفل'
     if isinstance(v, QueueValue):
         return 'طابور'
+    if isinstance(v, DateValue):
+        return 'تاريخ'
     return type(v).__name__
 
 
@@ -548,6 +560,8 @@ def display(v):
         return '<قفل>'
     if isinstance(v, QueueValue):
         return '<طابور>'
+    if isinstance(v, DateValue):
+        return v.dt.strftime('%Y-%m-%d %H:%M:%S')
     return str(v)
 
 
@@ -1144,6 +1158,17 @@ def install_builtins(env):
         'قفل': BuiltinFunc('قفل', _thr_lock),
         'طابور': BuiltinFunc('طابور', _thr_queue),
         'معالجات': BuiltinFunc('معالجات', _thr_cpu_count),
+    }))
+
+    # ============ وحدة التواريخ (الإصدار 1.9) ============
+
+    env.define('تواريخ', ModuleValue('تواريخ', {
+        'الآن': BuiltinFunc('الآن', _dt_now),
+        'أنشئ': BuiltinFunc('أنشئ', _dt_create),
+        'حلل': BuiltinFunc('حلل', _dt_parse),
+        'فرق': BuiltinFunc('فرق', _dt_diff),
+        'أضف': BuiltinFunc('أضف', _dt_add),
+        'يوم_الأسبوع': BuiltinFunc('يوم_الأسبوع', _dt_weekday),
     }))
 
     # ============ إطار الاختبارات (الإصدار 1.6) ============
@@ -2454,6 +2479,145 @@ QUEUE_METHODS.update({
     'الحجم': _queue_size,
     'فارغ': _queue_empty,
 })
+
+
+# ================== وحدة تواريخ (الإصدار 1.9) ==================
+
+_DAY_NAMES = ('الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس',
+              'الجمعة', 'السبت', 'الأحد')
+
+_DATE_UNIT_KEYS = ('أيام', 'ساعات', 'دقائق', 'ثواني')
+
+
+def _date_arg(value, name, line):
+    if not isinstance(value, DateValue):
+        raise ArabiRuntimeError(
+            f"'{name}' تحتاج تاريخًا لكنها استلمت {typename(value)}", line)
+    return value.dt
+
+
+def _dt_now(args, line):
+    """الآن() — التاريخ والوقت الحاليان."""
+    if args:
+        raise ArabiRuntimeError("'الآن' لا تقبل معاملات", line)
+    return DateValue(datetime.datetime.now())
+
+
+def _dt_create(args, line):
+    """أنشئ(سنة، شهر، يوم، ساعة=٠، دقيقة=٠، ثانية=٠) — تاريخ من أرقام."""
+    if not 3 <= len(args) <= 6:
+        raise ArabiRuntimeError(
+            f"'أنشئ' تقبل من ٣ إلى ٦ معاملات لكنها استلمت {len(args)}", line)
+    parts = []
+    for i, v in enumerate(args):
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ArabiRuntimeError(
+                f"معامل 'أنشئ' رقم {i + 1} يجب أن يكون عددًا صحيحًا لكنه "
+                f'{typename(v)}', line)
+        parts.append(v)
+    try:
+        return DateValue(datetime.datetime(*parts))
+    except ValueError as exc:
+        raise ArabiRuntimeError(f'تاريخ غير صالح: {exc}', line)
+
+
+def _dt_parse(args, line):
+    """حلل(نص، صيغة) — يقرأ التاريخ من نص حسب صيغة مثل %Y-%m-%d."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'حلل' تحتاج معاملين (نص وصيغة) لكنها استلمت {len(args)}", line)
+    text, fmt = args
+    if not isinstance(text, str) or not isinstance(fmt, str):
+        raise ArabiRuntimeError(
+            f"'حلل' تحتاج نصين (التاريخ والصيغة) لكنها استلمت "
+            f'{typename(text)} و {typename(fmt)}', line)
+    try:
+        return DateValue(datetime.datetime.strptime(text, fmt))
+    except ValueError:
+        raise ArabiRuntimeError(
+            f"لا يمكن قراءة التاريخ '{text}' بصيغة '{fmt}'", line)
+
+
+def _dt_diff(args, line):
+    """فرق(أ، ب) — الفرق بالأيام (سالب إن كان ب بعدها)."""
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'فرق' تحتاج تاريخين لكنها استلمت {len(args)}", line)
+    a = _date_arg(args[0], 'فرق', line)
+    b = _date_arg(args[1], 'فرق', line)
+    days = (a - b).total_seconds() / 86400
+    return int(days) if days == int(days) else days
+
+
+def _dt_add(args, line):
+    """أضف(تاريخ، أيام=٠، ساعات=٠، دقائق=٠، ثواني=٠) — تاريخ جديد بعد الإضافة."""
+    if not 1 <= len(args) <= 5:
+        raise ArabiRuntimeError(
+            f"'أضف' تقبل من ١ إلى ٥ معاملات لكنها استلمت {len(args)}", line)
+    base = _date_arg(args[0], 'أضف', line)
+    units = dict(zip(_DATE_UNIT_KEYS, (0, 0, 0, 0)))
+    for i, v in enumerate(args[1:]):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ArabiRuntimeError(
+                f"معامل '{_DATE_UNIT_KEYS[i]}' يجب أن يكون عددًا لكنه "
+                f'{typename(v)}', line)
+        units[_DATE_UNIT_KEYS[i]] = v
+    delta = datetime.timedelta(
+        days=units['أيام'], hours=units['ساعات'],
+        minutes=units['دقائق'], seconds=units['ثواني'])
+    return DateValue(base + delta)
+
+
+def _dt_weekday(args, line):
+    """يوم_الأسبوع(تاريخ) — اسم اليوم بالعربية."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'يوم_الأسبوع' تحتاج تاريخًا واحدًا لكنها استلمت {len(args)}", line)
+    dt = _date_arg(args[0], 'يوم_الأسبوع', line)
+    # بايثون: الاثنين = ٠ — قائمتنا بنفس الترتيب
+    return _DAY_NAMES[dt.weekday()]
+
+
+def _date_prop(prop):
+    def method(obj, args, line):
+        if args:
+            raise ArabiRuntimeError(
+                f"'{prop}' خاصية تُقرأ بلا معاملات", line)
+        return getattr(obj.dt, prop)
+    return method
+
+
+def _date_weekday_method(obj, args, line):
+    if args:
+        raise ArabiRuntimeError("'يوم_الأسبوع' تُقرأ بلا معاملات", line)
+    return _DAY_NAMES[obj.dt.weekday()]
+
+
+def _date_format(obj, args, line):
+    """نسق(صيغة) — ينسق التاريخ حسب صيغة مثل %Y/%m/%d."""
+    if len(args) != 1:
+        raise ArabiRuntimeError(
+            f"'نسق' تحتاج صيغة نصية واحدة لكنها استلمت {len(args)}", line)
+    fmt = args[0]
+    if not isinstance(fmt, str):
+        raise ArabiRuntimeError(
+            f"الصيغة يجب أن تكون نصًا لكنها {typename(fmt)}", line)
+    try:
+        return obj.dt.strftime(fmt)
+    except (ValueError, AttributeError) as exc:
+        raise ArabiRuntimeError(f'صيغة غير صالحة: {exc}', line)
+
+
+DATE_METHODS = {
+    'السنة': _date_prop('year'),
+    'الشهر': _date_prop('month'),
+    'اليوم': _date_prop('day'),
+    'الساعة': _date_prop('hour'),
+    'الدقيقة': _date_prop('minute'),
+    'الثانية': _date_prop('second'),
+    'يوم_الأسبوع': _date_weekday_method,
+    'نسق': _date_format,
+}
 
 
 # ================== وحدة اختبارات (إطار الاختبارات) ==================

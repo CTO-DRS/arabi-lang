@@ -4075,4 +4075,513 @@ class TestThreadsModule(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestMatch(unittest.TestCase):
+    """اختبارات مطابقة الأنماط طابق/حالة/غير ذلك — الإصدار 1.9."""
+
+    def test_literal_match(self):
+        out = run_arabi('''
+طابق ٣
+حالة ١:
+    اطبع("واحد")
+حالة ٣:
+    اطبع("ثلاثة")
+''')
+        self.assertEqual(out, 'ثلاثة\n')
+
+    def test_string_literal_match(self):
+        out = run_arabi('''
+طابق "تفاح"
+حالة "موز":
+    اطبع("أصفر")
+حالة "تفاح":
+    اطبع("أحمر")
+''')
+        self.assertEqual(out, 'أحمر\n')
+
+    def test_bool_and_none_literals(self):
+        out = run_arabi('''
+طابق صح
+حالة خطأ:
+    اطبع("خطأ")
+حالة صح:
+    اطبع("صح")
+طابق ولا شيء
+حالة ولا شيء:
+    اطبع("لا شيء")
+''')
+        self.assertEqual(out, 'صح\nلا شيء\n')
+
+    def test_negative_literal(self):
+        out = run_arabi('''
+طابق -٥
+حالة -١:
+    اطبع("سالب واحد")
+حالة -٥:
+    اطبع("سالب خمسة")
+''')
+        self.assertEqual(out, 'سالب خمسة\n')
+
+    def test_first_match_wins(self):
+        out = run_arabi('''
+طابق ٥
+حالة ن:
+    اطبع("أول: " + نص(ن))
+حالة ٥:
+    اطبع("ثانٍ")
+''')
+        self.assertEqual(out, 'أول: 5\n')
+
+    def test_or_pattern(self):
+        out = run_arabi('''
+طابق ٢
+حالة ١ أو ٢ أو ٣:
+    اطبع("صغير")
+حالة _:
+    اطبع("كبير")
+''')
+        self.assertEqual(out, 'صغير\n')
+
+    def test_or_with_captures_first_wins(self):
+        out = run_arabi('''
+طابق "ب"
+حالة "أ" أو "ب":
+    اطبع("حرف")
+''')
+        self.assertEqual(out, 'حرف\n')
+
+    def test_capture_binds_value(self):
+        out = run_arabi('''
+طابق ٤٢
+حالة ن:
+    اطبع("القيمة " + نص(ن) + " من نوع " + نوع(ن))
+''')
+        self.assertEqual(out, 'القيمة 42 من نوع عدد صحيح\n')
+
+    def test_wildcard_underscore(self):
+        out = run_arabi('''
+طابق "أي شيء"
+حالة ١:
+    اطبع("عدد")
+حالة _:
+    اطبع("شيء آخر")
+''')
+        self.assertEqual(out, 'شيء آخر\n')
+
+    def test_guard_runs_when_true(self):
+        out = run_arabi('''
+طابق ١٥
+حالة ن إن ن < ١٠:
+    اطبع("صغير")
+حالة ن إن ن < ٢٠:
+    اطبع("متوسط " + نص(ن))
+''')
+        self.assertEqual(out, 'متوسط 15\n')
+
+    def test_guard_fails_continues(self):
+        out = run_arabi('''
+طابق ٥
+حالة ن إن ن > ١٠:
+    اطبع("كبير")
+حالة ن:
+    اطبع("غير كبير: " + نص(ن))
+''')
+        self.assertEqual(out, 'غير كبير: 5\n')
+
+    def test_otherwise_runs_when_no_match(self):
+        out = run_arabi('''
+طابق ٩٩
+حالة ١:
+    اطبع("واحد")
+غير ذلك:
+    اطبع("افتراضي")
+''')
+        self.assertEqual(out, 'افتراضي\n')
+
+    def test_otherwise_skipped_on_match(self):
+        out = run_arabi('''
+طابق ١
+حالة ١:
+    اطبع("واحد")
+غير ذلك:
+    اطبع("افتراضي")
+''')
+        self.assertEqual(out, 'واحد\n')
+
+    def test_list_pattern_exact(self):
+        out = run_arabi('''
+طابق [١، ٢]
+حالة [أ، ب]:
+    اطبع(نص(أ) + نص(ب))
+''')
+        self.assertEqual(out, '12\n')
+
+    def test_list_pattern_length_mismatch(self):
+        out = run_arabi('''
+طابق [١، ٢، ٣]
+حالة [أ، ب]:
+    اطبع("زوج")
+حالة [أ، ب، ج]:
+    اطبع("ثلاثي: " + نص(أ + ب + ج))
+''')
+        self.assertEqual(out, 'ثلاثي: 6\n')
+
+    def test_list_pattern_rest_binding(self):
+        out = run_arabi('''
+طابق [١٠، ٢٠، ٣٠، ٤٠]
+حالة [أول، ...البقية]:
+    اطبع(نص(أول) + " ثم " + نص(طول(البقية)) + " عناصر")
+''')
+        self.assertEqual(out, '10 ثم 3 عناصر\n')
+
+    def test_list_pattern_rest_discard(self):
+        out = run_arabi('''
+طابق [١، ٢، ٣]
+حالة [أول، ...]:
+    اطبع("يبدأ بـ " + نص(أول))
+''')
+        self.assertEqual(out, 'يبدأ بـ 1\n')
+
+    def test_list_pattern_not_a_list(self):
+        out = run_arabi('''
+طابق "نص"
+حالة [أ]:
+    اطبع("قائمة")
+حالة _:
+    اطبع("ليست قائمة")
+''')
+        self.assertEqual(out, 'ليست قائمة\n')
+
+    def test_nested_list_pattern(self):
+        out = run_arabi('''
+طابق [[١، ٢]، ٣]
+حالة [[أ، ب]، ج]:
+    اطبع(نص(أ + ب + ج))
+''')
+        self.assertEqual(out, '6\n')
+
+    def test_equality_capture_pair(self):
+        out = run_arabi('''
+طابق [٧، ٧]
+حالة [أ، أ]:
+    اطبع("متساويان: " + نص(أ))
+حالة _:
+    اطبع("مختلفان")
+طابق [٧، ٨]
+حالة [أ، أ]:
+    اطبع("متساويان")
+حالة _:
+    اطبع("مختلفان")
+''')
+        self.assertEqual(out, 'متساويان: 7\nمختلفان\n')
+
+    def test_dict_pattern_binds_values(self):
+        out = run_arabi('''
+م = {الاسم: "سارة"، العمر: ٢٥}
+طابق م
+حالة {الاسم: اس، العمر: عمر}:
+    اطبع(اس + " عمرها " + نص(عمر))
+''')
+        self.assertEqual(out, 'سارة عمرها 25\n')
+
+    def test_dict_pattern_extra_keys_allowed(self):
+        out = run_arabi('''
+م = {أ: ١، ب: ٢، ج: ٣}
+طابق م
+حالة {أ: واحد، ج: ثلاثة}:
+    اطبع(نص(واحد + ثلاثة))
+''')
+        self.assertEqual(out, '4\n')
+
+    def test_dict_pattern_missing_key_fails(self):
+        out = run_arabi('''
+م = {أ: ١}
+طابق م
+حالة {أ: واحد، غير_موجود: ناقص}:
+    اطبع("مطابق")
+حالة _:
+    اطبع("غير مطابق")
+''')
+        self.assertEqual(out, 'غير مطابق\n')
+
+    def test_dict_pattern_not_a_dict(self):
+        out = run_arabi('''
+طابق [١]
+حالة {أ: ب}:
+    اطبع("قاموس")
+حالة _:
+    اطبع("ليس قاموسًا")
+''')
+        self.assertEqual(out, 'ليس قاموسًا\n')
+
+    def test_value_pattern_enum_member(self):
+        out = run_arabi('''
+تعداد اتجاه:
+    شمال
+    جنوب
+    شرق
+    غرب
+طابق اتجاه.شمال
+حالة اتجاه.جنوب أو اتجاه.شمال:
+    اطبع("محور رأسي")
+حالة اتجاه.شرق أو اتجاه.غرب:
+    اطبع("محور أفقي")
+''')
+        self.assertEqual(out, 'محور رأسي\n')
+
+    def test_capture_persists_after_match(self):
+        out = run_arabi('''
+طابق ٩
+حالة ن:
+    تجاهل
+اطبع(ن * ٢)
+''')
+        self.assertEqual(out, '18\n')
+
+    def test_match_inside_function(self):
+        out = run_arabi('''
+دالة صِف(قيمة):
+    طابق قيمة
+    حالة ٠:
+        أعد "صفر"
+    حالة ن إن نوع(ن) == "عدد صحيح":
+        أعد "عدد"
+    حالة _:
+        أعد "آخر"
+اطبع(صِف(٠))
+اطبع(صِف(٧))
+اطبع(صِف("س"))
+''')
+        self.assertEqual(out, 'صفر\nعدد\nآخر\n')
+
+    def test_match_no_cases_error(self):
+        expect_error('''
+طابق ٥
+''', Exception, 'حالة')
+
+    def test_linter_understands_match_captures(self):
+        issues = lint_source('''
+فحص = [١، ٢]
+طابق فحص
+حالة [أ، ...البقية]:
+    اطبع(أ + طول(البقية))
+غير ذلك:
+    تجاهل
+''')
+        errors = [i for i in issues if i[1] == 'خطأ']
+        self.assertEqual(errors, [])
+
+    def test_formatter_keeps_match_code(self):
+        source = '''
+طابق [١]
+حالة [أ]:
+    اطبع(أ)
+'''
+        formatted, _changed = format_source(source)
+        self.assertIn('حالة [أ]:', formatted)
+        # الناتج المنسق يظل صالحًا للتنفيذ
+        out = run_arabi(formatted)
+        self.assertEqual(out, '1\n')
+
+
+class TestRawStrings(unittest.TestCase):
+    """اختبارات السلاسل الخام خ"..." — الإصدار 1.9."""
+
+    def test_raw_backslash_literal(self):
+        out = run_arabi('''
+س = خ"أ\\ب"
+اطبع(طول(س))
+اطبع(س)
+''')
+        self.assertEqual(out, '3\nأ\\ب\n')
+
+    def test_raw_vs_normal_escape(self):
+        out = run_arabi('''
+عادي = "س\\tط"
+خام = خ"س\\tط"
+اطبع(طول(عادي))
+اطبع(طول(خام))
+''')
+        self.assertEqual(out, '3\n4\n')
+
+    def test_raw_with_regex_findall(self):
+        out = run_arabi('''
+اطبع(تنظيم.كل_المطابقات(خ"\\d+"، "أ 1 ب 22 ج 333"))
+''')
+        self.assertEqual(out, '[1، 22، 333]\n')
+
+    def test_raw_with_regex_word_chars(self):
+        out = run_arabi('''
+نمط = خ"\\w+@\\w+\\.com"
+اطبع(تنظيم.يجد(نمط، "راسلني على علي@mail.com اليوم"))
+''')
+        self.assertEqual(out, 'علي@mail.com\n')
+
+    def test_raw_keeps_double_backslash(self):
+        out = run_arabi('''
+س = خ"\\\\"
+اطبع(طول(س))
+''')
+        self.assertEqual(out, '2\n')
+
+    def test_raw_single_quotes(self):
+        out = run_arabi("س = خ'أ\\ب'\nاطبع(س)\n")
+        self.assertEqual(out, 'أ\\ب\n')
+
+    def test_raw_multiline(self):
+        out = run_arabi('''
+س = خ"""سطر\\أول
+ثانٍ\\ثاني"""
+اطبع(س)
+''')
+        self.assertEqual(out, 'سطر\\أول\nثانٍ\\ثاني\n')
+
+    def test_raw_multiline_line_numbers(self):
+        # الخطأ بعد سلسلة ممتدة يجب أن يشير للسطر الصحيح (بعد ٣ أسطر النص)
+        try:
+            run_arabi('''
+س = خ"""أ
+ب
+ج"""
+ن = ٥
+طابق ن
+حالة ١:
+''')
+        except Exception as exc:
+            self.assertIn('السطر 8', str(exc))
+            return
+        self.fail('لم يُطلع خطأ الصياغة')
+
+    def test_raw_with_regex_sub(self):
+        out = run_arabi('''
+اطبع(تنظيم.يستبدل(خ"\\s+"، " "، "كلمات    متفرقة    جدًا"))
+''')
+        self.assertEqual(out, 'كلمات متفرقة جدًا\n')
+
+    def test_raw_still_string_type(self):
+        out = run_arabi('اطبع(نوع(خ"نص"))\n')
+        self.assertEqual(out, 'نص\n')
+
+
+class TestDatesModule(unittest.TestCase):
+    """اختبارات وحدة تواريخ — الإصدار 1.9."""
+
+    def test_create_and_display(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٦، ٩، ٢٧، ١٤، ٣٠)
+اطبع(نوع(ص))
+اطبع(ص)
+''')
+        self.assertEqual(out, 'تاريخ\n2026-09-27 14:30:00\n')
+
+    def test_create_minimal_args(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٥، ١، ١)
+اطبع(ص)
+''')
+        self.assertEqual(out, '2025-01-01 00:00:00\n')
+
+    def test_properties(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٦، ٣، ١٥، ٨، ٤٥، ٣٠)
+اطبع(ص.السنة)
+اطبع(ص.الشهر)
+اطبع(ص.اليوم)
+اطبع(ص.الساعة)
+اطبع(ص.الدقيقة)
+اطبع(ص.الثانية)
+''')
+        self.assertEqual(out, '2026\n3\n15\n8\n45\n30\n')
+
+    def test_weekday_name(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٦، ٩، ٢٧)      # أحد
+ط = تواريخ.أنشئ(٢٠٢٦، ٩، ٢٤)      # خميس
+اطبع(تواريخ.يوم_الأسبوع(ص))
+اطبع(تواريخ.يوم_الأسبوع(ط))
+''')
+        self.assertEqual(out, 'الأحد\nالخميس\n')
+
+    def test_weekday_method(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٦، ٩، ٢٦)
+اطبع(ص.يوم_الأسبوع())
+''')
+        self.assertEqual(out, 'السبت\n')
+
+    def test_format(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٦، ١، ٥)
+اطبع(ص.نسق("%Y/%m/%d"))
+اطبع(ص.نسق("اليوم: %d من شهر %m"))
+''')
+        self.assertEqual(out, '2026/01/05\nاليوم: 05 من شهر 01\n')
+
+    def test_parse_roundtrip(self):
+        out = run_arabi('''
+ص = تواريخ.حلل("2026-09-27 10:00", "%Y-%m-%d %H:%M")
+اطبع(ص.نسق("%d/%m"))
+اطبع(ص.الساعة)
+''')
+        self.assertEqual(out, '27/09\n10\n')
+
+    def test_parse_invalid_raises(self):
+        expect_error('''
+تواريخ.حلل("ليس تاريخًا"، "%Y-%m-%d")
+''', Exception, 'لا يمكن قراءة التاريخ')
+
+    def test_diff_days(self):
+        out = run_arabi('''
+أ = تواريخ.أنشئ(٢٠٢٦، ١، ١٠)
+ب = تواريخ.أنشئ(٢٠٢٦، ١، ١)
+اطبع(تواريخ.فرق(أ، ب))
+''')
+        self.assertEqual(out, '9\n')
+
+    def test_diff_negative(self):
+        out = run_arabi('''
+أ = تواريخ.أنشئ(٢٠٢٦، ١، ١)
+ب = تواريخ.أنشئ(٢٠٢٦، ١، ١٠)
+اطبع(تواريخ.فرق(أ، ب))
+''')
+        self.assertEqual(out, '-9\n')
+
+    def test_add_units(self):
+        out = run_arabi('''
+ص = تواريخ.أنشئ(٢٠٢٥، ١٢، ٣٠، ٢٣)
+جديد = تواريخ.أضف(ص، ٥، ٤)
+اطبع(جديد)
+''')
+        self.assertEqual(out, '2026-01-05 03:00:00\n')
+
+    def test_add_with_match(self):
+        out = run_arabi('''
+اليوم = تواريخ.أنشئ(٢٠٢٦، ٩، ٢٧)
+غدًا = تواريخ.أضف(اليوم، ١)
+طابق غدًا.يوم_الأسبوع()
+حالة "الجمعة" أو "السبت":
+    اطبع("عطلة قريبًا")
+حالة _:
+    اطبع("يوم عمل")
+''')
+        self.assertEqual(out, 'يوم عمل\n')
+
+    def test_create_invalid_date_raises(self):
+        expect_error('''
+تواريخ.أنشئ(٢٠٢٦، ١٣، ٤٠)
+''', Exception, 'تاريخ غير صالح')
+
+    def test_dates_in_builtin_modules(self):
+        from arabi_lang.interpreter import BUILTIN_MODULES
+        self.assertIn('تواريخ', BUILTIN_MODULES)
+
+    def test_linter_accepts_dates_code(self):
+        issues = lint_source('''
+ص = تواريخ.الآن()
+اطبع(ص.السنة)
+اطبع(تواريخ.يوم_الأسبوع(ص))
+''')
+        errors = [i for i in issues if i[1] == 'خطأ']
+        self.assertEqual(errors, [])
+
+
 if __name__ == '__main__':    unittest.main(verbosity=2)
