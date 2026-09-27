@@ -27,11 +27,15 @@
 مع 1 (semver)، "~1.2.3" أي 1.2.x، و"*" أي نسخة.
 """
 
+import hashlib
+import hmac
+import io
 import json
 import os
 import re
 import shutil
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -58,7 +62,7 @@ __all__ = ['MANIFEST_NAME', 'LOCK_NAME', 'PACKAGES_DIR', 'INDEX_NAME',
            'DEFAULT_INDEX', 'INDEX_ENV',
            'parse_version', 'compare_versions', 'satisfies',
            'read_manifest', 'load_index', 'install', 'remove',
-           'list_installed', 'update', 'search', 'read_lock']
+           'list_installed', 'update', 'search', 'read_lock', 'publish']
 
 
 # ================== النسخ والقيود ==================
@@ -194,6 +198,12 @@ def _validate_source(source):
 
 # ================== فهرس السجل ==================
 
+def _quote_url(url):
+    """يرمّز حروف الرابط غير الآسكية (عربية مثلاً) بترميز النسبة —
+    فسطر طلب HTTP لا يقبل إلا آسكي، والرموز والترميزات القائمة تبقى."""
+    return urllib.parse.quote(url, safe=";/?:@&=+$,~*'()#%![]")
+
+
 def load_index(index_source=None):
     """يحمّل فهرس السجل من مسار محلي أو رابط — يعيد قاموس اسم ← بيانات."""
     if index_source is None:
@@ -201,7 +211,8 @@ def load_index(index_source=None):
     is_url = index_source.startswith(('http://', 'https://', 'file://'))
     if is_url:
         try:
-            with urllib.request.urlopen(index_source, timeout=30) as resp:
+            with urllib.request.urlopen(_quote_url(index_source),
+                                        timeout=30) as resp:
                 content = resp.read().decode('utf-8')
         except (OSError, ValueError) as exc:
             raise ArabiError(f"فشل تحميل فهرس السجل: {exc}")
@@ -264,7 +275,7 @@ def _fetch_into(source, tmp, expected_name, index_info):
             or '_تنزيل'
         local = os.path.join(tmp, basename)
         try:
-            urllib.request.urlretrieve(source, local)
+            urllib.request.urlretrieve(_quote_url(source), local)
         except OSError as exc:
             raise ArabiError(f"فشل تنزيل الحزمة من '{source}': {exc}")
         return _fetch_local(local, tmp, expected_name, index_info,
@@ -570,3 +581,131 @@ def update(name=None, project_dir=None, index_source=None):
         remove(target, project_dir, _force=True)
         messages.extend(install(target, project_dir, index_source))
     return messages
+
+
+# ================== النشر إلى سجل مجتمعي (الإصدار 1.20) ==================
+
+# ترويسة توقيع النشر — نفس ترويسة الخادم في registry.py
+PUBLISH_AUTH_HEADER = 'X-Arabi-Signature'
+PUBLISH_TIMEOUT = 60                  # مهلة طلب النشر (ثوانٍ)
+
+
+def _registry_base(registry):
+    """يستخرج عنوان السجل الجذر من رابط — يقبل الجذر أو رابط الفهرس."""
+    if not registry or not isinstance(registry, str):
+        raise ArabiError(
+            "عنوان السجل مطلوب للنشر — مرر --الفهرس http://مضيف:منفذ")
+    base = registry.strip().rstrip('/')
+    for suffix in ('/' + INDEX_NAME, '/الفهرس'):
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    if not base.startswith(('http://', 'https://')):
+        raise ArabiError(
+            f"عنوان السجل '{registry}' ليس رابطًا — النشر يحتاج رابط "
+            'خادم سجل مجتمعي مثل http://localhost:8000')
+    return base
+
+
+def _build_package_zip(source, version_override=None):
+    """يبني أرشيف الحزمة في الذاكرة — من مجلد ببيان أو ملف .عربي مفرد.
+
+    يعيد (بايتات الأرشيف، الاسم، النسخة، الوصف) — ويستثني ذاكرات
+    البايت-كود (__بايت__) لأنها تتولد تلقائيًا عند التشغيل.
+    """
+    buf = io.BytesIO()
+    if os.path.isdir(source) and os.path.isfile(
+            os.path.join(source, MANIFEST_NAME)):
+        data = read_manifest(source)
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(source):
+                dirs[:] = [d for d in dirs if d != '__بايت__']
+                for fname in sorted(files):
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, source)
+                    zf.write(full, rel)
+        return (buf.getvalue(), data['الاسم'], data['النسخة'],
+                data.get('الوصف', ''))
+    if os.path.isfile(source) and source.endswith('.عربي'):
+        # ملف مفرد — يُغلَّف ببيان تلقائي (والنسخة مطلوبة صراحة)
+        name = os.path.splitext(os.path.basename(source))[0]
+        if not NAME_RE.match(name):
+            raise ArabiError(
+                f"اسم الحزمة '{name}' غير صالح — يجب أن يكون معرفًا "
+                'قابلًا للاستيراد')
+        if not version_override:
+            raise ArabiError(
+                'نشر ملف .عربي مفرد يحتاج نسخة صريحة — مرر --نسخة '
+                '1.0.0 (مجلد الحزمة يأخذ نسخته من بيانه)')
+        parse_version(version_override)
+        fname = name + '.عربي'
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.write(source, fname)
+            manifest = {
+                'الاسم': name,
+                'النسخة': version_override,
+                'الوصف': '',
+                'المدخل': fname,
+                'التبعيات': {},
+            }
+            zf.writestr(MANIFEST_NAME,
+                        json.dumps(manifest, ensure_ascii=False,
+                                   indent=2))
+        return buf.getvalue(), name, version_override, ''
+    raise ArabiError(
+        f"مصدر النشر '{source}' غير مفهوم — انشر مجلدًا يحمل "
+        f'{MANIFEST_NAME} أو ملف .عربي مفرد')
+
+
+def publish(source, registry, auth_key=None, version=None):
+    """ينشر حزمة إلى سجل مجتمعي (1.20) — ويعيد رسالة النجاح.
+
+    المصدر مجلد ببيان (حزمة.json تحمل الاسم والنسخة) أو ملف .عربي
+    مفرد (وإذاها تحتاج --نسخة صريحة). عنوان السجل يقبل الجذر أو رابط
+    الفهرس كله. المفتاح الاختياري يوقّع الحزمة HMAC-SHA256 كما يتوقع
+    الخادم المفتاحي — أنشئه بتشفير.مفتاح_آمن() وشاركه مع مشغّل السجل.
+    النسخ غير قابلة للتعديل: إعادة نشر نفس النسخة تُرفض من الخادم.
+    """
+    base = _registry_base(registry)
+    blob, name, version, description = _build_package_zip(
+        source, version_override=version)
+    # سطر طلب HTTP لا يقبل إلا آسكي — المسار العربي كله بترميز النسبة
+    path = urllib.parse.quote(f'/نشر/{name}/{version}', safe='/.')
+    url = base + path
+    headers = {'Content-Type': 'application/zip'}
+    if auth_key:
+        if not isinstance(auth_key, str) or not auth_key:
+            raise ArabiError('مفتاح النشر نص غير فارغ — أو احذف '
+                             'العلم إن كان السجل مفتوحًا')
+        signature = hmac.new(auth_key.encode('utf-8'), blob,
+                             hashlib.sha256).hexdigest()
+        headers[PUBLISH_AUTH_HEADER] = signature
+    request = urllib.request.Request(url, data=blob, headers=headers,
+                                     method='POST')
+    try:
+        with urllib.request.urlopen(request,
+                                    timeout=PUBLISH_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode('utf-8')).get(
+                'الخطأ', '')
+        except (ValueError, OSError):
+            detail = ''
+        if exc.code == 409:
+            raise ArabiError(detail or
+                             f"الحزمة '{name}' نسخة {version} منشورة "
+                             'مسبقًا — انشر نسخة أحدث')
+        if exc.code == 401:
+            raise ArabiError(detail or 'رفض السجل النشر — التوقيع '
+                             'غير صحيح أو مفقود')
+        raise ArabiError(
+            f"رفض السجل النشر ({exc.code}): {detail or 'بلا تفاصيل'}")
+    except (OSError, ValueError) as exc:
+        raise ArabiError(f'تعذر الاتصال بسجل الحزم {base}: {exc}')
+    if payload.get('الحالة') != 'نُشرت':
+        raise ArabiError(
+            f"رد غير متوقع من السجل: {payload} — لم تُنشر الحزمة")
+    note = f' — {description}' if description else ''
+    return (f"نُشرت '{name}' v{version} إلى السجل {base}{note} — "
+            'النسخ غير قابلة للتعديل، ونسخة أحدث تُنشر حرة')

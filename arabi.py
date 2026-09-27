@@ -236,8 +236,21 @@ def _parse_index_flag(args):
     return None
 
 
+def _parse_flag_value(args, names, error_message):
+    """يستخرج قيمة علم من المعاملات ويحذفهما — أو لا شيء إن غاب."""
+    for i, arg in enumerate(args):
+        if arg in names:
+            if i + 1 >= len(args):
+                print(f'خطأ: {arg} يحتاج قيمة بعده — {error_message}',
+                      file=sys.stderr)
+                sys.exit(1)
+            return args[i + 1], [a for j, a in enumerate(args)
+                                 if j not in (i, i + 1)]
+    return None, args
+
+
 def package_cli(args):
-    """مدير الحزم: python arabi.py حزمة تثبيت|إزالة|قائمة|بحث|تحديث ..."""
+    """مدير الحزم: python arabi.py حزمة تثبيت|إزالة|قائمة|بحث|تحديث|خادم|نشر ..."""
     from arabi_lang import packages
     index_source = _parse_index_flag(args)
     # إزالة العلم وقيمته من المعاملات
@@ -257,6 +270,10 @@ def package_cli(args):
         print(f'استخدام: {prog_name()} حزمة <أمر> [معاملات]')
         print('الأوامر: تثبيت [اسم|مسار|رابط] — إزالة اسم — قائمة — '
               'بحث [كلمة] — تحديث [اسم]')
+        print('        خادم [مجلد] --منفذ N --عنوان H --مفتاح سر  '
+              'سجل مجتمعي (1.20)')
+        print('        نشر مسار --الفهرس رابط [--نسخة X] [--مفتاح سر]  '
+              'نشر إلى السجل (1.20)')
         print("مصدر الفهرس: --الفهرس مسار|رابط أو متغير البيئة "
               f"{packages.INDEX_ENV}")
         sys.exit(1)
@@ -280,9 +297,44 @@ def package_cli(args):
         elif cmd in ('تحديث', '--تحديث', 'update'):
             target = rest[0] if rest else None
             _package_update(packages, target, index_source)
+        elif cmd in ('خادم', '--خادم', 'server'):
+            # سجل مجتمعي محلي (1.20): يخدم الفهرس والتنزيل والنشر
+            from arabi_lang import registry
+            store = rest[0] if rest else registry.DEFAULT_STORE
+            port_raw, rest = _parse_flag_value(
+                rest, ('--منفذ', '--port'), 'رقم منفذ مثل 8000')
+            host, rest = _parse_flag_value(
+                rest, ('--عنوان', '--host'), 'عنوان مثل 127.0.0.1')
+            key, rest = _parse_flag_value(
+                rest, ('--مفتاح', '--key'), 'نص سر غير فارغ')
+            port = int(port_raw) if port_raw else 0
+            if port_raw and not 0 <= port <= 65535:
+                print(f'خطأ: المنفذ {port} خارج المدى (٠-٦٥٥٣٥)',
+                      file=sys.stderr)
+                sys.exit(1)
+            sys.exit(registry.run_server_cli(
+                store, host=host or '127.0.0.1', port=port,
+                auth_key=key))
+        elif cmd in ('نشر', '--نشر', 'publish'):
+            # نشر حزمة إلى سجل مجتمعي (1.20)
+            if not rest:
+                print("خطأ: 'حزمة نشر' يحتاج مسار الحزمة بعده (مجلد "
+                      'ببيان أو ملف .عربي)', file=sys.stderr)
+                sys.exit(1)
+            if not index_source:
+                print("خطأ: النشر يحتاج عنوان السجل: --الفهرس "
+                      'http://مضيف:منفذ', file=sys.stderr)
+                sys.exit(1)
+            key, rest = _parse_flag_value(
+                rest, ('--مفتاح', '--key'), 'نص سر غير فارغ')
+            version, rest = _parse_flag_value(
+                rest, ('--نسخة', '--version'), 'نسخة مثل 1.0.0')
+            print(packages.publish(rest[0], index_source,
+                                   auth_key=key, version=version))
         else:
             print(f"خطأ: أمر حزمة غير معروف: '{cmd}' — الأوامر: "
-                  'تثبيت، إزالة، قائمة، بحث، تحديث', file=sys.stderr)
+                  'تثبيت، إزالة، قائمة، بحث، تحديث، خادم، نشر',
+                  file=sys.stderr)
             sys.exit(1)
     except packages.ArabiError as error:
         print(f'✗ {error}', file=sys.stderr)

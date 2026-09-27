@@ -8779,6 +8779,288 @@ class TestDistributedEndToEnd(unittest.TestCase):
         return buf.getvalue()
 
 
+class TestRegistry(unittest.TestCase):
+    """السجل المجتمعي (1.20) — خادم فهرس حزم حقيقي عبر HTTP محلي."""
+
+    def setUp(self):
+        import tempfile
+        from arabi_lang.registry import RegistryServer
+        self.tmp = tempfile.mkdtemp(prefix='عربي-سجل-اختبار-')
+        self.store = os.path.join(self.tmp, 'المخزن')
+        self.project = os.path.join(self.tmp, 'المشروع')
+        os.makedirs(self.project, exist_ok=True)
+        self.servers = []
+        self.tempdirs = [self.tmp]
+        self.base = self._server().base_url()
+        from arabi_lang import packages
+        self.packages = packages
+
+    def tearDown(self):
+        for s in self.servers:
+            s.stop()
+        import shutil
+        for d in self.tempdirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _server(self, key=None):
+        from arabi_lang.registry import RegistryServer
+        srv = RegistryServer(os.path.join(self.tmp, f'مخزن{len(self.servers)}'),
+                             port=0, auth_key=key)
+        srv.start()
+        self.servers.append(srv)
+        return srv
+
+    def _make_pkg(self, name='أدوات', version='1.0.0', deps=None,
+                  code=None):
+        import json
+        pkg = os.path.join(self.tmp, f'حزمة{name}{version}')
+        os.makedirs(pkg, exist_ok=True)
+        manifest = {'الاسم': name, 'النسخة': version,
+                    'الوصف': f'حزمة {name} للتجربة',
+                    'المدخل': f'{name}.عربي',
+                    'التبعيات': deps or {}}
+        with open(os.path.join(pkg, 'حزمة.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        body = code or (f'دالة تحية(اسم):\n'
+                        f'    أعد "أهلًا " + اسم + " من {name}"\n'
+                        f'دالة ضاعف(ن):\n    أعد ن * ٢\n')
+        with open(os.path.join(pkg, f'{name}.عربي'), 'w',
+                  encoding='utf-8') as f:
+            f.write(body)
+        self.tempdirs.append(pkg)
+        return pkg
+
+    # ---------- الخادم والفهرس ----------
+
+    def test_welcome_and_empty_index(self):
+        import urllib.request
+        welcome = urllib.request.urlopen(self.base).read().decode('utf-8')
+        self.assertIn('سجل عربي المجتمعي', welcome)
+        self.assertIn('/الفهرس.json', welcome)
+        index = self.packages.load_index(self.base + '/الفهرس.json')
+        self.assertEqual(index, {})
+        self.assertEqual(self.servers[0].count(), 0)
+        self.assertEqual(self.servers[0].total_versions(), 0)
+
+    def test_publish_folder_and_index(self):
+        import urllib.parse as _up
+        msg = self.packages.publish(self._make_pkg(), self.base)
+        self.assertIn('نُشرت', msg)
+        self.assertIn('أدوات', msg)
+        self.assertEqual(self.servers[0].count(), 1)
+        index = self.packages.load_index(self.base + '/الفهرس.json')
+        self.assertEqual(index['أدوات']['النسخة'], '1.0.0')
+        self.assertIn('/تحميل/أدوات/1.0.0',
+                      _up.unquote(index['أدوات']['المصدر']))
+
+    def test_latest_version_in_index(self):
+        self.packages.publish(self._make_pkg(version='1.0.0'), self.base)
+        self.packages.publish(self._make_pkg(version='1.1.0'), self.base)
+        self.assertEqual(self.servers[0].versions('أدوات'),
+                         ['1.1.0', '1.0.0'])
+        index = self.packages.load_index(self.base + '/الفهرس.json')
+        self.assertEqual(index['أدوات']['النسخة'], '1.1.0')
+
+    # ---------- التثبيت والاستيراد والتحديث ----------
+
+    def test_install_from_registry(self):
+        self.packages.publish(self._make_pkg(), self.base)
+        msgs = self.packages.install('أدوات', self.project,
+                                     self.base + '/الفهرس.json')
+        self.assertTrue(any(kind == 'ثُبتت' for _, kind in msgs))
+        installed = self.packages.list_installed(self.project)
+        self.assertEqual(installed['أدوات']['نسخة'], '1.0.0')
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.project, 'قفل.json')))
+
+    def test_import_after_install(self):
+        from arabi import run_code
+        self.packages.publish(self._make_pkg(), self.base)
+        self.packages.install('أدوات', self.project,
+                              self.base + '/الفهرس.json')
+        out = run_code('استورد أدوات\nاطبع(أدوات.ضاعف(21))\n',
+                       script_dir=self.project)
+        self.assertIn('42', out)
+
+    def test_update_to_new_version(self):
+        self.packages.publish(self._make_pkg(version='1.0.0'), self.base)
+        self.packages.install('أدوات', self.project,
+                              self.base + '/الفهرس.json')
+        self.packages.publish(self._make_pkg(version='1.2.0'), self.base)
+        self.packages.update('أدوات', self.project,
+                             self.base + '/الفهرس.json')
+        self.assertEqual(
+            self.packages.list_installed(self.project)['أدوات']['نسخة'],
+            '1.2.0')
+
+    def test_immutable_versions(self):
+        pkg = self._make_pkg(version='1.0.0')
+        self.packages.publish(pkg, self.base)
+        with self.assertRaises(ArabiError) as caught:
+            self.packages.publish(pkg, self.base)
+        self.assertIn('منشورة مسبقًا', str(caught.exception))
+
+    # ---------- حماية النشر (تكامل 1.19) ----------
+
+    def test_auth_required_then_correct_key(self):
+        srv = self._server(key='سر_النشر')
+        base = srv.base_url()
+        pkg = self._make_pkg()
+        with self.assertRaises(ArabiError) as caught:
+            self.packages.publish(pkg, base)
+        self.assertIn('محمي بمفتاح', str(caught.exception))
+        with self.assertRaises(ArabiError):
+            self.packages.publish(pkg, base, auth_key='مفتاح_خاطئ')
+        msg = self.packages.publish(pkg, base, auth_key='سر_النشر')
+        self.assertIn('نُشرت', msg)
+
+    def test_name_mismatch_rejected(self):
+        import json as _json
+        import urllib.request as _ur
+        import urllib.parse as _up
+        import hmac as _hmac
+        import hashlib as _hashlib
+        from arabi_lang.packages import _build_package_zip
+        srv = self._server(key='س')
+        pkg = self._make_pkg(name='أدوات2', version='1.0.0')
+        blob, *_ = _build_package_zip(pkg)
+        req = _ur.Request(
+            srv.base_url() + _up.quote('/نشر/أدوات/1.0.0', safe='/.'),
+            data=blob, method='POST',
+            headers={'Content-Type': 'application/zip',
+                     'X-Arabi-Signature': _hmac.new(
+                         b'\xd8\xb3', blob, _hashlib.sha256).hexdigest()})
+        try:
+            _ur.urlopen(req)
+            self.fail('النشر باسم مغاير يجب أن يُرفض')
+        except _ur.HTTPError as exc:
+            detail = _json.loads(exc.read())['الخطأ']
+        self.assertIn('يتطابقا', detail)
+
+    def test_invalid_syntax_rejected(self):
+        pkg = self._make_pkg(name='فاسدة', code='دالة مكسورة(:\n')
+        with self.assertRaises(ArabiError) as caught:
+            self.packages.publish(pkg, self.base)
+        self.assertIn('غير سليم', str(caught.exception))
+
+    # ---------- المسارات والبيانات ----------
+
+    def test_metadata_and_search(self):
+        import json as _json
+        import urllib.request as _ur
+        import urllib.parse as _up
+        self.packages.publish(self._make_pkg(), self.base)
+        meta = _json.load(_ur.urlopen(
+            self.base + _up.quote('/حزمة/أدوات')))
+        self.assertEqual(meta['الأحدث'], '1.0.0')
+        self.assertEqual(meta['النسخ'], ['1.0.0'])
+        self.assertIn('للتجربة', meta['الوصف'])
+        found = _json.load(_ur.urlopen(
+            self.base + _up.quote('/بحث/تجربة')))
+        self.assertEqual(found['العدد'], 1)
+        client_found = self.packages.search(
+            'تجربة', self.base + '/الفهرس.json')
+        self.assertEqual([n for n, _ in client_found], ['أدوات'])
+
+    def test_download_404s(self):
+        import json as _json
+        import urllib.request as _ur
+        import urllib.parse as _up
+        self.packages.publish(self._make_pkg(version='1.0.0'), self.base)
+        try:
+            _ur.urlopen(self.base + _up.quote(
+                '/تحميل/غائبة/1.0.0'))
+            self.fail('حزمة غائبة يجب أن تعيد 404')
+        except _ur.HTTPError as exc:
+            self.assertEqual(exc.code, 404)
+            self.assertIn('غير موجودة', _json.loads(exc.read())['الخطأ'])
+        try:
+            _ur.urlopen(self.base + _up.quote(
+                '/تحميل/أدوات/9.9.9'))
+            self.fail('نسخة غائبة يجب أن تعيد 404')
+        except _ur.HTTPError as exc:
+            detail = _json.loads(exc.read())['الخطأ']
+        self.assertIn('9.9.9', detail)
+        self.assertIn('1.0.0', detail)     # يعرض المتاح
+
+    def test_single_file_publish(self):
+        import tempfile
+        single = os.path.join(self.tmp, 'رسالة.عربي')
+        with open(single, 'w', encoding='utf-8') as f:
+            f.write('الرسالة = "أهلًا بالسجل"\n')
+        with self.assertRaises(ArabiError) as caught:
+            self.packages.publish(single, self.base)
+        self.assertIn('نسخة صريحة', str(caught.exception))
+        msg = self.packages.publish(single, self.base, version='0.2.0')
+        self.assertIn('رسالة', msg)
+        self.assertEqual(self.servers[0].count(), 1)
+
+    def test_base_url_accepts_index_link(self):
+        pkg = self._make_pkg()
+        # قبول رابط الفهرس كاملًا لا الجذر فقط
+        msg = self.packages.publish(pkg, self.base + '/الفهرس.json')
+        self.assertIn('نُشرت', msg)
+
+    def test_double_stop_safe(self):
+        srv = self._server()
+        srv.stop()
+        srv.stop()                          # ثنائي آمن
+
+    # ---------- سطر الأوامر ----------
+
+    def test_cli_publish_roundtrip(self):
+        import subprocess
+        import sys as _sys
+        pkg = self._make_pkg(name='سطرية', version='1.0.0')
+        proc = subprocess.run(
+            [_sys.executable, os.path.join(ROOT, 'arabi.py'),
+             'حزمة', 'نشر', pkg, '--الفهرس', self.base],
+            capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('نُشرت', proc.stdout)
+        self.assertIn('سطرية', proc.stdout)
+
+    def test_cli_server_serves_index(self):
+        import subprocess
+        import json as _json
+        import sys as _sys
+        import time as _time
+        import urllib.request as _ur
+        import socket as _socket
+        # منفذ حر محجوز مسبقًا حتى لا يتصادم الاختبار
+        probe = _socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        proc = subprocess.Popen(
+            [_sys.executable, os.path.join(ROOT, 'arabi.py'),
+             'حزمة', 'خادم', os.path.join(self.tmp, 'مخزن_سطر'),
+             '--منفذ', str(port)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+        try:
+            url = f'http://127.0.0.1:{port}/index.json'
+            deadline = _time.time() + 20
+            last = None
+            while _time.time() < deadline:
+                try:
+                    body = _ur.urlopen(url, timeout=2).read()
+                    break
+                except OSError as exc:
+                    last = exc
+                    _time.sleep(0.2)
+            else:
+                self.fail(f'الخادم لم يستجب: {last}')
+            self.assertEqual(_json.loads(body.decode('utf-8')), {})
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
 class TestCrypto(unittest.TestCase):
     """وحدة التشفير (1.19) — بصمات وتوقيعات ومفاتيح آمنة وكلمات مرور."""
 
