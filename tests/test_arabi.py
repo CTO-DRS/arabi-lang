@@ -6913,5 +6913,66 @@ class TestPackageCLI(unittest.TestCase):
         self.assertIn('حدّد حزمة', r.stderr)
 
 
+class TestExecutablePackaging(unittest.TestCase):
+    """التوزيع كملف تنفيذي مستقل (الإصدار 1.14)."""
+
+    def test_is_frozen_false_in_source_mode(self):
+        import arabi
+        self.assertFalse(arabi.is_frozen())
+
+    def test_prog_name_source_mode(self):
+        import arabi
+        self.assertEqual(arabi.prog_name(), 'python arabi.py')
+
+    def test_version_text_contains_version(self):
+        import arabi
+        self.assertIn(arabi.__version__, arabi.version_text())
+        self.assertIn('عربي', arabi.version_text())
+
+    def test_version_text_frozen_suffix(self):
+        import arabi
+        from unittest import mock
+        with mock.patch.object(sys, 'frozen', True, create=True):
+            text = arabi.version_text()
+        self.assertIn('تنفيذي مستقل', text)
+        self.assertIn(arabi.__version__, text)
+
+    def test_prog_name_frozen_mode(self):
+        import arabi
+        from unittest import mock
+        with mock.patch.object(sys, 'frozen', True, create=True):
+            self.assertEqual(arabi.prog_name(), './عربي')
+
+    def test_spec_file_targets_entry(self):
+        spec = os.path.join(ROOT, 'عربي.spec')
+        self.assertTrue(os.path.isfile(spec), 'ملف المواصفة عربي.spec مفقود')
+        with open(spec, encoding='utf-8') as f:
+            content = f.read()
+        self.assertIn("'arabi.py'", content)
+        self.assertIn("name='عربي'", content)
+
+    def test_build_script_exists(self):
+        script = os.path.join(ROOT, 'scripts', 'بناء_التنفيذي.sh')
+        self.assertTrue(os.path.isfile(script), 'سكربت البناء مفقود')
+        with open(script, encoding='utf-8') as f:
+            content = f.read()
+        self.assertIn('عربي.spec', content)
+
+    def test_version_cli_no_frozen_suffix(self):
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'arabi.py'), '--نسخة'],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('عربي — الإصدار', r.stdout)
+        # في وضع المصدر لا يظهر وصف النسخة التنفيذية
+        self.assertNotIn('تنفيذي مستقل', r.stdout)
+
+    def test_gitignore_ignores_build_dirs(self):
+        with open(os.path.join(ROOT, '.gitignore'), encoding='utf-8') as f:
+            content = f.read()
+        self.assertIn('build/', content)
+        self.assertIn('dist/', content)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

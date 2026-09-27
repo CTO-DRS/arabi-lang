@@ -26,8 +26,8 @@
 ```bash
 npm install -g @vscode/vsce
 cd editor/vscode
-vsce package          # ينتج arabi-lang-1.13.0.vsix
-code --install-extension arabi-lang-1.13.0.vsix
+vsce package          # ينتج arabi-lang-1.14.0.vsix
+code --install-extension arabi-lang-1.14.0.vsix
 ```
 
 ## المقتطفات المتاحة

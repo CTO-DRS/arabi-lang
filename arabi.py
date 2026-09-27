@@ -23,7 +23,19 @@ import sys
 import os
 import contextlib
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+def is_frozen():
+    """هل يعمل المفسّر كملف تنفيذي مستقل (مبني بـ PyInstaller)؟
+
+    PyInstaller يضبط الخاصية sys.frozen عند تشغيل النسخة المجمّعة —
+    عندها لا نحتاج لإضافة مجلد المصدر إلى مسار البحث لأن كل الوحدات
+    مضمّنة داخل الملف التنفيذي نفسه.
+    """
+    return getattr(sys, 'frozen', False)
+
+
+if not is_frozen():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from arabi_lang import __version__
 from arabi_lang.lexer import Lexer
@@ -33,6 +45,18 @@ from arabi_lang.errors import ArabiError
 from arabi_lang import tools
 from arabi_lang import bytecode
 from arabi_lang import lsp as lsp_module
+
+
+def version_text():
+    """سطر الإصدار — يصف النسخة التنفيذية المستقلة عند تجمّدها."""
+    base = f'عربي — الإصدار {__version__}'
+    return base + (' — تنفيذي مستقل' if is_frozen() else '')
+
+
+def prog_name():
+    """اسم البرنامج في رسائل الاستخدام — يتكيف مع النسخة التنفيذية."""
+    return './عربي' if is_frozen() else 'python arabi.py'
+
 
 BANNER = rf"""
   ____              _____
@@ -185,7 +209,7 @@ def list_packages():
     packages = tools.list_packages()
     if not packages:
         print('لا توجد مكتبات مثبتة في مجلد مكتبات/')
-        print('  للتثبيت: python arabi.py --ثبت مسار_أو_رابط')
+        print(f"  للتثبيت: {prog_name()} --ثبت مسار_أو_رابط")
         return
     print(f'المكتبات المثبتة ({len(packages)}):')
     for pkg in packages:
@@ -224,7 +248,7 @@ def package_cli(args):
     args = cleaned
 
     if not args:
-        print('استخدام: python arabi.py حزمة <أمر> [معاملات]')
+        print(f'استخدام: {prog_name()} حزمة <أمر> [معاملات]')
         print('الأوامر: تثبيت [اسم|مسار|رابط] — إزالة اسم — قائمة — '
               'بحث [كلمة] — تحديث [اسم]')
         print("مصدر الفهرس: --الفهرس مسار|رابط أو متغير البيئة "
@@ -294,7 +318,7 @@ def _package_list(packages):
     installed = packages.list_installed(os.getcwd())
     if not installed:
         print('لا حزم مثبتة في مجلد حزم/')
-        print('  للتثبيت: python arabi.py حزمة تثبيت اسم_الحزمة')
+        print(f"  للتثبيت: {prog_name()} حزمة تثبيت اسم_الحزمة")
         return
     print(f'الحزم المثبتة ({len(installed)}):')
     for name, info in installed.items():
@@ -497,29 +521,36 @@ def _setup_readline(interpreter):
 
 
 def show_help():
-    print("""عربي — لغة برمجة عربية بالكامل
+    # في النسخة التنفيذية المستقلة يكون البرنامج نفسه هو أمر التشغيل
+    prog = prog_name()
+    print(f"""عربي — لغة برمجة عربية بالكامل
 
 الاستخدام:
-    python arabi.py ملف.عربي        تشغيل ملف برمجي
-    python arabi.py                 فتح المفسر التفاعلي (REPL)
-    python arabi.py -c "كود"        تنفيذ كود مباشر
-    python arabi.py --تحقق ملف      فحص الصياغة دون تنفيذ
-    python arabi.py --نسق ملفات     تنسيق الملفات وإصلاح الإزاحة
-    python arabi.py --افحص ملفات    فحص الملفات بحثًا عن المشكلات
-    python arabi.py --وثق ملف [ناتج] توليد توثيق Markdown
-    python arabi.py --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
-    python arabi.py --حزم           عرض المكتبات المثبتة
-    python arabi.py حزمة تثبيت [اسم|مسار|رابط]
+    {prog} ملف.عربي        تشغيل ملف برمجي
+    {prog}                 فتح المفسر التفاعلي (REPL)
+    {prog} -c "كود"        تنفيذ كود مباشر
+    {prog} --تحقق ملف      فحص الصياغة دون تنفيذ
+    {prog} --نسق ملفات     تنسيق الملفات وإصلاح الإزاحة
+    {prog} --افحص ملفات    فحص الملفات بحثًا عن المشكلات
+    {prog} --وثق ملف [ناتج] توليد توثيق Markdown
+    {prog} --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
+    {prog} --حزم           عرض المكتبات المثبتة
+    {prog} حزمة تثبيت [اسم|مسار|رابط]
                                     تثبيت حزمة أو تبعيات المشروع (سجل الحزم)
-    python arabi.py حزمة قائمة       عرض الحزم المثبتة في حزم/
-    python arabi.py حزمة إزالة اسم   إزالة حزمة مثبتة
-    python arabi.py حزمة بحث [كلمة]  البحث في فهرس السجل
-    python arabi.py حزمة تحديث [اسم] تحديث إلى أحدث نسخة في السجل
-    python arabi.py --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
-    python arabi.py --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
-    python arabi.py --لا-دولاب ملف  تشغيل معطّلًا الدولاب الافتراضي (ممسح شجري)
-    python arabi.py --نسخة | -v     عرض الإصدار
-    python arabi.py --مساعدة | -h   عرض هذه المساعدة
+    {prog} حزمة قائمة       عرض الحزم المثبتة في حزم/
+    {prog} حزمة إزالة اسم   إزالة حزمة مثبتة
+    {prog} حزمة بحث [كلمة]  البحث في فهرس السجل
+    {prog} حزمة تحديث [اسم] تحديث إلى أحدث نسخة في السجل
+    {prog} --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
+    {prog} --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
+    {prog} --لا-دولاب ملف  تشغيل معطّلًا الدولاب الافتراضي (ممسح شجري)
+    {prog} --نسخة | -v     عرض الإصدار
+    {prog} --مساعدة | -h   عرض هذه المساعدة
+
+ملاحظة: إن كان لديك الملف التنفيذي المستقل «عربي» (الإصدار 1.14+) فاستبدل
+«python arabi.py» باسم الملف التنفيذي نفسه — يعمل بلا حاجة لبايثون:
+    ./عربي ملف.عربي                تشغيل ملف برمجي
+    ./عربي                         فتح المفسر التفاعلي (REPL)
 
 الوحدات المدمجة: رياضيات، وقت، ملفات، جيسون، عشوائية، نظام، تنظيم، شبكة، تحويل، اختبارات، خادم، قاعدة، ترميز، جداول، خيوط، تواريخ، إحصاء
 الأمثلة موجودة في مجلد examples/""")
@@ -533,7 +564,7 @@ def main():
         return
     first = args[0]
     if first in ('--نسخة', '-v', '--version'):
-        print(f'عربي — الإصدار {__version__}')
+        print(version_text())
     elif first in ('--مساعدة', '-h', '--help'):
         show_help()
     elif first in ('--تحقق', '--check'):
