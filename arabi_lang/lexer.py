@@ -12,12 +12,16 @@
 - كلمات الإصدار 1.5: تعداد، خاصية، عالمي، تحقق، احذف
 - كلمات الإصدار 1.7: أنتج (المولدات) وعلامة @ (المزخرفات)
 - كلمات الإصدار 1.9: طابق (مطابقة الأنماط) وغير ذلك
+- كلمات الإصدار 1.24: كـ (فلتر/ربط باستثناء)، والمعامل ٪ (U+066A) و٪=
+  والفاصلة العشرية ٫ وفاصل الآلاف ٬ داخل الأرقام، وسياسة محو التشكيل
+  (يُقبل ولا يميز) وقبول الكشيدة في المعرفات مع إرشاد ذكي عند إخفائها
+  كلمة مفتاحية (المواصفة docs/مواصفة-اللغة.md)
 """
 
 import re
 import unicodedata
 
-from .tokens import T, Token
+from .tokens import T, Token, strip_tashkeel
 from .errors import LexerError
 
 # تحويل الأرقام العربية الشرقية والفارسية إلى الغربية
@@ -43,6 +47,7 @@ KEYWORDS = {
     'ليس': T.NOT,
     'جرب': T.TRY,
     'باستثناء': T.EXCEPT,
+    'كـ': T.AS,
     'اخيرا': T.FINALLY,
     'ارفع': T.RAISE,
     'استورد': T.IMPORT,
@@ -50,7 +55,7 @@ KEYWORDS = {
     'صنف': T.CLASS,
     'هذا': T.THIS,
     'الأصل': T.SUPER,
-    'بدّل': T.SWITCH,
+    'بدل': T.SWITCH,
     'حالة': T.CASE,
     'افتراض': T.DEFAULT,
     # كلمات الإصدار 1.5
@@ -67,10 +72,23 @@ KEYWORDS = {
     'طابق': T.MATCH,
 }
 
-# كلمات مفتاحية مركبة
-ELIF_HINT = re.compile(r'[ \t]+إذا(?!\w)')     # وإلا إذا
-NONE_HINT = re.compile(r'[ \t]+شيء(?!\w)')     # ولا شيء
-OTHERWISE_HINT = re.compile(r'[ \t]+ذلك(?!\w)')  # غير ذلك
+# كلمات مفتاحية مركبة — تتسامح مع التشكيل في كلمتيها (قرار المواصفة ق٢:
+# التشكيل يُقبل ولا يميز)، ولاحقة النفي تستثني التشكيل كذلك
+_TK = '[\u064B-\u0655\u0670]*'               # صفر أو أكثر من علامات التشكيل
+_NOT_WORD = '(?![\\w\u064B-\u0655\u0670])'    # نهاية الكلمة بحرفياها وتشكيلها
+ELIF_HINT = re.compile('[ \\t]+إ' + _TK + 'ذ' + _TK + 'ا' + _TK + _NOT_WORD)
+NONE_HINT = re.compile('[ \\t]+ش' + _TK + 'ي' + _TK + 'ء' + _TK + _NOT_WORD)
+OTHERWISE_HINT = re.compile('[ \\t]+ذ' + _TK + 'ل' + _TK + 'ك' + _TK + _NOT_WORD)
+
+# جدول محو التشكيل — يطبق على الكلمات (المعرفات والكلمات المفتاحية) فقط
+# عند قراءتها، فلا وجود لمعرفين يختلفان بتشكيل ولا كلمة مفتاحية تتعطل
+# بتشكيلها الطبيعي. السلاسل والتعليقات لا تُمس (محتوى نصي مشروع)
+_ANY_TASHKEEL = re.compile('[\u064B-\u0655\u0670]')
+
+# الكشيدة: جزء مشروع من المعرف — استعمالها راسخ في المجموعة (الرابط
+# هـ، والكلمة المفتاحية كـ). الممنوع تضليلًا: معرف تكتبه بكشيدة فيصير
+# بعد حذفها كلمة مفتاحية — يعترض اللفظي برسالة إرشادية (قرار المواصفة ق٣)
+TATWEEL = '\u0640'
 
 IDENT_RE = re.compile(r'[\w\u064B-\u0655\u0670]+')          # يسمح بالتشكيل داخل الاسم
 IDENT_START_RE = re.compile(r'[^\W\d]')
@@ -85,11 +103,14 @@ TWO_CHAR_OPS = {
     '-=': T.MINUS_ASSIGN,
     '*=': T.STAR_ASSIGN,
     '/=': T.SLASH_ASSIGN,
+    '%=': T.PERCENT_ASSIGN,
+    '٪=': T.PERCENT_ASSIGN,
     '=>': T.ARROW,
 }
 
 ONE_CHAR_OPS = {
     '+': T.PLUS, '-': T.MINUS, '*': T.STAR, '/': T.SLASH, '%': T.PERCENT,
+    '٪': T.PERCENT,          # باقي القسمة بالعلامة العربية (U+066A)
     '=': T.ASSIGN, '<': T.LT, '>': T.GT,
     '(': T.LPAREN, ')': T.RPAREN,
     '[': T.LBRACKET, ']': T.RBRACKET,
@@ -119,6 +140,8 @@ _HIDDEN_NAMES = {
     0x00A0: 'مسافة غير فاصلة', 0x00AD: 'شرطة اختيارية',
     0xFEFF: 'علامة ترتيب البايتات (BOM)', 0x0000: 'محرف معدوم',
     0x0640: 'كشيدة',
+    0x066B: 'الفاصلة العشرية العربية (جاءت خارج عدد؟)',
+    0x066C: 'فاصل الآلاف العربي (جاء خارج عدد؟)',
 }
 
 
@@ -324,12 +347,21 @@ class Lexer:
     def _read_number(self):
         start = self.pos
         n = len(self.src)
-        while self.pos < n and self.src[self.pos] in DIGIT_CHARS:
-            self.pos += 1
+        # الأعداد الصحيحة مع فاصل الآلاف العربي ٬ بين الأرقام — يُمحى
+        # من القيمة (المواصفة ق٥)، ويُقبل فقط إذا تلاه رقم
+        while self.pos < n:
+            c = self.src[self.pos]
+            if c in DIGIT_CHARS:
+                self.pos += 1
+            elif (c == '\u066C' and self.pos + 1 < n
+                    and self.src[self.pos + 1] in DIGIT_CHARS):
+                self.pos += 1              # فاصل آلاف يُمحى من القيمة
+            else:
+                break
         is_float = False
 
-        # جزء عشري
-        if (self.pos < n and self.src[self.pos] == '.'
+        # جزء عشري: النقطة أو الفاصلة العشرية العربية ٫ (U+066B)
+        if (self.pos < n and self.src[self.pos] in '.\u066B'
                 and self.pos + 1 < n and self.src[self.pos + 1] in DIGIT_CHARS):
             is_float = True
             self.pos += 1
@@ -347,7 +379,8 @@ class Lexer:
                 while self.pos < n and self.src[self.pos] in DIGIT_CHARS:
                     self.pos += 1
 
-        text = self.src[start:self.pos].translate(AR2EN)
+        text = (self.src[start:self.pos].translate(AR2EN)
+                .replace('\u066C', '').replace('\u066B', '.'))
         if is_float:
             self.add(T.FLOAT, float(text))
         else:
@@ -563,7 +596,13 @@ class Lexer:
 
     def _read_word(self):
         m = IDENT_RE.match(self.src, self.pos)
+        # محو التشكيل من الكلمة قبل أي شيء (المواصفة ق٢): المطابقة
+        # والإصدار على الشكل المجرّد — والمواضع تبقى على المصدر الخام
         word = m.group(0)
+        # المحو عند الحاجة فقط — الأغلبية الساحقة بلا تشكيل، وفحص
+        # regex السريع أرخص من الترجمة العمياء لكل كلمة
+        if _ANY_TASHKEEL.search(word):
+            word = strip_tashkeel(word)
         end = m.end()
 
         # كلمات مفتاحية مركبة
@@ -602,4 +641,12 @@ class Lexer:
         if kw is not None:
             self.add(kw, word)
         else:
+            # إرشاد ذكي (ق٣): كشيدة زائدة تخفي كلمة مفتاحية (لوـ → لو)
+            # — والكشيدة نفسها جزء مشروع من المعرف (هـ الرابط)
+            bare = word.replace(TATWEEL, '')
+            if bare != word and bare in KEYWORDS:
+                self.error(
+                    f"'{word}' ليس معرفًا — بعد حذف الكشيدة تصير الكلمة "
+                    f"المفتاحية '{bare}'. إن أردت الكلمة المفتاحية فاكتب "
+                    f"'{bare}' بلا كشيدة، وإن أردت معرفًا فاختر اسمًا آخر")
             self.add(T.IDENT, word)

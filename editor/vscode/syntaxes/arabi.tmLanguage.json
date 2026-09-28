@@ -263,7 +263,7 @@
         },
         {
           "name": "keyword.control.switch.arabi",
-          "match": "(?<![\\u0600-\\u06FF\\w])(بدّل|حالة|افتراض)(?![\\u0600-\\u06FF\\w])"
+          "match": "(?<![\\u0600-\\u06FF\\w])(بدّل|بدل|حالة|افتراض)(?![\\u0600-\\u06FF\\w])"
         },
         {
           "name": "keyword.control.match.arabi",
@@ -315,7 +315,7 @@
         },
         {
           "name": "keyword.control.exception.arabi",
-          "match": "(?<![\\u0600-\\u06FF\\w])(جرب|باستثناء|اخيرا|ارفع)(?![\\u0600-\\u06FF\\w])"
+          "match": "(?<![\\u0600-\\u06FF\\w])(جرب|باستثناء|كـ|اخيرا|ارفع)(?![\\u0600-\\u06FF\\w])"
         },
         {
           "name": "keyword.other.arabi",
@@ -371,7 +371,7 @@
         },
         {
           "name": "keyword.operator.assignment.augmented.arabi",
-          "match": "(\\+=|-=|\\*=|/=)"
+          "match": "(\\+=|-=|\\*=|/=|%=|٪=)"
         },
         {
           "name": "keyword.operator.comparison.arabi",
@@ -383,7 +383,7 @@
         },
         {
           "name": "keyword.operator.arithmetic.arabi",
-          "match": "(\\*\\*|\\+|-|\\*|/|%)"
+          "match": "(\\*\\*|\\+|-|\\*|/|%|٪)"
         },
         {
           "name": "keyword.operator.assignment.arabi",

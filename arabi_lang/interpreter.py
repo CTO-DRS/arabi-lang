@@ -16,6 +16,7 @@ from . import nodes as N
 from . import vm as _vm
 from .errors import ArabiError, ArabiRuntimeError, ArabiUserError
 from .lexer import Lexer
+from .tokens import strip_tashkeel
 from .parser import Parser
 from .runtime import (
     Env, ArabiFunc, BuiltinFunc, ModuleValue,
@@ -566,6 +567,12 @@ class Interpreter:
         return None
 
     def exec_Try(self, node, env):
+        """جرب/باستثناء مع كتل متعددة وأول فلتر مطابق يفوز (المواصفة ق٦).
+
+        الفلاتر للأخطاء المخصصة (أصناف ترث 'استثناء') حصرًا؛ والأخطاء
+        التشغيلية المدمجة تمسكها الكتل العامة فقط. لا كتلة مطابقة →
+        يُعاد رفع الخطأ برسالته العربية وموضعه.
+        """
         try:
             try:
                 self.exec_statements(node.body, env)
@@ -575,17 +582,38 @@ class Interpreter:
                     exc = ArabiRuntimeError(
                         self._native_error(exc),
                         getattr(exc, 'line', None) or node.line)
-                    if node.except_body is None:
-                        raise exc
-                if node.except_body is None:
-                    raise
-                if node.except_binding:
-                    env.define(node.except_binding,
-                               self._error_binding_value(exc))
-                self.exec_statements(node.except_body, env)
+                matched = None
+                for filter_expr, binding, clause_body in node.clauses:
+                    if filter_expr is not None and not self._filter_matches(
+                            filter_expr, exc, env, node.line):
+                        continue
+                    matched = (binding, clause_body)
+                    break
+                if matched is None:
+                    raise exc
+                binding, clause_body = matched
+                if binding:
+                    env.define(binding, self._error_binding_value(exc))
+                self.exec_statements(clause_body, env)
         finally:
             if node.finally_body is not None:
                 self.exec_statements(node.finally_body, env)
+
+    def _filter_matches(self, filter_expr, exc, env, line):
+        """هل يطابق الخطأ فلتر الصنف؟ التطابق بسلسلة وراثة صنف الخطأ.
+
+        الفلتر يجب أن يعطي صنفًا وإلا خطأ واضح؛ والأخطاء المدمجة
+        (غير المخصصة) لا تطابق أي فلتر — تمسكها الكتل العامة حصرًا.
+        """
+        cls = self.evaluate(filter_expr, env)
+        if not isinstance(cls, ClassValue):
+            raise ArabiRuntimeError(
+                "فلتر 'باستثناء' يجب أن يكون صنفًا يرث 'استثناء' — "
+                f'استلمت {typename(cls)}', line)
+        if not isinstance(exc, ArabiUserError):
+            return False
+        return any(ancestor is cls
+                   for ancestor in self._class_chain(exc.instance.cls))
 
     def _error_binding_value(self, exc):
         """القيمة المرتبطة بـ 'باستثناء هـ' — كائن الخطأ إن كان مخصصًا."""
@@ -1249,7 +1277,7 @@ class Interpreter:
             table = TASK_METHODS
         elif isinstance(obj, PoolValue):
             # قدّم مسار خاص: كلمات المفاتيح تُمرر للدالة المقدَّمة نفسها
-            if name == 'قدّم':
+            if name == 'قدم':
                 return _pool_submit(obj, args, kwargs, line)
             table = POOL_METHODS
         elif isinstance(obj, ProcessValue):
@@ -1258,12 +1286,12 @@ class Interpreter:
             table = PROCESS_TASK_METHODS
         elif isinstance(obj, ProcessPoolValue):
             # قدّم مسار خاص كذلك: الترميز يحدث في الأب لحظة التقديم
-            if name == 'قدّم':
+            if name == 'قدم':
                 return _ppool_submit(obj, args, kwargs, line)
             table = PROCESS_POOL_METHODS
         elif isinstance(obj, DispatcherValue):
             # قدّم مسار خاص كذلك: الترميز يقع لحظة التقديم قبل العبور للشبكة
-            if name == 'قدّم':
+            if name == 'قدم':
                 return _dist_submit(obj, args, kwargs, line)
             table = DISPATCHER_METHODS
         elif isinstance(obj, DistributedTaskValue):
@@ -1609,6 +1637,7 @@ class Interpreter:
     # ================== أدوات الأصناف ==================
 
     def _lookup_member(self, cls, name):
+        name = strip_tashkeel(name)              # المواصفة ق٢
         """يبحث عن عضو في سلسلة الصنف (MRO للوراثة المتعددة) ويعيد (العضو، الصنف المالك)."""
         for scope in self._class_chain(cls):
             if name in scope.members:

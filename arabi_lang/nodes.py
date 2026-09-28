@@ -107,12 +107,13 @@ class Pass(Node):
 
 
 class Try(Node):
-    def __init__(self, body, except_body, finally_body, except_binding=None, line=None):
+    def __init__(self, body, clauses, finally_body, line=None):
         super().__init__(line)
         self.body = body
-        self.except_body = except_body    # [stmt] أو None
+        # كتل باستثناء: [(فلتر_صنف|None، ربط|None، [stmt])] —
+        # الفلتر تعبير اسم/مسار يُقيَّم وقت الالتقاط (المواصفة ق٦)
+        self.clauses = clauses
         self.finally_body = finally_body  # [stmt] أو None
-        self.except_binding = except_binding  # اسم ربط الخطأ أو None
 
 
 class Raise(Node):

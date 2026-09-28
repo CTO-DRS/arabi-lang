@@ -21,6 +21,7 @@ import random
 import urllib.parse
 
 from .errors import ArabiError, ArabiRuntimeError, ArabiUserError
+from .tokens import strip_tashkeel
 
 AR2EN = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
@@ -170,7 +171,7 @@ class BuiltinFunc:
     __slots__ = ('name', 'fn', 'takes_interp')
 
     def __init__(self, name, fn, takes_interp=False):
-        self.name = name
+        self.name = strip_tashkeel(name)     # المواصفة ق٢
         self.fn = fn
         self.takes_interp = takes_interp
 
@@ -182,7 +183,11 @@ class ModuleValue:
 
     def __init__(self, name, members):
         self.name = name
-        self.members = members
+        # تطبيع المفاتيح (المواصفة ق٢): المصدر يقرأ بلا تشكيل فتُطابق
+        # الجداول الشكل المجرّد نفسه — شغّل و شغل اسم واحد
+        self.members = {
+            strip_tashkeel(k): v for k, v in members.items()
+        }
 
 
 class ClassValue:
@@ -246,7 +251,7 @@ class NativeCtor:
     __slots__ = ('name', 'kind')
 
     def __init__(self, name, kind):
-        self.name = name
+        self.name = strip_tashkeel(name)     # المواصفة ق٢
         self.kind = kind
 
 
@@ -1272,6 +1277,14 @@ DICT_METHODS = {
     'امسح': _dict_clear,
 }
 
+# تطبيع مفاتيح الطرق (المواصفة ق٢): قسّم و قسم اسمان — فتُقبل
+# الطرق بتشكيلها الطبيعي في المصدر وتطابق الجدول المجرّد
+for _tbl in (LIST_METHODS, STR_METHODS, DICT_METHODS):
+    for _k in list(_tbl):
+        _sk = strip_tashkeel(_k)
+        if _sk != _k:
+            _tbl[_sk] = _tbl.pop(_k)
+
 
 # ================== الدوال الجاهزة ==================
 
@@ -1525,6 +1538,7 @@ def install_builtins(env):
         ('تجمع', BuiltinFunc('تجمع', _pool_create, takes_interp=True)),
     ]
     for name, fn in builtins_list:
+        name = strip_tashkeel(name)              # المواصفة ق٢
         if isinstance(fn, BuiltinFunc):          # دوال جاهزة مغلفة مسبقًا
             env.define(name, fn)
         else:
@@ -2905,7 +2919,7 @@ DISPATCHER_METHODS.update({
     'منفذ': _dist_port,
     'عنوان': _dist_host,
     'حجم': _dist_size,
-    'مشفّر': _dist_encrypted,
+    'مشفر': _dist_encrypted,
     'انتظر_العمال': _dist_wait_workers,
     'إنهاء': _dist_shutdown,
 })

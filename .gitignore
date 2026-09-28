@@ -23,3 +23,4 @@ __بايت__/
 # مخلفات بناء الملف التنفيذي (PyInstaller)
 build/
 dist/
+uv.lock
