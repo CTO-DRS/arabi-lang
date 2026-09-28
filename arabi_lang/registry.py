@@ -1,6 +1,15 @@
 # -*- coding: utf-8 -*-
 """السجل المجتمعي (الإصدار 1.20) — خادم فهرس حزم تستضيفه بنفسك.
 
+واجهة المتصفح (الإصدار 1.22): الجذر / يخدم لوحة عربية كاملة الاتجاه
+(RTL) تعرض حالة السجل وحزمه مع بحث ومربّع تحميل وصفحة تفاصيل لكل
+حزمة على /عرض/<اسم> — وكل ذلك بلا أي أصول خارجية: CSS مدمج في الصفحة
+ولا جافاسكربت ولا خطوط من الشبكة، فتعمل في الشبكات المعزولة تمامًا
+كما يعمل الخادم نفسه. وكل قيمة قادمة من الحزم تُهرَّب بـ html.escape
+فلا حزمة تلوّث الصفحة. من يريد سطر الأوامر وحده يعطل الواجهة
+بعلم --بلا_واجهة فيعود الجذر نصًا كما كان في 1.20-1.21، والترحيب
+النصي متاح دائمًا على /ترحيب في الحالتين.
+
 الفلسفة:
 - سجل الحزم (1.12) قرأ فهرسه من رابط GitHub أو مسار محلي — وهذا
   يكفي المستهلك لكنه لا يخدم الفريق: لا مكان تنشر إليه حزمك الخاصة،
@@ -27,6 +36,7 @@
 
 import hashlib
 import hmac
+import html as _html
 import io
 import json
 import os
@@ -46,6 +56,15 @@ REGISTRY_NAME = 'سجل عربي المجتمعي'
 INDEX_PATH = '/الفهرس.json'          # المسار القياسي للفهرس (بروتوكول 1.12)
 INFO_PATH = '/معلومات'
 STORE_SUBDIR = 'حزم'                  # مجلد المخزن داخل مجلد السجل
+WELCOME_SEGMENT = 'ترحيب'             # الترحيب النصي — دائمًا متاح
+WEB_PACKAGE_SEGMENT = 'عرض'           # صفحة تفاصيل حزمة /عرض/<اسم>
+SEARCH_PARAM = 'بحث'                  # معامل البحث في الجذر /?بحث=كلمة
+
+# إصدار اللغة في تذييل الصفحات — والوالد محمّل قبل أي وحدة فرعية
+try:
+    from . import __version__ as _LANG_VERSION
+except Exception:                          # حارس نظري — لا يحدث عمليًا
+    _LANG_VERSION = '1.22'
 
 # ترويسة توقيع النشر — والمفتاح من تشفير.مفتاح_آمن (1.19)
 AUTH_HEADER = 'X-Arabi-Signature'
@@ -124,6 +143,219 @@ def _scan_index(store_dir):
     return index
 
 
+def _fmt_size(n):
+    """حجم مقروء: بايت ثم ك.ب ثم م.ب — وأكبر من ذلك نادر في الحزم."""
+    n = int(n)
+    if n < 1024:
+        return f'{n} بايت'
+    if n < 1024 * 1024:
+        return f'{n / 1024:.1f} ك.ب'
+    return f'{n / (1024 * 1024):.1f} م.ب'
+
+
+def _esc(text):
+    """تهريب HTML لكل قيمة قادمة من الحزم — لا تلوث للصفحة أبدًا."""
+    return _html.escape(str(text), quote=True)
+
+
+def _link(path):
+    """رابط آمن بترميز النسبة — سطر href يقبل العربية."""
+    return urllib.parse.quote(path, safe='/.')
+
+
+# ================== قوالب واجهة المتصفح (1.22) ==================
+# CSS مدمج بلا أي أصول خارجية — تعمل اللوحة في الشبكة المعزولة كما
+# يعمل الخادم نفسه، ولا جافاسكربت إطلاقًا فكل شيء روابط ونماذج فقط.
+
+_PAGE_STYLE = '''
+:root{--زيتي:#0e7a5f;--غامق:#123f33;--ورقي:#f4f2ec;--حد:#e3ded2;--رمادي:#6b7280}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ورقي);color:#1f2937;line-height:1.75;
+ font-family:'Segoe UI',Tahoma,'Noto Naskh Arabic','Noto Sans Arabic',sans-serif}
+a{color:var(--زيتي)}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+header{background:var(--غامق);color:#fff;padding:30px 0 46px}
+header h1{margin:0;font-size:1.65rem;letter-spacing:.2px}
+header .sub{margin:6px 0 0;color:#bfe3d4;font-size:.95rem;direction:ltr;text-align:right}
+main.wrap{margin-top:-26px}
+.cards{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+.card{background:#fff;border:1px solid var(--حد);border-radius:10px;
+ padding:12px 22px;min-width:150px;box-shadow:0 2px 6px rgba(0,0,0,.06)}
+.card b{display:block;font-size:1.45rem;color:var(--غامق)}
+.card span{color:var(--رمادي);font-size:.85rem}
+form.search{display:flex;gap:10px;margin:0 0 22px}
+form.search input{flex:1;padding:10px 14px;border:1px solid #d6d0c2;
+ border-radius:8px;font-size:1rem;font-family:inherit}
+form.search button{background:var(--زيتي);color:#fff;border:0;border-radius:8px;
+ padding:10px 28px;font-size:1rem;cursor:pointer;font-family:inherit}
+form.search button:hover{background:#0a5c48}
+table.pkgs{width:100%;border-collapse:collapse;background:#fff;
+ border:1px solid var(--حد)}
+th{background:#eaf2ec;color:var(--غامق);text-align:right;padding:10px 14px;
+ font-size:.9rem;border-bottom:2px solid var(--حد)}
+td{padding:12px 14px;border-top:1px solid #efe9dc;vertical-align:top}
+td .desc{color:var(--رمادي);font-size:.92rem;margin:2px 0 6px}
+a.btn{display:inline-block;padding:4px 14px;border-radius:7px;text-decoration:none;
+ font-size:.87rem;margin:2px 0 2px 6px}
+a.btn.dl{background:var(--زيتي);color:#fff}
+a.btn.info{border:1px solid var(--زيتي);color:var(--زيتي)}
+.badge{background:var(--زيتي);color:#fff;border-radius:99px;padding:1px 12px;
+ font-size:.8rem;margin-right:8px}
+.empty{background:#fff;border:1px dashed #cfc8b8;border-radius:10px;
+ padding:36px;text-align:center;color:var(--رمادي)}
+h2.sec{font-size:1.15rem;color:var(--غامق);margin:26px 0 12px}
+.cmd{background:#10241d;color:#d9f2e6;padding:12px 16px;border-radius:8px;
+ font-family:Consolas,'Courier New',monospace;direction:ltr;text-align:left;
+ overflow-x:auto;margin:12px 0;font-size:.92rem}
+code{font-family:Consolas,'Courier New',monospace;direction:ltr;
+ unicode-bidi:embed;background:#ece9df;border-radius:5px;padding:0 6px}
+.bread{margin:0 0 14px;font-size:.92rem}
+.bread a{color:#bfe3d4}
+.error-box{background:#fff;border:1px solid var(--حد);border-right:5px solid #b91c1c;
+ border-radius:10px;padding:28px;margin-top:26px}
+.error-box h2{margin:0 0 8px;color:#b91c1c;font-size:1.15rem}
+footer{margin-top:34px;padding:16px 0 30px;border-top:1px solid #e0dacb;
+ color:var(--رمادي);font-size:.88rem}
+'''
+
+
+def _page(title, body, base_url):
+    """يغلّف الصفحة بقالب عربي كامل — ترويسة وتذييل وروابط مرجعية."""
+    return f'''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_esc(title)}</title>
+<style>{_PAGE_STYLE}</style>
+</head>
+<body>
+<header><div class="wrap">
+<h1>{_esc(REGISTRY_NAME)}</h1>
+<p class="sub">{_esc(base_url)}</p>
+</div></header>
+<main class="wrap">
+{body}
+</main>
+<footer><div class="wrap">
+مدعوم بلغة عربي {_esc(_LANG_VERSION)} —
+<a href="{_link(INDEX_PATH)}">الفهرس (بروتوكول 1.12)</a> ·
+<a href="{_link('/' + WELCOME_SEGMENT)}">الترحيب النصي</a> ·
+<a href="{_link('/' + INFO_PATH.lstrip('/'))}">معلومات</a>
+</div></footer>
+</body>
+</html>'''
+
+
+def _stats_cards(reg):
+    """بطاقات الحالة الثلاث: الحزم والنسخ ووضع النشر."""
+    mode = 'محمي بمفتاح' if reg.keyed() else 'مفتوح'
+    return f'''<section class="cards">
+<div class="card"><b>{reg.count()}</b><span>حزمة منشورة</span></div>
+<div class="card"><b>{reg.total_versions()}</b><span>نسخة محفوظة</span></div>
+<div class="card"><b>{_esc(mode)}</b><span>وضع النشر</span></div>
+</section>'''
+
+
+def _search_form(term=''):
+    """مربّع البحث — نموذج GET إلى الجذر بمعامل «بحث»."""
+    value = _esc(term) if term else ''
+    return (f'<form class="search" action="/" method="get">'
+            f'<input type="search" name="{_esc(SEARCH_PARAM)}" '
+            f'value="{value}" placeholder="ابحث بالاسم أو الوصف…">'
+            f'<button type="submit">ابحث</button></form>')
+
+
+def _packages_table(reg, entries):
+    """جدول الحزم: اسم ووصف وأحدث نسخة وروابط التحميل والتفاصيل.
+
+    entries قائمة (اسم، بيان فهرس) — كما تعيدها search() أو الفهرس.
+    """
+    rows = []
+    for name, info in entries:
+        version = info.get('النسخة', '')
+        desc = info.get('الوصف', '')
+        rows.append(
+            f'<tr><td><a href="{_link("/" + WEB_PACKAGE_SEGMENT + "/" + name)}" '
+            f'style="font-weight:bold;text-decoration:none">{_esc(name)}</a>'
+            f'<div class="desc">{_esc(desc)}</div>'
+            f'<a class="btn dl" href="{_link("/تحميل/" + name + "/" + version)}">تحميل</a>'
+            f'<a class="btn info" href="{_link("/" + WEB_PACKAGE_SEGMENT + "/" + name)}">التفاصيل</a>'
+            f'</td><td><code>{_esc(version)}</code></td></tr>')
+    return ('<table class="pkgs"><tr><th>الحزمة</th>'
+            '<th>أحدث نسخة</th></tr>'
+            + ''.join(rows) + '</table>')
+
+
+def _home_html(reg, term=None):
+    """لوحة السجل الرئيسية — أو نتائج البحث عند مرور كلمة."""
+    base = reg.base_url()
+    parts = [_stats_cards(reg), _search_form(term or '')]
+    if term:
+        results = reg.search(term)
+        heading = (f'<h2 class="sec">نتائج البحث عن «{_esc(term)}» — '
+                   f'{len(results)} نتيجة</h2>')
+        if results:
+            parts.append(heading + _packages_table(reg, results))
+        else:
+            parts.append(heading
+                         + '<div class="empty">لا نتائج — جرّب كلمة '
+                           'أخرى، أو <a href="/">اعرض السجل كله</a></div>')
+    else:
+        entries = sorted(reg.index_for(base).items())
+        if entries:
+            parts.append('<h2 class="sec">الحزم المنشورة</h2>'
+                         + _packages_table(reg, entries))
+        else:
+            parts.append('<div class="empty">السجل فارغ — انشر أول '
+                         'حزمة بأمر «حزمة نشر» وستظهر هنا فورًا</div>')
+    return _page(f'{reg._name} — استعراض الحزم',
+                 '\n'.join(parts), base)
+
+
+def _package_html(reg, name, metas):
+    """صفحة تفاصيل حزمة: الوصف والنسخ كلها بأحجامها وبصماتها."""
+    base = reg.base_url()
+    latest = metas[-1]
+    desc = latest.get('الوصف', '')
+    rows = []
+    for i, meta in enumerate(reversed(metas)):
+        version = meta['النسخة']
+        badge = ('<span class="badge">الأحدث</span>' if i == 0 else '')
+        digest = meta.get('البصمة', '')
+        short = _esc(digest[:12] + '…') if digest else '—'
+        rows.append(
+            f'<tr><td><code>{_esc(version)}</code>{badge}</td>'
+            f'<td>{_esc(_fmt_size(meta.get("الحجم", 0)))}</td>'
+            f'<td><code title="{_esc(digest)}">{short}</code></td>'
+            f'<td><a class="btn dl" '
+            f'href="{_link("/تحميل/" + name + "/" + version)}">تحميل</a></td></tr>')
+    install = (f'arabi حزمة تثبيت {_esc(name)} --الفهرس '
+               f'{_esc(base)}{INDEX_PATH}')
+    body = f'''<p class="bread"><a href="/">← عودة لكل الحزم</a></p>
+<section class="card" style="min-width:0">
+<b style="font-size:1.3rem">{_esc(name)}</b>
+<span class="badge">{_esc(latest['النسخة'])}</span>
+<p style="margin:8px 0 0">{_esc(desc) or '<i style=\"color:#9ca3af\">بلا وصف</i>'}</p>
+</section>
+<h2 class="sec">التثبيت من هذا السجل</h2>
+<div class="cmd">{install}</div>
+<h2 class="sec">النسخ المنشورة ({len(metas)})</h2>
+<table class="pkgs">
+<tr><th>النسخة</th><th>الحجم</th><th>البصمة (sha256)</th><th></th></tr>
+{''.join(rows)}
+</table>'''
+    return _page(f'{name} — {reg._name}', body, base)
+
+
+def _error_html(message, base_url):
+    """صفحة خطأ عربية بنفس القالب — بدل JSON الخام في واجهة المتصفح."""
+    body = (f'<div class="error-box"><h2>تعذّر عرض الصفحة</h2>'
+            f'<p>{_esc(message)}</p>'
+            f'<p><a href="/">← عودة للصفحة الرئيسية</a></p></div>')
+    return _page('خطأ — ' + REGISTRY_NAME, body, base_url)
+
+
 def _resolve_source_paths(index, base_url):
     """يحوّل مسارات التحميل النسبية إلى روابط كاملة بعنوان الخادم."""
     for info in index.values():
@@ -142,12 +374,13 @@ class RegistryServer:
     """
 
     def __init__(self, store_dir, host='127.0.0.1', port=0, auth_key=None,
-                 name=REGISTRY_NAME):
+                 name=REGISTRY_NAME, no_web=False):
         self._store = os.path.abspath(store_dir)
         self._host = host
         self._requested_port = port
         self._auth_key = auth_key
         self._name = name
+        self._no_web = bool(no_web)
         self._lock = threading.RLock()
         self._httpd = None
         self._thread = None
@@ -212,6 +445,10 @@ class RegistryServer:
 
     def keyed(self):
         return self._auth_key is not None
+
+    def web_enabled(self):
+        """واجهة المتصفح مفعلة — يعطلها علم --بلا_واجهة."""
+        return not self._no_web
 
     def count(self):
         """عدد الحزم في السجل."""
@@ -372,7 +609,7 @@ class _RegistryHandler(BaseHTTPRequestHandler):
     """معالج طلبات السجل — كل المسارات عربية والردود utf-8."""
 
     registry = None                    # يضبط عند البناء (فئة مغلقة)
-    server_version = 'ArabiRegistry/1.20'
+    server_version = 'ArabiRegistry/1.22'
     protocol_version = 'HTTP/1.1'
 
     # ---------- أدوات الرد ----------
@@ -383,6 +620,14 @@ class _RegistryHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type',
                          'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(blob)))
+        self.end_headers()
+        self.wfile.write(blob)
+
+    def _send_html(self, text, status=200):
+        blob = text.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(blob)))
         self.end_headers()
         self.wfile.write(blob)
@@ -413,6 +658,12 @@ class _RegistryHandler(BaseHTTPRequestHandler):
         return [urllib.parse.unquote(s)
                 for s in path.split('/') if s]
 
+    def _query_param(self, name):
+        """قيمة معامل استعلام واحد من رابط الطلب — أو لا شيء."""
+        query = urllib.parse.urlsplit(self.path).query
+        values = urllib.parse.parse_qs(query).get(name)
+        return values[0] if values else None
+
     def log_message(self, fmt, *args):    # صمت — الـCLI يطبع ما يلزم
         pass
 
@@ -423,9 +674,18 @@ class _RegistryHandler(BaseHTTPRequestHandler):
         segs = self._segments()
         try:
             if not segs:
-                self._send_text(self._welcome_text())
+                # الجذر: لوحة المتصفح (1.22) — أو النص كما كان قبلها
+                if reg._no_web:
+                    self._send_text(self._welcome_text())
+                else:
+                    term = self._query_param(SEARCH_PARAM)
+                    self._send_html(_home_html(reg, term))
                 return
             head = segs[0]
+            if head == WELCOME_SEGMENT:
+                # الترحيب النصي — متاح دائمًا لواجهة المتصفح والسطر معًا
+                self._send_text(self._welcome_text())
+                return
             if head in ('الفهرس.json', 'الفهرس', 'index.json'):
                 # اسم آسكي بديل للفهرس — لراحة curl والأدوات القديمة
                 self._send_json(reg.index_for(reg.base_url()))
@@ -438,7 +698,11 @@ class _RegistryHandler(BaseHTTPRequestHandler):
                     'العنوان': reg.base_url(),
                     'النشر': 'مفتاح مطلوب' if reg.keyed()
                              else 'مفتوح',
+                    'الواجهة': 'معطلة' if reg._no_web else 'مفعلة',
                 })
+                return
+            if head == WEB_PACKAGE_SEGMENT and len(segs) == 2:
+                self._serve_package_page(segs[1])
                 return
             if head == 'حزمة' and len(segs) == 2:
                 meta = reg.package_meta(segs[1])
@@ -487,6 +751,22 @@ class _RegistryHandler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def _serve_package_page(self, name):
+        """صفحة تفاصيل حزمة بالواجهة العربية — أو صفحة خطأ 404."""
+        reg = self.registry
+        if reg._no_web:
+            self._error(404, 'واجهة المتصفح معطلة على هذا السجل '
+                             '(--بلا_واجهة) — استخدم /حزمة/<اسم>')
+            return
+        with reg._lock:
+            metas = _scan_versions(reg._store, name)
+        if not metas:
+            self._send_html(
+                _error_html(f"الحزمة '{name}' غير موجودة في السجل",
+                            reg.base_url()), status=404)
+            return
+        self._send_html(_package_html(reg, name, metas))
+
     def _welcome_text(self):
         reg = self.registry
         lines = [
@@ -496,7 +776,10 @@ class _RegistryHandler(BaseHTTPRequestHandler):
             + ('محمي بمفتاح' if reg.keyed() else 'مفتوح'),
             '',
             'المسارات:',
+            '  /                     واجهة المتصفح (استعراض وبحث) — 1.22',
+            '  /ترحيب                هذا الترحيب النصي',
             '  /الفهرس.json          فهرس السجل (بروتوكول 1.12)',
+            '  /عرض/<اسم>            صفحة تفاصيل حزمة بالمتصفح',
             '  /حزمة/<اسم>           بيانات حزمة ونسخها',
             '  /تحميل/<اسم>/<نسخة>   تنزيل أرشيف نسخة (أو الأحدث بلا نسخة)',
             '  /بحث/<كلمة>           بحث بالاسم أو الوصف',
@@ -556,14 +839,14 @@ class _RegistryHandler(BaseHTTPRequestHandler):
 # ================== سطر الأوامر ==================
 
 def run_server_cli(store_dir, host='127.0.0.1', port=0, auth_key=None,
-                   name=REGISTRY_NAME):
+                   name=REGISTRY_NAME, no_web=False):
     """يشغل سجل الحزم في الواجهة ويحجب حتى Ctrl+C — ثم يودّع بنظافة."""
     if auth_key is not None and (not isinstance(auth_key, str)
                                  or not auth_key):
         raise ArabiError('مفتاح النشر يكون نصًا غير فارغ — أو احذف '
                          'العلم ليكون السجل مفتوحًا')
     server = RegistryServer(store_dir, host=host, port=port,
-                            auth_key=auth_key, name=name)
+                            auth_key=auth_key, name=name, no_web=no_web)
     try:
         server.start()
     except ArabiError as exc:
@@ -572,6 +855,11 @@ def run_server_cli(store_dir, host='127.0.0.1', port=0, auth_key=None,
     print(f'المخزن: {server.store()}')
     print('النشر: ' + ('محمي بمفتاح سري' if server.keyed()
                        else 'مفتوح (للشبكة المحلية والتجريب)'))
+    if server.web_enabled():
+        print(f'واجهة المتصفح: {server.base_url()}/ — استعراض وبحث '
+              'وتفاصيل كل حزمة')
+    else:
+        print('واجهة المتصفح: معطلة (--بلا_واجهة) — الجذر ترحيب نصي')
     print(f'الحزم الحالية: {server.count()}')
     print(f'التثبيت من هذا السجل: arabi حزمة تثبيت اسم --الفهرس '
           f'{server.base_url()}/الفهرس.json')

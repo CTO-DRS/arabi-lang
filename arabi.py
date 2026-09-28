@@ -270,8 +270,8 @@ def package_cli(args):
         print(f'استخدام: {prog_name()} حزمة <أمر> [معاملات]')
         print('الأوامر: تثبيت [اسم|مسار|رابط] — إزالة اسم — قائمة — '
               'بحث [كلمة] — تحديث [اسم]')
-        print('        خادم [مجلد] --منفذ N --عنوان H --مفتاح سر  '
-              'سجل مجتمعي (1.20)')
+        print('        خادم [مجلد] --منفذ N --عنوان H --مفتاح سر [--بلا_واجهة]  '
+              'سجل مجتمعي (1.20، واجهة متصفح 1.22)')
         print('        نشر مسار --الفهرس رابط [--نسخة X] [--مفتاح سر]  '
               'نشر إلى السجل (1.20)')
         print("مصدر الفهرس: --الفهرس مسار|رابط أو متغير البيئة "
@@ -299,14 +299,21 @@ def package_cli(args):
             _package_update(packages, target, index_source)
         elif cmd in ('خادم', '--خادم', 'server'):
             # سجل مجتمعي محلي (1.20): يخدم الفهرس والتنزيل والنشر
+            # وواجهة متصفح عربية (1.22) يعطلها علم --بلا_واجهة
             from arabi_lang import registry
-            store = rest[0] if rest else registry.DEFAULT_STORE
             port_raw, rest = _parse_flag_value(
                 rest, ('--منفذ', '--port'), 'رقم منفذ مثل 8000')
             host, rest = _parse_flag_value(
                 rest, ('--عنوان', '--host'), 'عنوان مثل 127.0.0.1')
             key, rest = _parse_flag_value(
                 rest, ('--مفتاح', '--key'), 'نص سر غير فارغ')
+            no_web = False
+            for flag in ('--بلا_واجهة', '--بلا-واجهة', '--no-web'):
+                while flag in rest:
+                    rest.remove(flag)
+                    no_web = True
+            # المجلد بعد نزع الأعلام — فيصح الترتيب بأي تسلسل
+            store = rest[0] if rest else registry.DEFAULT_STORE
             port = int(port_raw) if port_raw else 0
             if port_raw and not 0 <= port <= 65535:
                 print(f'خطأ: المنفذ {port} خارج المدى (٠-٦٥٥٣٥)',
@@ -314,7 +321,7 @@ def package_cli(args):
                 sys.exit(1)
             sys.exit(registry.run_server_cli(
                 store, host=host or '127.0.0.1', port=port,
-                auth_key=key))
+                auth_key=key, no_web=no_web))
         elif cmd in ('نشر', '--نشر', 'publish'):
             # نشر حزمة إلى سجل مجتمعي (1.20)
             if not rest:

@@ -8834,8 +8834,17 @@ class TestRegistry(unittest.TestCase):
     # ---------- الخادم والفهرس ----------
 
     def test_welcome_and_empty_index(self):
+        import urllib.parse as _up
         import urllib.request
-        welcome = urllib.request.urlopen(self.base).read().decode('utf-8')
+        # الجذر (1.22): لوحة المتصفح — تعرض اسم السجل وفراغه بوضوح
+        page = urllib.request.urlopen(self.base).read().decode('utf-8')
+        self.assertIn('سجل عربي المجتمعي', page)
+        self.assertIn('dir="rtl"', page)
+        self.assertIn('السجل فارغ', page)
+        # الترحيب النصي انتقل إلى /ترحيب — فيه المسارات كما كان
+        welcome = urllib.request.urlopen(
+            self.base + _up.quote('/ترحيب', safe='/')).read().decode(
+                'utf-8')
         self.assertIn('سجل عربي المجتمعي', welcome)
         self.assertIn('/الفهرس.json', welcome)
         index = self.packages.load_index(self.base + '/الفهرس.json')
@@ -9052,6 +9061,341 @@ class TestRegistry(unittest.TestCase):
             else:
                 self.fail(f'الخادم لم يستجب: {last}')
             self.assertEqual(_json.loads(body.decode('utf-8')), {})
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+class TestRegistryWeb(unittest.TestCase):
+    """واجهة المتصفح للسجل (1.22) — لوحة عربية RTL وبحث وصفحات تفاصيل.
+
+    كل الصفحات بلا أصول خارجية (CSS مدمج) وكل قيمة قادمة من الحزم
+    مهربة بـ html.escape — والفحوص هنا عبر HTTP حقيقي كاختبارات 1.20.
+    """
+
+    def setUp(self):
+        import tempfile
+        from arabi_lang.registry import RegistryServer
+        self.tmp = tempfile.mkdtemp(prefix='عربي-واجهة-اختبار-')
+        self.servers = []
+        self.tempdirs = [self.tmp]
+        self._default = self._server()
+
+    def tearDown(self):
+        for s in self.servers:
+            s.stop()
+        import shutil
+        for d in self.tempdirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _server(self, key=None, no_web=False):
+        from arabi_lang.registry import RegistryServer
+        srv = RegistryServer(
+            os.path.join(self.tmp, f'مخزن{len(self.servers)}'),
+            port=0, auth_key=key, no_web=no_web)
+        srv.start()
+        self.servers.append(srv)
+        return srv
+
+    def _make_pkg(self, name='أدوات', version='1.0.0', desc=None,
+                  code=None):
+        import json
+        pkg = os.path.join(self.tmp, f'حزمة{name}{version}')
+        os.makedirs(pkg, exist_ok=True)
+        manifest = {'الاسم': name, 'النسخة': version,
+                    'الوصف': desc or f'حزمة {name} للتجربة',
+                    'المدخل': f'{name}.عربي', 'التبعيات': {}}
+        with open(os.path.join(pkg, 'حزمة.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        body = code or (f'دالة ضاعف(ن):\n    أعد ن * ٢\n')
+        with open(os.path.join(pkg, f'{name}.عربي'), 'w',
+                  encoding='utf-8') as f:
+            f.write(body)
+        self.tempdirs.append(pkg)
+        return pkg
+
+    def _publish(self, name='أدوات', version='1.0.0', desc=None):
+        from arabi_lang import packages
+        return packages.publish(
+            self._make_pkg(name=name, version=version, desc=desc),
+            self.servers[0].base_url())
+
+    def _fetch(self, path, server_index=0):
+        """يجلب مسارًا (يرمّزه بالنسبة) ويعيد (الحالة، النص، النوع).
+
+        الاستعلام بعد «?» يمرّ كما هو — فهو مرمّز سلفًا بـ urlencode.
+        """
+        import urllib.parse as _up
+        import urllib.request as _ur
+        if '?' in path:
+            p, q = path.split('?', 1)
+            encoded = _up.quote(p, safe='/.') + '?' + q
+        else:
+            encoded = _up.quote(path, safe='/.')
+        url = self.servers[server_index].base_url() + encoded
+        try:
+            r = _ur.urlopen(url)
+            return r.status, r.read().decode('utf-8'), r.headers.get(
+                'Content-Type', '')
+        except _ur.HTTPError as e:
+            return e.code, e.read().decode('utf-8'), e.headers.get(
+                'Content-Type', '')
+
+    def _query(self, **params):
+        import urllib.parse as _up
+        return '/?' + _up.urlencode(params)
+
+    # ---------- اللوحة الرئيسية ----------
+
+    def test_home_is_html_dashboard(self):
+        status, page, ctype = self._fetch('/')
+        self.assertEqual(status, 200)
+        self.assertIn('text/html; charset=utf-8', ctype)
+        self.assertIn('dir="rtl"', page)
+        self.assertIn('lang="ar"', page)
+        self.assertIn('سجل عربي المجتمعي', page)
+        # بطاقات الحالة — سجل فارغ
+        self.assertIn('<b>0</b><span>حزمة منشورة</span>', page)
+        self.assertIn('<b>0</b><span>نسخة محفوظة</span>', page)
+        self.assertIn('<b>مفتوح</b><span>وضع النشر</span>', page)
+        # مربّع البحث بنموذج GET ومعامل «بحث»
+        self.assertIn('name="بحث"', page)
+        self.assertIn('<form class="search" action="/" method="get">',
+                      page)
+        # التذييل بروابطه الثلاثة
+        self.assertIn('مدعوم بلغة عربي 1.22.0', page)
+        self.assertIn('href="/%D8%A7%D9%84%D9%81%D9%87%D8%B1%D8%B3.json"',
+                      page)                       # /الفهرس.json مرمّزًا
+        self.assertIn('الترحيب النصي', page)
+        # الحالة الفارغة — رسالة واضحة بلا جدول
+        self.assertIn('السجل فارغ', page)
+        self.assertNotIn('table class="pkgs"', page)
+
+    def test_home_lists_published_packages(self):
+        self._publish(name='أدوات', version='1.0.0',
+                      desc='عدد وفرز ومقارنات')
+        self._publish(name='ألوان', version='2.0.0',
+                      desc='تحويل صيغ الألوان')
+        status, page, _ = self._fetch('/')
+        self.assertEqual(status, 200)
+        self.assertIn('<h2 class="sec">الحزم المنشورة</h2>', page)
+        self.assertIn('>أدوات</a>', page)
+        self.assertIn('>ألوان</a>', page)
+        self.assertIn('عدد وفرز ومقارنات', page)
+        self.assertIn('تحويل صيغ الألوان', page)
+        self.assertIn('<code>1.0.0</code>', page)
+        self.assertIn('<code>2.0.0</code>', page)
+        # روابط التفاصيل والتحميل مرمّزة بالنسبة
+        self.assertIn('href="/%D8%B9%D8%B1%D8%B6/'
+                      '%D8%A3%D8%AF%D9%88%D8%A7%D8%AA"', page)
+        self.assertIn('href="/%D8%AA%D8%AD%D9%85%D9%8A%D9%84/'
+                      '%D8%A3%D8%AF%D9%88%D8%A7%D8%AA/1.0.0"', page)
+
+    def test_home_search_via_query_param(self):
+        self._publish(name='أدوات', desc='عدد وفرز ومقارنات')
+        self._publish(name='ألوان', desc='تحويل صيغ الألوان')
+        status, page, _ = self._fetch(self._query(بحث='ألوان'))
+        self.assertEqual(status, 200)
+        self.assertIn('نتائج البحث عن «ألوان» — 1 نتيجة', page)
+        self.assertIn('>ألوان</a>', page)
+        self.assertNotIn('>أدوات</a>', page)
+        # كلمة تجمع الاثنين بالوصف؟ لا — كلمة غائبة تعطي صفرًا
+        _, miss, _ = self._fetch(self._query(بحث='ززب'))
+        self.assertIn('«ززب» — 0 نتيجة', miss)
+        self.assertIn('لا نتائج', miss)
+        # بحث بالوصف يجد الحزمة وإن لم يكن الاسم مطابقًا
+        _, bydesc, _ = self._fetch(self._query(بحث='مقارنات'))
+        self.assertIn('>أدوات</a>', bydesc)
+
+    # ---------- صفحة التفاصيل ----------
+
+    def test_package_page_details(self):
+        from hashlib import sha256
+        self._publish(name='أدوات', version='1.0.0',
+                      desc='عدد وفرز ومقارنات')
+        self._publish(name='أدوات', version='1.2.0',
+                      desc='عدد وفرز ومقارنات مطروحة')
+        status, page, ctype = self._fetch('/عرض/أدوات')
+        self.assertEqual(status, 200)
+        self.assertIn('text/html; charset=utf-8', ctype)
+        self.assertIn('عدد وفرز ومقارنات مطروحة', page)
+        # النسخ أحدثها أولًا + شارة الأحدث على أول صف
+        self.assertLess(page.index('<code>1.2.0</code>'),
+                        page.index('<code>1.0.0</code>'))
+        self.assertIn('<span class="badge">الأحدث</span>', page)
+        # أمر التثبيت بعنوان السجل الحقيقي
+        base = self.servers[0].base_url()
+        self.assertIn(f'arabi حزمة تثبيت أدوات --الفهرس {base}',
+                      page)
+        # البصمات: الأولى 12 حرفًا من sha256 لكل نسخة (بالنص مهربة)
+        import os as _os
+        from arabi_lang.registry import _version_zip_path
+        for version in ('1.0.0', '1.2.0'):
+            path = _version_zip_path(self.servers[0].store(),
+                                     'أدوات', version)
+            with open(path, 'rb') as f:
+                digest = sha256(f.read()).hexdigest()
+            self.assertIn(digest[:12], page)
+            self.assertIn('title="' + digest + '"', page)
+
+    def test_package_page_404_is_html(self):
+        status, page, ctype = self._fetch('/عرض/غائب')
+        self.assertEqual(status, 404)
+        self.assertIn('text/html; charset=utf-8', ctype)
+        # الاسم مهرب داخل الرسالة فتُفحص أجزاؤها منفصلة
+        self.assertIn('تعذّر عرض الصفحة', page)
+        self.assertIn('غائب', page)
+        self.assertIn('غير موجودة في السجل', page)
+        self.assertIn('عودة للصفحة الرئيسية', page)
+
+    # ---------- الترحيب النصي والتهريب ----------
+
+    def test_welcome_text_content(self):
+        status, text, ctype = self._fetch('/ترحيب')
+        self.assertEqual(status, 200)
+        self.assertIn('text/plain; charset=utf-8', ctype)
+        self.assertIn('سجل عربي المجتمعي', text)
+        self.assertIn('/الفهرس.json', text)
+        self.assertIn('واجهة المتصفح', text)
+        self.assertIn('/عرض/<اسم>', text)
+        self.assertIn('POST /نشر/<اسم>/<نسخة>', text)
+        self.assertIn('arabi حزمة تثبيت اسم --الفهرس', text)
+
+    def test_home_escapes_user_content(self):
+        evil = '<script>سرقة()</script> & "مغروسة"'
+        self._publish(name='خبيثة', version='1.0.0', desc=evil)
+        _, home, _ = self._fetch('/')
+        self.assertNotIn('<script>', home)
+        self.assertIn('&lt;script&gt;', home)
+        self.assertIn('&amp; &quot;مغروسة&quot;', home)
+        _, details, _ = self._fetch('/عرض/خبيثة')
+        self.assertNotIn('<script>', details)
+        self.assertIn('&lt;script&gt;', details)
+        # عنوان الصفحة (اسم الحزمة) مهرب أيضًا
+        self.assertIn('<title>خبيثة — سجل عربي المجتمعي</title>',
+                      details)
+
+    # ---------- بلا واجهة + بروتوكول سليم ----------
+
+    def test_no_web_serves_text_at_root(self):
+        srv = self._server(no_web=True)      # الخادم الثاني في القائمة
+        self.assertFalse(srv.web_enabled())
+        status, text, ctype = self._fetch('/', server_index=1)
+        self.assertEqual(status, 200)
+        self.assertIn('text/plain; charset=utf-8', ctype)
+        self.assertIn('المسارات:', text)
+        self.assertIn('سجل عربي المجتمعي', text)
+        self.assertNotIn('<html', text)
+        # /عرض معطلة برسالة عربية واضحة — JSON كالواجهة البرمجية
+        status, body, ctype = self._fetch('/عرض/أدوات', server_index=1)
+        self.assertEqual(status, 404)
+        self.assertIn('application/json', ctype)
+        self.assertIn('بلا_واجهة', body)
+
+    def test_api_routes_unchanged_by_web_ui(self):
+        # الفهرس JSON كما هو — البروتوكول القياسي 1.12 لم يمسّه الويب
+        import json as _json
+        status, body, ctype = self._fetch('/الفهرس.json')
+        self.assertEqual(status, 200)
+        self.assertIn('application/json', ctype)
+        self.assertEqual(_json.loads(body), {})
+        # المعلومات تضيف حالة الواجهة فقط
+        _, info, _ = self._fetch('/معلومات')
+        data = _json.loads(info)
+        self.assertEqual(data['الواجهة'], 'مفعلة')
+        self.assertIn('السجل', data)
+        self.assertIn('الحزم', data)
+        # حزمة JSON كما هي
+        self._publish()
+        _, meta, _ = self._fetch('/حزمة/أدوات')
+        self.assertEqual(_json.loads(meta)['الأحدث'], '1.0.0')
+
+    def test_download_link_delivers_real_zip(self):
+        self._publish(name='أدوات', version='1.0.0')
+        _, home, _ = self._fetch('/')
+        import urllib.parse as _up
+        expected = _up.quote('/تحميل/أدوات/1.0.0', safe='/.')
+        self.assertIn(f'href="{expected}"', home)
+        # الرابط نفسه يجلب أرشيف zip حقيقيًا (نفس بايتات التحميل المباشر)
+        import urllib.request as _ur
+        blob = _ur.urlopen(
+            self.servers[0].base_url() + expected).read()
+        self.assertTrue(blob[:2] == b'PK')   # توقيع zip
+
+    def test_cli_server_no_web_flag(self):
+        import json as _json
+        import socket as _socket
+        import subprocess
+        import sys as _sys
+        import time as _time
+        import urllib.request as _ur
+        probe = _socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        proc = subprocess.Popen(
+            [_sys.executable, os.path.join(ROOT, 'arabi.py'),
+             'حزمة', 'خادم', os.path.join(self.tmp, 'مخزن_سطري'),
+             '--منفذ', str(port), '--بلا_واجهة'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+        try:
+            url = f'http://127.0.0.1:{port}/'
+            deadline = _time.time() + 20
+            body = None
+            while _time.time() < deadline:
+                try:
+                    body = _ur.urlopen(url, timeout=2).read()
+                    break
+                except OSError:
+                    _time.sleep(0.2)
+            self.assertIsNotNone(body, 'الخادم لم يستجب')
+            text = body.decode('utf-8')
+            self.assertIn('المسارات:', text)
+            self.assertNotIn('<html', text)
+            # ويطبع سطر حالة الواجهة المعطلة
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        self.assertIn('معطلة', proc.stdout.read().decode('utf-8'))
+
+    def test_cli_server_web_on_by_default(self):
+        import socket as _socket
+        import subprocess
+        import sys as _sys
+        import time as _time
+        import urllib.request as _ur
+        probe = _socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        proc = subprocess.Popen(
+            [_sys.executable, os.path.join(ROOT, 'arabi.py'),
+             'حزمة', 'خادم', os.path.join(self.tmp, 'مخزن_سطري2'),
+             '--منفذ', str(port)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+        try:
+            url = f'http://127.0.0.1:{port}/'
+            deadline = _time.time() + 20
+            body = None
+            while _time.time() < deadline:
+                try:
+                    body = _ur.urlopen(url, timeout=2).read()
+                    break
+                except OSError:
+                    _time.sleep(0.2)
+            self.assertIsNotNone(body, 'الخادم لم يستجب')
+            page = body.decode('utf-8')
+            self.assertIn('dir="rtl"', page)
+            self.assertIn('السجل فارغ', page)
         finally:
             proc.terminate()
             try:
