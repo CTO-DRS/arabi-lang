@@ -502,15 +502,17 @@ def _run_job(payload):
     result = interp._call_value(func, args, kwargs, None)
     if isinstance(result, TaskValue):
         result = result.result()
-    return ('نهاية',
-            pickle.dumps(encode_value(result, _make_enc_ctx(ctx['root']))))
+    # العودة بسجل مرمز مجرد (1.23) — وكل ناقل يسلسله بطريقه:
+    # أنابيب العمليات المحلية تنقّطه، والشبكة الموزعة ترمزه JSON آمنًا
+    return ('نهاية', encode_value(result, _make_enc_ctx(ctx['root'])))
 
 
 def _proc_entry(blob, conn):
     """نقطة دخول عملية 'شغّل' — تعمل في عملية مستقلة تمامًا."""
     try:
         data = pickle.loads(blob)
-        kind, payload_blob = _run_job(data)
+        kind, record = _run_job(data)
+        payload_blob = pickle.dumps(record)
     except ArabiError as exc:
         kind, payload_blob = 'خطأ', pickle.dumps(_encode_error(exc))
     except Exception as exc:                    # شبكة أمان — لا صمت أبدًا
@@ -532,7 +534,8 @@ def _pool_worker(job_q, result_q):
         job_id, blob = job
         try:
             data = pickle.loads(blob)
-            kind, payload_blob = _run_job(data)
+            kind, record = _run_job(data)
+            payload_blob = pickle.dumps(record)
         except ArabiError as exc:
             kind, payload_blob = 'خطأ', pickle.dumps(_encode_error(exc))
         except Exception as exc:

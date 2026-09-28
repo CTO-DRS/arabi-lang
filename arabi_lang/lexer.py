@@ -15,14 +15,16 @@
 """
 
 import re
+import unicodedata
 
 from .tokens import T, Token
 from .errors import LexerError
 
-# تحويل الأرقام العربية إلى الغربية
-AR2EN = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+# تحويل الأرقام العربية الشرقية والفارسية إلى الغربية
+AR2EN = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹',
+                      '01234567890123456789')
 
-DIGIT_CHARS = set('0123456789٠١٢٣٤٥٦٧٨٩')
+DIGIT_CHARS = set('0123456789٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹')
 
 KEYWORDS = {
     'دالة': T.DEF,
@@ -101,12 +103,52 @@ CLOSE_BRACKETS = {')': '(', ']': '[', '}': '{'}
 
 ESCAPES = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f'}
 
+# محارف تُعامل فراغًا إضافة إلى المسافة والتبويب — أشهرها مسافة
+# اللصق غير الفاصلة (NBSP) من Word والمتصفحات، وهذه كانت تسقط
+# البرنامج برسالة غامضة في أهم سيناريو للمبتدئ (الإصدار 1.23)
+EXTRA_SPACE = set('\u00A0\u000B\u000C')
+
+# أسماء عربية للمحارف الخفية الشائعة — تظهر في رسائل «رمز غير معروف»
+# مهربة (U+XXXX) بدل طباعتها كمصفة لا تُرى (الإصدار 1.23)
+_HIDDEN_NAMES = {
+    0x200B: 'مسافة عريضة صفرية', 0x200C: 'رابط غير فاصل',
+    0x200D: 'رابط فاصل', 0x200E: 'علامة اتجاه يسار-يمين',
+    0x200F: 'علامة اتجاه يمين-يسار', 0x202A: 'علامة تضمين اتجاه',
+    0x202B: 'علامة تضمين اتجاه يمين-يسار', 0x202C: 'قافض اتجاه',
+    0x202D: 'علامة تجاوز اتجاه', 0x202E: 'علامة تجاوز اتجاه يمين-يسار',
+    0x00A0: 'مسافة غير فاصلة', 0x00AD: 'شرطة اختيارية',
+    0xFEFF: 'علامة ترتيب البايتات (BOM)', 0x0000: 'محرف معدوم',
+    0x0640: 'كشيدة',
+}
+
+
+def describe_char(ch):
+    """وصف آمن لمحرف في رسالة خطأ: الخفية تُهرب بترميزها واسمها
+    العربي إن عرفناه، والظاهرة تُعرض كما هي — فلا يعود BOM أو
+    علامة اتجاه تظهر كمسافة أو مقتبسين فارغين."""
+    code = ord(ch)
+    label = _HIDDEN_NAMES.get(code)
+    if label is None and (unicodedata.category(ch) in ('Cc', 'Cf')
+                          or (ch.isspace() and ch != ' ')):
+        label = 'محرف خفي'
+    if label:
+        return f'U+{code:04X} ({label})'
+    return f"'{ch}'"
+
 
 class Lexer:
     """يستقبل نص البرنامج المصدري وينتج قائمة من الرموز."""
 
     def __init__(self, source, lenient_indent=False):
-        src = source.replace('\r\n', '\n').replace('\r', '\n')
+        # تطبيع Unicode مرة واحدة عند الدخول (الإصدار 1.23): المعرف
+        # المفكك (NFD) والمركب (NFC) يحملان الاسم نفسه، والكلمة
+        # المفتاحية المفككة تعود كلمة مفتاحية — فلا تعدد صامت للأسماء
+        src = unicodedata.normalize('NFC', source)
+        # علامة ترتيب البايتات من محررات ويندوز تُزال (والقراءة من
+        # الملفات بـ utf-8-sig تتكفل بها أولًا — هذه حماية أخيرة)
+        if src.startswith('\ufeff'):
+            src = src[1:]
+        src = src.replace('\r\n', '\n').replace('\r', '\n')
         if not src.endswith('\n'):
             src += '\n'
         self.src = src
@@ -116,16 +158,24 @@ class Lexer:
         self.indents = [0]
         self.brackets = []          # لتتبع الأقواس المفتوحة
         self.at_line_start = True
+        # موضع بداية الرمز الجاري إصداره — يحسب منه العمود (1.23)
+        self._tok_start = 0
         # الوضع المتساهل: يقبل إزاحات غير متسقة (لأدوات الفحص والتنسيق)
         self.lenient_indent = lenient_indent
 
     # ---------- أدوات مساعدة ----------
 
-    def error(self, message):
-        raise LexerError(message, self.line)
+    def _col_at(self, pos):
+        """عمود الموضع في سطره (يبدأ من ١، بالمحارف)."""
+        return pos - self.src.rfind('\n', 0, pos)
+
+    def error(self, message, pos=None):
+        raise LexerError(message, self.line,
+                         self._col_at(self.pos if pos is None else pos))
 
     def add(self, type_, value):
-        self.tokens.append(Token(type_, value, self.line))
+        self.tokens.append(Token(type_, value, self.line,
+                                 self._col_at(self._tok_start)))
 
     # ---------- التحليل ----------
 
@@ -134,6 +184,7 @@ class Lexer:
             if self.at_line_start and not self.brackets:
                 if self._handle_indentation():
                     continue          # سطر فارغ أو تعليق فقط — تخطاه
+            self._tok_start = self.pos
             ch = self.src[self.pos]
 
             if ch == '\n':
@@ -144,7 +195,7 @@ class Lexer:
                 self.line += 1
                 continue
 
-            if ch in ' \t':
+            if ch in ' \t' or ch in EXTRA_SPACE:
                 self.pos += 1
                 continue
 
@@ -180,10 +231,17 @@ class Lexer:
             if ch in ONE_CHAR_OPS:
                 t = ONE_CHAR_OPS[ch]
                 if ch in OPEN_BRACKETS:
-                    self.brackets.append((ch, self.line))
+                    self.brackets.append((ch, self.line, self._col_at(self.pos)))
                 elif ch in CLOSE_BRACKETS:
                     if not self.brackets or self.brackets[-1][0] != CLOSE_BRACKETS[ch]:
-                        self.error(f"قوس إغلاق '{ch}' غير متوافق مع قوس الفتح")
+                        if self.brackets:
+                            open_ch, open_line, open_col = self.brackets[-1]
+                            self.error(
+                                f"قوس إغلاق '{ch}' غير متوافق — القوس المفتوح "
+                                f"الأقرب هو '{open_ch}' من السطر {open_line}، "
+                                f'العمود {open_col}')
+                        self.error(
+                            f"قوس إغلاق '{ch}' بلا قوس فتح مطابق")
                     self.brackets.pop()
                 self.add(t, ch)
                 self.pos += 1
@@ -193,12 +251,14 @@ class Lexer:
                 self._read_word()
                 continue
 
-            self.error(f"رمز غير معروف: '{ch}'")
+            self.error(f'رمز غير معروف: {describe_char(ch)}')
 
         # نهاية الملف
         if self.brackets:
-            ch, ln = self.brackets[-1]
-            raise LexerError(f"قوس '{ch}' بقي مفتوحًا حتى نهاية الملف", ln)
+            ch, ln, col = self.brackets[-1]
+            raise LexerError(
+                f"قوس '{ch}' بقي مفتوحًا حتى نهاية الملف", ln, col)
+        self._tok_start = self.pos
         if self.tokens and self.tokens[-1].type not in (T.NEWLINE, T.INDENT, T.DEDENT):
             self._emit_newline()
         while len(self.indents) > 1:
@@ -299,11 +359,16 @@ class Lexer:
         """يعالج تسلسل الهروب بعد الرمز \\ ويسجل ناتجه في buf.
 
         يستدعى والـ self.pos يشير إلى رمز الهروب (بعد \\).
+        الهروب الذي يستهلك سطرًا جديدًا (\\ متبوعة بنهاية سطر داخل
+        سلسلة) يرفع عداد الأسطر — وإلا انحرفت أرقام كل الأسطر
+        التالية بواحد (إصلاح 1.23).
         """
         if self.pos >= len(self.src):
             self.error('نص غير مغلق')
         e = self.src[self.pos]
-        if e == 'u':
+        if e == '\n':
+            self.line += 1
+        elif e == 'u':
             hex_part = self.src[self.pos + 1:self.pos + 5]
             if len(hex_part) != 4:
                 self.error("رمز '\\u' يحتاج 4 أرقام سداسية عشرية")
@@ -348,8 +413,9 @@ class Lexer:
                     continue
                 buf.append(c)
                 self.pos += 1
-            # رمز النص الممتد يحمل سطر بدايته (أسلم لرسائل الأخطاء والتنسيق)
-            self.tokens.append(Token(T.STRING, ''.join(buf), start_line))
+            # رمز النص الممتد يحمل سطر وعمود بدايته (أسلم لرسائل الأخطاء)
+            self.tokens.append(Token(T.STRING, ''.join(buf), start_line,
+                                     self._col_at(self._tok_start)))
             return
 
         while True:
@@ -391,7 +457,8 @@ class Lexer:
             text = self.src[self.pos:end]
             self.line += text.count('\n')
             self.pos = end + 3
-            self.tokens.append(Token(T.STRING, text, start_line))
+            self.tokens.append(Token(T.STRING, text, start_line,
+                                     self._col_at(self._tok_start)))
             return
 
         # ---- سلسلة خام سطرية: خ"..." ----
@@ -446,7 +513,8 @@ class Lexer:
                     depth = max(0, depth - 1)
                 buf.append(c)
                 self.pos += 1
-            self.tokens.append(Token(T.FSTRING, ''.join(buf), start_line))
+            self.tokens.append(Token(T.FSTRING, ''.join(buf), start_line,
+                                     self._col_at(self._tok_start)))
             return
 
         # ---- نص منسق سطري: ق"..." ----
@@ -454,6 +522,7 @@ class Lexer:
         buf = []
         n = len(self.src)
         depth = 0
+        in_expr_str = None                # اقتباس سلسلة داخل التعبير (1.23)
         while True:
             if self.pos >= n:
                 self.error('نص منسق غير مغلق — أنسيت علامة الاقتباس')
@@ -471,13 +540,24 @@ class Lexer:
                     self.error('نص منسق غير مغلق')
                 self._read_escape(buf)
                 continue
-            if c in '([{':
+            if depth > 0:
+                # الاقتباسات داخل التعبير تُتتبَّع فلا تُحسب أقواس
+                # تظهر داخل نص داخلي خطأً (إصلاح 1.23)
+                if in_expr_str is not None:
+                    if c == in_expr_str:
+                        in_expr_str = None
+                elif c in '"\'':
+                    in_expr_str = c
+                elif c in '([{':
+                    depth += 1
+                elif c in ')]}':
+                    depth = max(0, depth - 1)
+            elif c in '([{':
                 depth += 1
-            elif c in ')]}':
-                depth = max(0, depth - 1)
             buf.append(c)
             self.pos += 1
-        self.tokens.append(Token(T.FSTRING, ''.join(buf), start_line))
+        self.tokens.append(Token(T.FSTRING, ''.join(buf), start_line,
+                                 self._col_at(self._tok_start)))
 
     # ---------- الكلمات والمعرفات ----------
 

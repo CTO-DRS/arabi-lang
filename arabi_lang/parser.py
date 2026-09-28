@@ -85,7 +85,7 @@ def _name_from_path(path, tok):
         base = base[:-len('.عربي')]
     if not base:
         raise ParseError(
-            f"لا يمكن استنتاج اسم الوحدة من المسار '{path}'", tok.line)
+            f"لا يمكن استنتاج اسم الوحدة من المسار '{path}'", tok.line, tok.col)
     return base
 
 
@@ -125,7 +125,9 @@ class Parser:
         self.error(message)
 
     def error(self, message):
-        raise ParseError(f'{message} — لكن وجدت {tok_desc(self.cur())}', self.cur().line)
+        tok = self.cur()
+        raise ParseError(f'{message} — لكن وجدت {tok_desc(tok)}',
+                         tok.line, tok.col)
 
     def skip_newlines(self):
         while self.check(T.NEWLINE):
@@ -134,12 +136,24 @@ class Parser:
     # ---------- نقطة الدخول ----------
 
     def parse(self):
+        # حارس التعاود (1.23): التعشيش العميق جدًا (~ألفا قوس متداخل)
+        # كان يفجّر RecursionError بايثونية خامًا تصل الطرفية إنجليزية
+        # — الآن تُحوّل لخطأ نحوي عربي واضح في موضعها
+        try:
+            return self._parse()
+        except RecursionError:
+            tok = self.cur()
+            raise ParseError(
+                'التعشيش عميق جدًا — بسّط التعبير أو قسّمه على أسطر '
+                'ومتغيرات أصغر', tok.line, tok.col)
+
+    def _parse(self):
         statements = []
         self.skip_newlines()
         while not self.check(T.EOF):
             statements.append(self.statement())
             self.skip_newlines()
-        return Program(statements)
+        return Program(statements, 1)   # كل العقد تحمل سطرها — وحتى الجذر
 
     # ---------- الجمل ----------
 
@@ -265,7 +279,7 @@ class Parser:
         if is_async and is_generator:
             raise ParseError(
                 f"الدالة '{name}' لا يمكن أن تكون غير متزامنة ومولدة معًا "
-                "— لا تدمج 'أنتج' مع 'غير متزامنة'", tok.line)
+                "— لا تدمج 'أنتج' مع 'غير متزامنة'", tok.line, tok.col)
         return FuncDef(name, params, body, tok.line,
                        is_generator=is_generator, rest=rest,
                        is_async=is_async)
@@ -1135,11 +1149,11 @@ class Parser:
                     j += 1
                 if depth != 0:
                     raise ParseError(
-                        "قوس '}' غير مغلق داخل النص المنسق", tok.line)
+                        "قوس '}' غير مغلق داخل النص المنسق", tok.line, tok.col)
                 expr_src = text[i + 1:j - 1].strip()
                 if not expr_src:
                     raise ParseError(
-                        'تعبير فارغ داخل {} في النص المنسق', tok.line)
+                        'تعبير فارغ داخل {} في النص المنسق', tok.line, tok.col)
                 parts.append(('expr', self._sub_expression(expr_src, tok.line)))
                 i = j
             elif c == '}':
@@ -1148,7 +1162,8 @@ class Parser:
                     i += 2
                     continue
                 raise ParseError(
-                    "قوس '}' بدون '{' مقابلة في النص المنسق — استخدم }} لطباعة قوس", tok.line)
+                    "قوس '}' بدون '{' مقابلة في النص المنسق — استخدم }} لطباعة قوس",
+                    tok.line, tok.col)
             else:
                 buf.append(c)
                 i += 1

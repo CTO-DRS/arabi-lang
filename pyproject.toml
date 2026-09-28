@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arabi-lang"
-version = "1.22.0"
-description = "لغة برمجة عربية بالكامل — مفسّر، ١٧ وحدة قياسية، مدير حزم، دولاب افتراضي، غير متزامن، خادم لغة، وتنفيذي مستقل"
+version = "1.23.0"
+description = "لغة برمجة عربية بالكامل — مفسّر، ٢٠ وحدة قياسية، مدير حزم، دولاب افتراضي، غير متزامن، خادم لغة، وتنفيذي مستقل"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}

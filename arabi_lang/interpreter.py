@@ -38,14 +38,38 @@ from .distributed import _dist_submit
 from .runtime import (ProcessValue, ProcessTaskValue, ProcessPoolValue,
                       DispatcherValue, DistributedTaskValue)
 
-# للسماح بالتعاود العميق (مثل مضروب أعداد كبيرة)
-sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
+# حد التعاود (إصلاح 1.23):
+# - بايثون 3.12+ يحمي نفسه بمقياس مكدس C الفعلي فالحد 20000 آمن —
+#   يرفع RecursionError قبل نفاد المكدس.
+# - بايثون ≤3.11 يستهلك كل إطار بايثوني من مكدس C الحقيقي، فالحد
+#   20000 كان قنبلة: العملية تنهار انهيارًا قطعيًا (segfault غير
+#   قابل للالتقاط) قبل رفع RecursionError — قياس فعلي على 3.10
+#   بمكدس 8MB: الحدود بين 6000 و8000. الحد الجديد يُحسب من حجم
+#   المكدس الفعلي بهامش مضاعف، فيصل المستخدم رسالة عربية دائمًا
+#   بدل انهيار صامت. (المهمات تعمل في خيوط 8MB فالحساب نفسه يحميها.)
+if sys.version_info >= (3, 12):
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
+else:
+    try:
+        import resource as _resource
+        _soft = _resource.getrlimit(_resource.RLIMIT_STACK)[0]
+    except Exception:
+        _soft = 0
+    if _soft <= 0:
+        _soft = 8 * 1024 * 1024 if sys.platform != 'win32' \
+            else 2 * 1024 * 1024
+    _safe = max(1000, min(6000, _soft // 2048))
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), _safe))
 
-# الأخطاء التي تمسكها كتلة "جرب"
+# الأخطاء التي تمسكها كتلة "جرب" — RecursionError انضمت (1.23): كان
+# يتسرب عبر جرب كأثر بايثوني خام ورسالة إنجليزية، والمعالج العربي
+# المكتوب له في _native_error كان رمزًا ميتًا — فأصبح يُمسك ويترجم
+# عربيًا ويُمرر لباستثناء كأي خطأ. أما MemoryError فقرار موثق: لا
+# تُمسك (فادحة وندرة، والإمساك بها وقت النفاد يزيد عدم الاستقرار).
 CATCHABLE = (
     ArabiRuntimeError,
     ZeroDivisionError, ValueError, TypeError, IndexError,
-    KeyError, AttributeError, OverflowError,
+    KeyError, AttributeError, OverflowError, RecursionError,
 )
 
 # الوحدات الجاهزة المدمجة في اللغة
@@ -786,7 +810,7 @@ class Interpreter:
                 f'استيراد دائري: {chain} — الوحدة لا تستطيع استيراد نفسها '
                 'بشكل مباشر أو غير مباشر', line)
         try:
-            with open(path, encoding='utf-8') as f:
+            with open(path, encoding='utf-8-sig') as f:
                 source = f.read()
         except UnicodeDecodeError:
             raise ArabiRuntimeError(

@@ -88,19 +88,21 @@ def run_code(source, script_dir=None):
 
 
 def print_error(error, lines=None):
-    """يطبع الخطأ بشكل واضح مع سطر الكود المعني."""
+    """يطبع الخطأ بشكل واضح مع سطر الكود المعني وعلامة تشير تحت
+    العمود المذنب إن توفر (1.23)."""
     print(str(error), file=sys.stderr)
     if lines and error.line and 1 <= error.line <= len(lines):
         source_line = lines[error.line - 1].rstrip()
         width = len(str(error.line))
+        pad = ' ' * (error.col - 1) if error.col else ''
         print(f'  {error.line} | {source_line}', file=sys.stderr)
-        print('  ' + ' ' * width + ' | ^', file=sys.stderr)
+        print('  ' + ' ' * width + f' | {pad}^', file=sys.stderr)
 
 
 def check_file(path):
     """يفحص صياغة الملف دون تنفيذه — يفيد في الأدوات والتحرير الآلي."""
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:
             source = f.read()
     except FileNotFoundError:
         print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
@@ -118,9 +120,10 @@ def check_file(path):
 
 
 def _read_source(path):
-    """يقرأ مصدر ملف مع رسائل خطأ عربية موحدة."""
+    """يقرأ مصدر ملف مع رسائل خطأ عربية موحدة — بترميز utf-8-sig
+    فيزول علامة ترتيب البايتات (BOM) من محررات ويندوز (1.23)."""
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:
             return f.read()
     except FileNotFoundError:
         print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
@@ -415,7 +418,7 @@ def _package_update(packages, target, index_source):
 
 def run_file(path, use_bytecode=True, use_vm=True):
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:
             source = f.read()
     except FileNotFoundError:
         print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
@@ -442,6 +445,12 @@ def run_file(path, use_bytecode=True, use_vm=True):
                     use_bytecode=use_bytecode, use_vm=use_vm).run(tree)
     except ArabiError as error:
         print_error(error, lines)
+        sys.exit(1)
+    except RecursionError:
+        # التعاود العميق وقت التشغيل خارج جرب — رسالة عربية وخروج
+        # منظم بدل أثر بايثون خام (1.23)
+        print('خطأ تشغيلي: تعاود عميق جدًا — تحقق من شرط التوقف في '
+              'دالتك أو زد الحد بثبات', file=sys.stderr)
         sys.exit(1)
 
 
@@ -546,6 +555,10 @@ def repl():
                     print(display(result))
             except ArabiError as error:
                 print(str(error))
+            except RecursionError:
+                # التعاود العميق لا يقتل الجلسة — رسالة ثم استمرار (1.23)
+                print('خطأ تشغيلي: تعاود عميق جدًا — تحقق من شرط التوقف '
+                      'في دالتك')
     finally:
         if history_file:
             try:
@@ -727,6 +740,10 @@ def main():
             Interpreter().run(tree)
         except ArabiError as error:
             print(str(error), file=sys.stderr)
+            sys.exit(1)
+        except RecursionError:
+            print('خطأ تشغيلي: تعاود عميق جدًا — تحقق من شرط التوقف في '
+                  'دالتك', file=sys.stderr)
             sys.exit(1)
     else:
         run_file(first)

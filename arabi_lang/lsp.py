@@ -195,6 +195,11 @@ class ArabiLanguageServer:
                     try:
                         result = handler(message.get('params') or {})
                         self._reply(message['id'], result)
+                    except RecursionError:
+                        # التعاود العميق: رسالة عربية واضحة لا أثر خام (1.23)
+                        self._error(message['id'], -32603,
+                                    'تعاود عميق جدًا في الطلب — بسّط '
+                                    'التعبير أو قسّمه')
                     except Exception as exc:            # حماية الخادم
                         self._error(message['id'], -32603, str(exc))
                 else:

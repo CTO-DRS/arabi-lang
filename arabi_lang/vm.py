@@ -61,10 +61,11 @@ _FAST_BINOPS = {
  OP_ASSIGN_TO, OP_RETURN,
  OP_LOOP_PUSH, OP_LOOP_POP,
  OP_FOR_SETUP, OP_FOR_NEXT, OP_FOR_POP_STATE,
- OP_EVAL_EXPR, OP_EXEC_STMT) = range(28)
+ OP_EVAL_EXPR, OP_EXEC_STMT,
+ OP_DICT_CHECK_KEY) = range(29)
 
 # عدد التعليمات (للاختبارات والتوثيق)
-OPCODE_COUNT = 28
+OPCODE_COUNT = 29
 
 
 class _Lbl:
@@ -285,13 +286,14 @@ class Compiler:
             else:
                 self.emit(OP_EVAL_EXPR, node, node.line)
         elif isinstance(node, N.DictLit):
-            # تناوب مفتاح/قيمة — بنفس ترتيب كشف OP_DICT
+            # تناوب مفتاح/قيمة مع فحص المفتاح فور حسابه وقبل قيمته
+            # (1.23) — نفس ترتيب الأثر الجانبي في الممسح الشجري
+            # زوجًا زوجًا: مفتاح₁ ← فحص₁ ← قيمة₁ ← مفتاح₂ ...
             for key, value in zip(node.keys, node.values):
                 self.expr(key)
+                self.emit(OP_DICT_CHECK_KEY, key.line, key.line)
                 self.expr(value)
-            self.emit(OP_DICT, (len(node.keys),
-                                tuple(k.line for k in node.keys)),
-                      node.line)
+            self.emit(OP_DICT, len(node.keys), node.line)
         elif isinstance(node, N.BinOp):
             if node.op == 'و' or node.op == 'أو':
                 self._logical(node)
@@ -520,19 +522,22 @@ def vm_exec(interp, code, env):
                     raise ArabiRuntimeError(
                         "لا يمكن استخدام 'هذا' إلا داخل طرق صنف", line)
                 push(this_val)
+            elif op == OP_DICT_CHECK_KEY:
+                # فحص مفتاح القاموس لحظة حسابه وقبل تقييم قيمته —
+                # يطابق ترتيب الممسح الشجري في الأثر الجانبي (1.23)
+                key = pop()
+                if isinstance(key, (list, dict)):
+                    raise ArabiRuntimeError(
+                        'مفتاح القاموس يجب أن يكون نصًا أو عددًا', arg)
+                push(key)
             elif op == OP_DICT:
-                npairs, key_lines = arg
+                npairs = arg
                 if npairs:
                     flat = stack[-2 * npairs:]
                     del stack[-2 * npairs:]
                     result = {}
                     for j in range(npairs):
-                        key = flat[2 * j]
-                        if isinstance(key, (list, dict)):
-                            raise ArabiRuntimeError(
-                                'مفتاح القاموس يجب أن يكون نصًا أو عددًا',
-                                key_lines[j])
-                        result[key] = flat[2 * j + 1]
+                        result[flat[2 * j]] = flat[2 * j + 1]
                     push(result)
                 else:
                     push({})

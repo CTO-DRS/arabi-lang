@@ -30,23 +30,33 @@
   ويتحقق المستقبل من البصمة بمقارنة زمن ثابت قبل فك أي بايت — فلا
   يقرأ تنصّت على السلك كود مهامك ولا نتائجها. الإطارات المشفرة تبدأ
   بترويسة سحرية تميزها فميّز العامل رفض المصافحة (نص صريح) من
-  قناة مفعلة، والمسار الحر يبقى pickle خامًا كما في 1.18 تمامًا.
-  الوضع المفتاحي يتطلب الموزع والعامل كليهما نسخة 1.21 على الأقل —
-  عامل قديم عند موزع 1.21 مفتاحي يُسقط اتصاله فورًا (فشل مغلق لا
-  صمت أمني)، والمسار الحر متوافق بالاتجاهين كما كان.
+  قناة مفعلة، والمسار الحر يبقى نصيًا كما في 1.18 تمامًا.
+  الوضع المفتاحي يتطلب الموزع والعامل كليهما نسخة متقابلة متطابقة —
+  عامل قديم عند موزع أحدث يُسقط اتصاله فورًا (فشل مغلق لا صمت أمني).
+
+البروتوكول بلا pickle (1.23): كل رسائل المصافحة والتحكم وحمولات
+الأعمال والنتائج تسير JSON منمطًا لا ينفذ شيئًا لحظة الفك — كانت
+رسائل المصافحة تفكّ قبل التحقق من التوقيع فكان أي طرف يصل للمنفذ
+ينفذ كودًا بايثونيًا على المضيف (RCE)، والحمولات كانت تنقل تنفيذ
+الكود عبر كل حدود الثقة. الآن: الفك بناء بيانات من قائمة بيضاء
+صرفة (عقد شجرة اللغة وقواميس وأزواج) — ولا مسار تنفيذ واحد.
 
 هذا الملف يحمّل أسماء القيم من runtime فقط — وruntime لا يستورد
 هذا الملف إلا داخل دالة التثبيت (بعد اكتمال تعريفه) تفاديًا للدورانية.
 """
 
+import base64
+import json
 import os
-import pickle
 import secrets as _secrets
 import socket
 import struct
 import threading
 import time
 from collections import deque
+
+from . import nodes as _nodes
+from .nodes import Node as _Node
 
 from .crypto import (sign_challenge, verify_challenge, _channel_keys,
                      encrypt_payload, decrypt_payload, _CIPHER_MAGIC,
@@ -87,9 +97,114 @@ def send_raw_frame(sock, blob):
     sock.sendall(_HEAD.pack(len(blob)) + blob)
 
 
+# ================== الترميز الشبكي الآمن (1.23) ==================
+#
+# كل ما يعبر الشبكة هنا يمر بترميز JSON منمط: الفك بناء بيانات من
+# قائمة بيضاء صرفة فلا تنفيذ كود عند فك أي إطار — كانت المصافحة تفك
+# pickle قبل التحقق من التوقيع وكانت الحمولات تنقل التنفيذ عبر كل
+# حدود الثقة. علامات الترميز: زوج لأزواج بايثون، عقدة لعقد شجرة
+# اللغة (بقائمة بيضاء من صنفها)، ذاتي لعلامة الإغلاق الذاتي، أزواج
+# لقواميس بمفاتيح غير نصية، وب64 للبايتات.
+
+_SELF_SENTINEL = ('__ذاتي__ عربي',)      # يقابل _SELF_MARKER في السجلات
+
+
+def _record_to_wire(rec, _depth=0):
+    """يحول سجل قيم عربي (نتاج encode_value) إلى بنية JSON-آمنة."""
+    if _depth > 400:
+        raise ArabiRuntimeError('عمق الحزمة الموزعة يتجاوز الحد المسموح')
+    if rec is None or isinstance(rec, (bool, int, float, str)):
+        return rec
+    if isinstance(rec, (list, tuple)):
+        kind = '__زوج__' if isinstance(rec, tuple) else None
+        items = [_record_to_wire(x, _depth + 1) for x in rec]
+        return {kind: items} if kind else items
+    if isinstance(rec, dict):
+        if all(isinstance(k, str) for k in rec):
+            return {k: _record_to_wire(v, _depth + 1)
+                    for k, v in rec.items()}
+        return {'__أزواج__': [[_record_to_wire(k, _depth + 1),
+                               _record_to_wire(v, _depth + 1)]
+                              for k, v in rec.items()]}
+    if isinstance(rec, _Node):
+        fields = {k: _record_to_wire(v, _depth + 1)
+                  for k, v in vars(rec).items()}
+        return {'__عقدة__': type(rec).__name__, 'ف': fields}
+    if type(rec).__name__ == '_SelfMarker' and type(rec).__module__ == \
+            'arabi_lang.processes':
+        return {'__ذاتي__': 1}
+    if isinstance(rec, (bytes, bytearray)):
+        return {'__ب64__': base64.b64encode(bytes(rec)).decode('ascii')}
+    raise ArabiRuntimeError(
+        f'قيمة لا تعبر الشبكة الآمنة: {type(rec).__name__}')
+
+
+_NODE_CLASSES = {c.__name__: c for c in vars(_nodes).values()
+                 if isinstance(c, type) and issubclass(c, _Node)}
+
+
+def _record_from_wire(doc, _depth=0):
+    """يعيد بناء السجل من ترميزه الآمن — بناء بيانات فقط لا تنفيذ."""
+    if _depth > 400:
+        raise ArabiRuntimeError('عمق الحزمة الموزعة يتجاوز الحد المسموح')
+    if doc is None or isinstance(doc, (bool, int, float, str)):
+        return doc
+    if isinstance(doc, list):
+        return [_record_from_wire(x, _depth + 1) for x in doc]
+    if isinstance(doc, dict):
+        if len(doc) == 1 and '__زوج__' in doc:
+            return tuple(_record_from_wire(x, _depth + 1)
+                         for x in doc['__زوج__'])
+        if len(doc) == 1 and '__أزواج__' in doc:
+            return {_record_from_wire(k, _depth + 1):
+                    _record_from_wire(v, _depth + 1)
+                    for k, v in doc['__أزواج__']}
+        if len(doc) == 2 and '__عقدة__' in doc and 'ف' in doc:
+            name = doc['__عقدة__']
+            cls = _NODE_CLASSES.get(name)
+            if cls is None:
+                raise ArabiRuntimeError(
+                    f'عقدة غير معروفة في الحزمة الموزعة: {name!r}')
+            node = cls.__new__(cls)
+            fields = doc['ف']
+            if not isinstance(fields, dict):
+                raise ArabiRuntimeError(
+                    'حقول عقدة تالفة في الحزمة الموزعة')
+            for k, v in fields.items():
+                vars(node)[k] = _record_from_wire(v, _depth + 1)
+            return node
+        if len(doc) == 1 and '__ذاتي__' in doc:
+            from .processes import _SELF_MARKER
+            return _SELF_MARKER
+        if len(doc) == 1 and '__ب64__' in doc:
+            try:
+                return base64.b64decode(doc['__ب64__'], validate=True)
+            except Exception:
+                raise ArabiRuntimeError('بايتات تالفة في الحزمة الموزعة')
+        return {k: _record_from_wire(v, _depth + 1)
+                for k, v in doc.items()}
+    raise ArabiRuntimeError(
+        f'نوع غير مسموح في الحزمة الموزعة: {type(doc).__name__}')
+
+
+def _wire_dumps(obj):
+    """يسلسل رسالة أو سجلًا إلى بايتات JSON — الفك لاحقًا لا ينفذ شيئًا."""
+    return json.dumps(_record_to_wire(obj), ensure_ascii=False,
+                      separators=(',', ':')).encode('utf-8')
+
+
+def _wire_loads(blob):
+    """يفك بايتات JSON إلى رسالة أو سجل — بناء بيانات لا تنفيذ كود."""
+    try:
+        doc = json.loads(blob.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ArabiRuntimeError(f'إطار موزع تالف (ليس JSON سليمًا): {exc}')
+    return _record_from_wire(doc)
+
+
 def send_frame(sock, obj):
-    """يرسل رسالة منقطّة في إطار موسوم بالطول — مسار حر (بلا تشفير)."""
-    send_raw_frame(sock, pickle.dumps(obj))
+    """يرسل رسالة في إطار موسوم بالطول — مسار حر (بلا تشفير)."""
+    send_raw_frame(sock, _wire_dumps(obj))
 
 
 def _recv_exact(sock, count):
@@ -120,8 +235,8 @@ def recv_raw_frame(sock, extra=0):
 
 
 def recv_frame(sock):
-    """يقرأ إطارًا كاملًا ويعيد رسالته المنقطّة — مسار حر (بلا تشفير)."""
-    return pickle.loads(recv_raw_frame(sock))
+    """يقرأ إطارًا كاملًا ويعيد رسالته — مسار حر (بلا تشفير)."""
+    return _wire_loads(recv_raw_frame(sock))
 
 
 # ================== القناة المشفرة (1.21) ==================
@@ -129,7 +244,7 @@ def recv_frame(sock):
 class SecureChannel:
     """مقبس مغلَّف بقناة مشفرة موثقة — يظهر للطرفين إرسالًا واستقبالًا.
 
-    كل رسالة: pickle ثم تشفير بتيار HMAC-SHA256 العدّادي (راوند عشوائي
+    كل رسالة: JSON آمن ثم تشفير بتيار HMAC-SHA256 العدّادي (راوند عشوائي
     لكل رسالة) ثم توقيع Encrypt-then-MAC — والمستقبل يتحقق من البصمة
     بمقارنة زمن ثابت قبل فك أي بايت فلا تعديل أو مفتاح خاطئ يمر صامتًا.
     مفاتيح الجلسة مشتقة من المفتاح المشترك وتحدي المصافحة فكل اتصال
@@ -152,13 +267,14 @@ class SecureChannel:
     def send(self, obj):
         """يشفر الرسالة ويوثقها ثم يرسلها في إطار موسوم بالطول."""
         send_raw_frame(self.sock,
-                       encrypt_payload(pickle.dumps(obj),
+                       encrypt_payload(_wire_dumps(obj),
                                        self._enc, self._mac))
 
     def recv(self):
-        """يقرأ إطارًا ويتحقق من بصمته ثم يفكه ويعيد رسالته."""
+        """يقرأ إطارًا ويتحقق من بصمته ثم يفكه ويعيد رسالته — الفك
+        بناء JSON لا ينفذ شيئًا (البصمة قبل أي فك كما كان)."""
         blob = recv_raw_frame(self.sock, extra=_CHANNEL_OVERHEAD)
-        return pickle.loads(decrypt_payload(blob, self._enc, self._mac))
+        return _wire_loads(decrypt_payload(blob, self._enc, self._mac))
 
 
 # ================== العامل ==================
@@ -242,12 +358,12 @@ def run_worker(host, port, stop_event=None, key=None):
                             'غير متوافق')
                     chan = SecureChannel.from_master(
                         sock, key, challenge)
-                    msg = pickle.loads(
+                    msg = _wire_loads(
                         decrypt_payload(blob, chan._enc, chan._mac))
                 else:
-                    msg = pickle.loads(blob)   # رفض مصافحة نصي كما كان
+                    msg = _wire_loads(blob)    # رفض مصافحة نصي كما كان
             else:
-                msg = pickle.loads(
+                msg = _wire_loads(
                     decrypt_payload(blob, chan._enc, chan._mac))
             if not (isinstance(msg, tuple) and msg):
                 continue          # رسالة شاذة — تجاهل صامت (توافق مستقبلي)
@@ -262,17 +378,15 @@ def run_worker(host, port, stop_event=None, key=None):
                     'الموزع يتطلب مفتاحًا — مرر المفتاح نفسه معاملًا '
                     'ثالثًا لعامل()')
             if kind == 'عمل':
-                job_id, blob = msg[1], msg[2]
+                job_id, data = msg[1], msg[2]
                 try:
-                    data = pickle.loads(blob)
-                    rkind, rblob = _run_job(data)
+                    rkind, rrec = _run_job(data)
                 except ArabiError as exc:
-                    rkind, rblob = 'خطأ', pickle.dumps(_encode_error(exc))
+                    rkind, rrec = 'خطأ', _encode_error(exc)
                 except Exception as exc:      # شبكة أمان — لا صمت أبدًا
-                    rkind, rblob = 'عطل', pickle.dumps(
-                        f'عطل داخل العامل: {exc}')
+                    rkind, rrec = 'عطل', f'عطل داخل العامل: {exc}'
                 try:
-                    result = ('نتيجة', job_id, rkind, rblob)
+                    result = ('نتيجة', job_id, rkind, rrec)
                     if chan is not None:
                         chan.send(result)
                     else:
@@ -596,15 +710,14 @@ class _Server:
         try:
             if rkind == 'نهاية':
                 value = decode_value(
-                    pickle.loads(rblob),
+                    rblob,
                     {'root': self._root, 'raw': None, 'memo': {}})
                 task._finish(value, None)
             elif rkind == 'خطأ':
                 from .processes import _error_from_record
-                task._finish(None, _error_from_record(
-                    pickle.loads(rblob), self._root))
+                task._finish(None, _error_from_record(rblob, self._root))
             else:
-                task._finish(None, ArabiRuntimeError(pickle.loads(rblob)))
+                task._finish(None, ArabiRuntimeError(rblob))
         except Exception as exc:               # فشل الفك نفسه — لا صمت
             task._finish(None, ArabiRuntimeError(
                 f'تعذر فك نتيجة المهمة الموزعة: {exc}'))
@@ -635,7 +748,7 @@ class _Server:
             self._total += 1
             task = DistributedTaskValue(job_id)
             self._tasks[job_id] = task
-            self._queue.append((job_id, pickle.dumps(payload)))
+            self._queue.append((job_id, payload))
         self._pump()
         return task
 

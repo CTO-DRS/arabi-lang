@@ -5393,7 +5393,7 @@ class TestVmInternals(unittest.TestCase):
 
     def test_opcode_count(self):
         from arabi_lang.vm import OPCODE_COUNT
-        self.assertEqual(OPCODE_COUNT, 28)
+        self.assertEqual(OPCODE_COUNT, 29)   # 1.23: OP_DICT_CHECK_KEY
 
     def test_compile_simple_function(self):
         from arabi_lang.vm import compile_function, VmCode, OP_LOAD_NAME
@@ -9168,7 +9168,7 @@ class TestRegistryWeb(unittest.TestCase):
         self.assertIn('<form class="search" action="/" method="get">',
                       page)
         # التذييل بروابطه الثلاثة
-        self.assertIn('مدعوم بلغة عربي 1.22.0', page)
+        self.assertIn('مدعوم بلغة عربي 1.23.0', page)
         self.assertIn('href="/%D8%A7%D9%84%D9%81%D9%87%D8%B1%D8%B3.json"',
                       page)                       # /الفهرس.json مرمّزًا
         self.assertIn('الترحيب النصي', page)
@@ -9877,19 +9877,19 @@ class TestDistributedEncryption(unittest.TestCase):
 
     def _handshake(self, disp, key, host='127.0.0.1'):
         """مصافحة عميل بالبايتات الخام — يعيد (المقبس، التحدي)."""
-        import pickle as _pickle
         import socket as _socket
         from arabi_lang.crypto import sign_challenge
-        from arabi_lang.distributed import recv_raw_frame, send_frame
+        from arabi_lang.distributed import (recv_raw_frame, send_frame,
+                                            _wire_loads)
         sock = _socket.create_connection((host, disp.port()), timeout=30)
         if key is None:
             send_frame(sock, ('مرحبا', 1, 'وهمي'))
             challenge = None
             # الموزع الحر يرسل إعلانه أولًا — العامل الحقيقي لا يقرأه،
             # والوهمي يستوعبه من المخزن كي لا يخالف ترتيب الإطارات
-            _pickle.loads(recv_raw_frame(sock))
+            _wire_loads(recv_raw_frame(sock))
         else:
-            challenge = _pickle.loads(recv_raw_frame(sock))[1]
+            challenge = _wire_loads(recv_raw_frame(sock))[1]
             send_frame(sock, ('مرحبا', 1, 'وهمي',
                               sign_challenge(key, challenge)))
         return sock, challenge
@@ -9925,10 +9925,10 @@ class TestDistributedEncryption(unittest.TestCase):
 
     def test_wire_is_encrypted(self):
         """الاختبار الحاسم: لا أثر للوسيط في السلك، والمحتوى يُفك بالمفتاح."""
-        import pickle as _pickle
         from arabi_lang.crypto import (_CIPHER_MAGIC, _channel_keys,
                                        decrypt_payload)
-        from arabi_lang.distributed import recv_raw_frame
+        from arabi_lang.distributed import (recv_raw_frame, _wire_dumps,
+                                            _wire_loads)
         from arabi_lang.processes import (_encode_root, _make_enc_ctx,
                                           encode_value)
         disp = self._make([0, '127.0.0.1', 'سر_التنصت'])
@@ -9938,35 +9938,36 @@ class TestDistributedEncryption(unittest.TestCase):
             task = disp._server.submit(
                 self.func, [self.func, 20, self.MARKER], {}, None)
             wire = recv_raw_frame(sock, extra=46)
-            # (١) الإطار مشفر موثق — لا pickle خام على السلك المفتاحي
+            # (١) الإطار مشفر موثق — لا بروتوكول خام على السلك المفتاحي
             self.assertTrue(wire.startswith(_CIPHER_MAGIC))
             # (٢) التنصت لا يقرأ شيئًا — الوسيط السري غائب عن السلك
             self.assertNotIn(self.MARKER.encode('utf-8'), wire)
             # والوسيط فعلًا داخل الحزمة النظرية (شاهد على فاعلية التشفير)
             ctx = _make_enc_ctx(disp._server._root)
-            plain = _pickle.dumps({
+            plain = _wire_dumps({
                 'وسائط': [encode_value(self.MARKER, ctx, None)]})
             self.assertIn(self.MARKER.encode('utf-8'), plain)
             # (٣) صاحب المفتاح يفك ويجد رسالة العمل بمعرفها
             enc, mac = _channel_keys('سر_التنصت', challenge)
-            msg = _pickle.loads(decrypt_payload(wire, enc, mac))
+            msg = _wire_loads(decrypt_payload(wire, enc, mac))
             self.assertEqual(msg[0], 'عمل')
             self.assertEqual(msg[1], task.id)
-            self.assertIn(self.MARKER.encode('utf-8'), msg[2])
+            self.assertIn(self.MARKER.encode('utf-8'), _wire_dumps(msg[2]))
             # (٤) رد مشفر صحيح يُكمل المهمة بنتيجتها
             from arabi_lang.distributed import SecureChannel
             chan = SecureChannel.from_master(sock, 'سر_التنصت', challenge)
             record = encode_value(42, ctx, None)
-            chan.send(('نتيجة', task.id, 'نهاية', _pickle.dumps(record)))
+            chan.send(('نتيجة', task.id, 'نهاية', record))
             self.assertEqual(task.result(), 42)
         finally:
             sock.close()
 
     def test_free_mode_wire_unchanged(self):
-        """المسار الحر كما في 1.18 تمامًا — pickle خام بالاتجاهين."""
-        import pickle as _pickle
+        """المسار الحر بلا تشفير كما في 1.18 — وبروتوكول JSON الآمن
+        منذ 1.23: نص منمط قابل للفك ببناء بيانات لا بتنفيذ كود."""
         from arabi_lang.crypto import _CIPHER_MAGIC
-        from arabi_lang.distributed import recv_raw_frame, send_frame
+        from arabi_lang.distributed import (recv_raw_frame, send_frame,
+                                            _wire_loads)
         from arabi_lang.processes import (_make_enc_ctx, encode_value)
         disp = self._make([0])
         sock, _ = self._handshake(disp, None)
@@ -9977,13 +9978,12 @@ class TestDistributedEncryption(unittest.TestCase):
             wire = recv_raw_frame(sock)
             self.assertFalse(wire.startswith(_CIPHER_MAGIC))
             self.assertIn(self.MARKER.encode('utf-8'), wire)
-            msg = _pickle.loads(wire)
+            msg = _wire_loads(wire)
             self.assertEqual(msg[0], 'عمل')
             self.assertEqual(msg[1], task.id)
             record = encode_value(42,
                                   _make_enc_ctx(disp._server._root), None)
-            send_frame(sock, ('نتيجة', task.id, 'نهاية',
-                              _pickle.dumps(record)))
+            send_frame(sock, ('نتيجة', task.id, 'نهاية', record))
             self.assertEqual(task.result(), 42)
         finally:
             sock.close()
@@ -10010,10 +10010,10 @@ class TestDistributedEncryption(unittest.TestCase):
 
     def test_tampered_frame_drops_worker(self):
         """إطار معدَّل بصمةً يُسقط اتصال العامل فورًا — لا تعديل يمر."""
-        import pickle as _pickle
         from arabi_lang.crypto import (_channel_keys, decrypt_payload,
                                        encrypt_payload)
-        from arabi_lang.distributed import recv_raw_frame, send_raw_frame
+        from arabi_lang.distributed import (recv_raw_frame, send_raw_frame,
+                                            _wire_dumps, _wire_loads)
         disp = self._make([0, '127.0.0.1', 'سر'])
         sock, challenge = self._handshake(disp, 'سر')
         try:
@@ -10021,11 +10021,11 @@ class TestDistributedEncryption(unittest.TestCase):
             task = self._submit(1, 2)
             wire = recv_raw_frame(sock, extra=46)
             enc, mac = _channel_keys('سر', challenge)
-            msg = _pickle.loads(decrypt_payload(wire, enc, mac))
+            msg = _wire_loads(decrypt_payload(wire, enc, mac))
             self.assertEqual(msg[0], 'عمل')          # القناة تعمل سليمًا
-            record = _pickle.dumps({'م': 1})          # أي نتيجة — مفسودة
+            record = {'م': 1}                         # أي نتيجة — مفسودة
             bad = bytearray(encrypt_payload(
-                _pickle.dumps(('نتيجة', task.id, 'عطل', record)),
+                _wire_dumps(('نتيجة', task.id, 'عطل', record)),
                 enc, mac))
             bad[-1] ^= 0x01                           # بت واحد في البصمة
             send_raw_frame(sock, bytes(bad))
@@ -10117,6 +10117,530 @@ class TestDistributedCliWorker(unittest.TestCase):
                     proc.kill()
                     proc.wait()
         self.assertEqual(proc.returncode, 0)
+
+
+# ================== PHASE 1: الصحة والاستقرار (الإصدار 1.23) ==================
+#
+# اختبارات الانحدار المنعكسة للإصلاحات الحرجة الستة وما اندرج معها من
+# تقرير التدقيق العميق: NFC والأعمدة والتهريب وانزياح الأسطر وBOM
+# وعداد f-string وحارس تعاود المحلل وRecursionError في جرب والمسارات
+# وتكافؤ توقيت القاموس الدولابي وأمان بروتوكول الموزعة ودلالات التزامن.
+
+class TestUnicodeNormalization(unittest.TestCase):
+    """C5: تطبيع NFC مرة واحدة عند الدخول — لا تعدد صامت للأسماء."""
+
+    def _run(self, src):
+        from arabi import run_code
+        return run_code(src)
+
+    def test_composed_and_decomposed_identifiers_are_one(self):
+        """معرف بصيغته المركبة والمفككة متغير واحد لا اثنان بصمت."""
+        import unicodedata as _ud
+        name_d = _ud.normalize('NFD', 'قيمة')
+        out = self._run(
+            f'{name_d} = ٥\nاطبع(قيمة)\n')
+        self.assertEqual(out.strip(), '5')
+
+    def test_decomposed_keyword_still_keyword(self):
+        """كلمة مفتاحية مفككة (أعد NFD) تعود كلمة مفتاحية لا معرفًا."""
+        import unicodedata as _ud
+        import io as _io
+        import contextlib as _cl
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        word = _ud.normalize('NFD', 'أعد')
+        toks = Lexer(f'دالة ت():\n    {word} ١\n').tokenize()
+        self.assertIn(T.RETURN, [t.type for t in toks])
+
+    def test_nfc_applies_to_string_literals(self):
+        """السلاسل تُطبع NFC أيضًا — سلوك موثق في README (1.23)."""
+        import unicodedata as _ud
+        word = _ud.normalize('NFD', 'أحمد')
+        out = self._run(f'اطبع("{word}")\n')
+        self.assertEqual(out.strip(), _ud.normalize('NFC', 'أحمد'))
+
+    def test_nfc_equivalent_files_same_behavior(self):
+        """برنامج بصيغته المركبة والمفككة يعطي المخرجات نفسها."""
+        import unicodedata as _ud
+        src = 'دالة جمع(أ، ب):\n    أعد أ + ب\nاطبع(جمع(٢، ٣))\n'
+        self.assertEqual(self._run(src),
+                         self._run(_ud.normalize('NFD', src)))
+
+
+class TestErrorColumns(unittest.TestCase):
+    """C6: عمود في الرموز والأخطاء + تهريب المحارف الخفية."""
+
+    def test_token_columns_are_one_based_chars(self):
+        from arabi_lang.lexer import Lexer
+        toks = Lexer('اطبع(٥)').tokenize()
+        # أول أربعة رموز دلالية (الثلاثة البنيوية NEWLINE/DEDENT/EOF بعد)
+        self.assertEqual([t.col for t in toks[:4]], [1, 5, 6, 7])
+
+    def test_lexer_error_carries_column(self):
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.errors import LexerError
+        try:
+            Lexer('س = ؟').tokenize()
+            self.fail('لم يرفع')
+        except LexerError as e:
+            self.assertEqual(e.line, 1)
+            self.assertEqual(e.col, 5)
+            self.assertIn('؟', e.message)   # محرف ظاهر يعرض كما هو
+
+    def test_invisible_chars_are_escaped(self):
+        """BOM وعلامات الاتجاه تظهر U+XXXX باسمها لا كمسافات فارغة."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.errors import LexerError
+        for ch, code in [('\ufeff', 'U+FEFF'), ('\u200f', 'U+200F'),
+                         ('\u200e', 'U+200E'), ('\x00', 'U+0000')]:
+            try:
+                Lexer(f'س = {ch}').tokenize()
+                self.fail(f'لم يرفع عند {code}')
+            except LexerError as e:
+                self.assertIn(code, e.message, f'{code}: {e.message}')
+
+    def test_mismatched_bracket_reports_opener(self):
+        """رسالة القوس غير المتوافق تذكر قوس الفتح المفتوح وسطره."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.errors import LexerError
+        try:
+            Lexer('اطبع(١]').tokenize()
+            self.fail('لم يرفع')
+        except LexerError as e:
+            self.assertIn("'('", e.message)
+            self.assertIn('السطر 1، العمود 5', e.message)
+
+    def test_parser_error_carries_column(self):
+        from arabi import run_code
+        from arabi_lang.errors import ParseError
+        try:
+            run_code('س = ١ +\nاطبع(س)\n')
+            self.fail('لم يرفع')
+        except ParseError as e:
+            self.assertEqual(e.line, 1)
+            self.assertEqual(e.col, 8)
+
+    def test_caret_positions_under_column(self):
+        """علامة التشير في CLI تقع تحت العمود المذنب لا رأس السطر."""
+        import io as _io
+        import contextlib as _cl
+        from arabi import print_error
+        from arabi_lang.errors import ParseError
+        err = ParseError('تجربة', 2, 5)
+        buf = _io.StringIO()
+        with _cl.redirect_stderr(buf):
+            print_error(err, ['سطر أولاً', 'اطبع(٢)'])
+        text = buf.getvalue()
+        caret_line = text.strip().splitlines()[-1]
+        self.assertIn('    |     ^', caret_line)   # ٤ فراغات قبل ^
+
+
+class TestLexerStability(unittest.TestCase):
+    """انزياح الأسطر وBOM والأرقام الفارسية وفراغ اللصق وعداد f-string."""
+
+    def test_backslash_newline_does_not_drift_lines(self):
+        """\\ + سطر جديد داخل سلسلة لا يحرف أرقام الأسطر التالية."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.errors import LexerError
+        src = 'نص = "أ\\\nب"\nس = ١\n؟'
+        try:
+            Lexer(src).tokenize()
+            self.fail('لم يرفع عند ؟')
+        except LexerError as e:
+            self.assertEqual(e.line, 4, f'انحرف السطر إلى {e.line}')
+            self.assertEqual(e.col, 1)
+
+    def test_bom_stripped_in_lexer(self):
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('\ufeffاطبع(١)').tokenize()
+        self.assertEqual(toks[0].type, T.IDENT)
+
+    def test_files_with_bom_run(self):
+        """ملف محفوظ بمحرر ويندوز (utf-8-sig) يعمل كما هو."""
+        import tempfile as _tf
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+        with _tf.TemporaryDirectory() as d:
+            path = _os.path.join(d, 'بوم.عربي')
+            with open(path, 'w', encoding='utf-8-sig') as f:
+                f.write('اطبع("سليم")\n')
+            r = _sp.run([_sys.executable, _os.path.join(ROOT, 'arabi.py'),
+                         path], capture_output=True, text=True,
+                        cwd=ROOT)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('سليم', r.stdout)
+
+    def test_persian_digits_are_numbers(self):
+        """الفارسية موحدة: ۱۲ منفردة عدد كما ١٢ — لا تناقض معرف/عدد."""
+        from arabi import run_code
+        self.assertEqual(run_code('اطبع(۱۲ + ۳)\n').strip(), '15')
+
+    def test_nbsp_vertical_tab_formfeed_are_whitespace(self):
+        """لصق من Word/متصفح (NBSP و\\v و\\f) لا يُسقط البرنامج."""
+        from arabi import run_code
+        self.assertEqual(
+            run_code('س\u00A0=\u00A0٧\nاطبع(س)\n').strip(), '7')
+        from arabi_lang.lexer import Lexer
+        toks = Lexer('س = ١\x0b\x0cاطبع(س)').tokenize()
+        self.assertIn('اطبع', [t.value for t in toks])
+
+    def test_nbsp_inside_strings_preserved(self):
+        """NBSP داخل سلسلة محتوى لا يُمس — الفراغ معالج خارج النصوص."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('س = "أ\u00A0ب"').tokenize()
+        s = [t for t in toks if t.type is T.STRING][0]
+        self.assertEqual(s.value, 'أ\u00A0ب')
+
+    def test_fstring_brace_counter_is_quote_aware(self):
+        """ق\"{قاموس[\"مفت}}اح\"]}\" لا يُغلق مبكرًا عند أقواس داخل نص داخلي."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('ق"{قاموس["مفت}}اح"]}"').tokenize()
+        fs = [t for t in toks if t.type is T.FSTRING]
+        self.assertEqual(len(fs), 1, [t.type.name for t in toks])
+        self.assertIn('مفت}}اح', fs[0].value)
+        self.assertIn(']', fs[0].value)
+
+    def test_fstring_quotes_inside_expression_ok(self):
+        """الاقتباسات المعتادة داخل التعبير تعمل كما كانت."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.tokens import T
+        toks = Lexer('ق"طول {طول("أحمد")}"').tokenize()
+        fs = [t for t in toks if t.type is T.FSTRING]
+        self.assertEqual(len(fs), 1)
+        self.assertIn('طول("أحمد")', fs[0].value)
+
+
+class TestRecursionGuard(unittest.TestCase):
+    """C4: RecursionError عربية في جرب والمحلل والCLI والREPL."""
+
+    def _run(self, src, use_vm=True):
+        import io as _io
+        import contextlib as _cl
+        from arabi_lang.interpreter import Interpreter
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.parser import Parser
+        out = _io.StringIO()
+        with _cl.redirect_stdout(out):
+            Interpreter(use_vm=use_vm).run(
+                Parser(Lexer(src).tokenize()).parse())
+        return out.getvalue()
+
+    def test_try_catches_recursion_in_tree_mode(self):
+        """تعاود لا نهائي داخل جرب يُمسك برسالة عربية."""
+        out = self._run(
+            'دالة لانهائية(ن):\n'
+            '    أعد لانهائية(ن + ١)\n'
+            'جرب:\n'
+            '    لانهائية(١)\n'
+            'باستثناء هـ:\n'
+            '    اطبع("مسكناها")\n', use_vm=False)
+        self.assertIn('مسكناها', out)
+
+    def test_try_catches_recursion_in_vm_mode(self):
+        out = self._run(
+            'دالة لانهائية(ن):\n'
+            '    أعد لانهائية(ن + ١)\n'
+            'جرب:\n'
+            '    لانهائية(١)\n'
+            'باستثناء هـ:\n'
+            '    اطبع("مسكناها")\n', use_vm=True)
+        self.assertIn('مسكناها', out)
+
+    def test_deep_recursion_error_is_arabic(self):
+        """رسالة التعاود عربية حتى خارج جرب (لا أثر بايثون خام)."""
+        from arabi_lang.interpreter import Interpreter
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.parser import Parser
+        interp = Interpreter()
+        interp.run(Parser(Lexer('دالة عمق(ن):\n    أعد عمق(ن + ١)\n')
+                          .tokenize()).parse())
+        func = interp.globals.get('عمق')
+        try:
+            interp._call_value(func, [1], {}, None)
+            self.fail('لم يرفع RecursionError')
+        except RecursionError:
+            # عبر CATCHABLE داخل جرب تتحول — هنا نتحقق من المترجم نفسه
+            msg = interp._native_error(RecursionError())
+            self.assertIn('تعاود', msg)
+
+    def test_parser_deep_nesting_is_arabic_parse_error(self):
+        """~٢٠٠٠ قوس متداخل: خطأ نحوي عربي لا أثر إنجليزي."""
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.parser import Parser
+        from arabi_lang.errors import ParseError
+        src = 'س = ' + '(' * 2200 + '١' + ')' * 2200 + '\n'
+        try:
+            Parser(Lexer(src).tokenize()).parse()
+            self.fail('لم يرفع')
+        except ParseError as e:
+            self.assertIn('التعشيش عميق جدًا', e.message)
+        except RecursionError:
+            self.fail('تسرب RecursionError خام من المحلل')
+
+    def test_cli_recursion_exits_clean_arabic(self):
+        """الCLI: تعاود عميق بلا جرب → رسالة عربية وخروج ١."""
+        import tempfile as _tf
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+        with _tf.TemporaryDirectory() as d:
+            path = _os.path.join(d, 'عميق.عربي')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('دالة عمق(ن):\n    أعد عمق(ن + ١)\n'
+                        'اطبع(عمق(١))\n')
+            r = _sp.run([_sys.executable, _os.path.join(ROOT, 'arabi.py'),
+                         path], capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn('تعاود عميق جدًا', r.stderr)
+            self.assertNotIn('Traceback', r.stderr)
+
+    def test_repl_survives_recursion(self):
+        """الREPL يبقي الجلسة بعد تعاود عميق — لا انهيار."""
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+        script = ('دالة عمق(ن):\n    أعد عمق(ن + ١)\n'
+                  'عمق(١)\nاطبع("ما زلت حيًا")\nخروج\n')
+        r = _sp.run([_sys.executable, _os.path.join(ROOT, 'arabi.py')],
+                    input=script, capture_output=True, text=True,
+                    cwd=ROOT, timeout=120)
+        self.assertIn('ما زلت حيًا', r.stdout)
+
+
+class TestVmDictTimingParity(unittest.TestCase):
+    """توقيت فحص مفاتيح القاموس: الدولاب يطابق الممسح زوجًا زوجًا."""
+
+    def _run(self, src, use_vm):
+        import io as _io
+        import contextlib as _cl
+        from arabi_lang.interpreter import Interpreter
+        from arabi_lang.lexer import Lexer
+        from arabi_lang.parser import Parser
+        out = _io.StringIO()
+        with _cl.redirect_stdout(out):
+            Interpreter(use_vm=use_vm).run(
+                Parser(Lexer(src).tokenize()).parse())
+        return out.getvalue()
+
+    def test_bad_key_blocks_value_side_effect_both_modes(self):
+        """حالة التدقيق: {[١،٢]: اطبع("أثر")} لا يطبع بالوضعين."""
+        src = ('جرب:\n'
+               '    د = {[١،٢]: اطبع("أثر")}\n'
+               'باستثناء هـ:\n'
+               '    اطبع("مسك")\n')
+        self.assertEqual(self._run(src, False), 'مسك\n')
+        self.assertEqual(self._run(src, True), 'مسك\n')
+
+    def test_pairwise_side_effect_order_matches(self):
+        """ترتيب الأثر مفتاح ثم قيمة زوجًا زوجًا في الوضعين."""
+        src = 'د = {اطبع("ك١"): اطبع("ق١")، اطبع("ك٢"): اطبع("ق٢")}\n'
+        expected = 'ك١\nق١\nك٢\nق٢\n'
+        self.assertEqual(self._run(src, False), expected)
+        self.assertEqual(self._run(src, True), expected)
+
+    def test_bad_second_key_after_first_value(self):
+        """مفتاح ثانٍ سيء يمنع قيمته فقط — الأولى حصلت أثرها بالوضعين."""
+        src = ('جرب:\n'
+               '    د = {١: اطبع("أول")، [٢]: اطبع("ثانٍ")}\n'
+               'باستثناء هـ:\n'
+               '    اطبع("مسك")\n')
+        expected = 'أول\nمسك\n'
+        self.assertEqual(self._run(src, False), expected)
+        self.assertEqual(self._run(src, True), expected)
+
+
+def _safe_worker(port, key):
+    """عامل مساعد يخدم ثم يصمت عند الوداع أو الانقطاع."""
+    try:
+        from arabi_lang.distributed import run_worker
+        run_worker('127.0.0.1', port, key=key)
+    except Exception:
+        pass
+
+
+class TestDistributedWireSecurity(unittest.TestCase):
+    """C1+C2: بروتوكول الموزعة JSON آمن — لا pickle على حد شبكي."""
+
+    def _make(self, args):
+        from arabi_lang.distributed import _dist_create
+        interp = Interpreter()
+        interp.run(Parser(Lexer('دالة حسب(س):\n    أعد س * ٢\n')
+                          .tokenize()).parse())
+        return _dist_create(interp, args, None)
+
+    def test_no_pickle_import_in_distributed(self):
+        """الوحدة كلها بلا pickle: الفيحص الأقوى — لا استيراد أصلًا."""
+        import arabi_lang.distributed as dist_mod
+        import sys as _sys
+        # الوحدة نفسها لا تحمل pickle ضمن أسماءها المستوردة
+        self.assertFalse(hasattr(dist_mod, 'pickle'),
+                         'distributed.py يستورد pickle — ثغرة V-01/V-02')
+        src = open(_sys.modules['arabi_lang.distributed'].__file__,
+                   encoding='utf-8').read()
+        self.assertNotIn('import pickle', src)
+        self.assertNotIn('pickle.loads', src)
+
+    def test_wire_is_json_no_code_execution(self):
+        """فك الإطار بناء بيانات: JSON مشوه أو عقدة مجهولة تُرفض."""
+        from arabi_lang.distributed import _wire_loads
+        import json as _json
+        with self.assertRaises(Exception):
+            _wire_loads(b'\x80\x04\x95gadget-not-json')
+        with self.assertRaises(Exception):
+            _wire_loads(_json.dumps(
+                {'__عقدة__': 'os.system', 'ف': {}}).encode())
+
+    def test_unknown_node_class_rejected(self):
+        """قائمة بيضاء: عقدة خارج أصناف اللغة لا تُبنى أبدًا."""
+        from arabi_lang.distributed import _wire_loads
+        import json as _json
+        with self.assertRaises(Exception):
+            _wire_loads(_json.dumps(
+                {'__عقدة__': 'EvilNode', 'ف': {'x': 1}}).encode())
+
+    def test_keyed_distributor_rejects_pickle_hello_safely(self):
+        """موزع مفتاحي يستقبل مرحباً pickle خبيثًا: لا تنفيذ ولا تسجيل."""
+        import pickle as _pickle
+        import socket as _socket
+        import tempfile as _tf
+        import os as _os
+        disp = self._make([0, '127.0.0.1', 'سر_عدائي'])
+        canary = _os.path.join(_tf.mkdtemp(), 'canary.txt')
+
+        class Evil:
+            def __reduce__(self):
+                return (open, (canary, 'w'))
+
+        sock = _socket.create_connection(
+            ('127.0.0.1', disp.port()), timeout=10)
+        try:
+            payload = _pickle.dumps(('مرحبا', 1, 'مهاجم', Evil()))
+            sock.sendall(len(payload).to_bytes(4, 'big') + payload)
+            import time as _time
+            _time.sleep(0.3)
+        finally:
+            sock.close()
+        self.assertFalse(_os.path.exists(canary),
+                         'نفذ كود المهاجم — RCE حية!')
+        self.assertEqual(disp.workers(), 0, 'سجل مهاجمًا بلا توقيع!')
+        disp.shutdown()
+
+    def test_service_healthy_after_attacks(self):
+        """بعد الهجمات يبقى الموزع يخدم عاملًا شرعيًا كاملًا."""
+        import threading as _threading
+        disp = self._make([0, '127.0.0.1', 'سر'])
+        t = _threading.Thread(
+            target=lambda: _safe_worker(disp.port(), 'سر'), daemon=True)
+        t.start()
+        try:
+            disp._server.wait_workers(1, 30, None)
+            self.assertEqual(disp.workers(), 1)
+            func = disp._server._interp.globals.get('حسب')
+            task = disp._server.submit(func, [func, 20], {}, None)
+            self.assertEqual(task.result(), 40)
+        finally:
+            disp.shutdown()
+            t.join(timeout=10)
+
+    def test_records_round_trip_with_identity(self):
+        """ذهاب وإياب لسجل كامل: صنف وكائن ودالة تعود بهويتها."""
+        from arabi_lang.distributed import _wire_dumps, _wire_loads
+        from arabi_lang.processes import (encode_value, decode_value,
+                                          _make_enc_ctx)
+        interp = Interpreter()
+        interp.run(Parser(Lexer(
+            'صنف نقطة:\n'
+            '    دالة إنشاء(س):\n        هذا.س = س\n'
+            '    دالة قراءة():\n        أعد هذا.س\n'
+            'دالة فحص(ن، عامل):\n    أعد ن.قراءة() * عامل\n'
+            'ك = نقطة(٦)\n').tokenize()).parse())
+        root = interp.globals
+        ctx = _make_enc_ctx(root)
+        payload = {
+            'عالمي': {'نقطة': encode_value(root.get('نقطة'), ctx),
+                      'فحص': encode_value(root.get('فحص'), ctx)},
+            'دالة': encode_value(root.get('فحص'), ctx),
+            'وسائط': [encode_value(root.get('ك'), ctx), 7],
+            'كلمات': {},
+        }
+        restored = _wire_loads(_wire_dumps(payload))
+        ctx2 = {'root': root, 'raw': restored['عالمي'], 'memo': {}}
+        for name, enc in restored['عالمي'].items():
+            root.define(name, decode_value(enc, ctx2))
+        obj = decode_value(restored['وسائط'][0], ctx2)
+        fn = decode_value(restored['دالة'], ctx2)
+        self.assertEqual(interp._call_value(fn, [obj, 7], {}, None), 42)
+
+
+class TestConcurrencySemantics(unittest.TestCase):
+    """C3 المصحح: Env ذرية الوحدة — وقراءة-تعديل-كتابة تحتاج قفلًا
+    (دلالات الخيوط الحقيقية الموثقة في README، لا فساد في البيئة)."""
+
+    def _run(self, src):
+        from arabi import run_code
+        return run_code(src)
+
+    def test_locked_increments_are_exact(self):
+        """قفل صريح: عدّاد متوازٍ حتمي — مهمتان × ٥٠٠٠ = ١٠٠٠٠ بالضبط."""
+        out = self._run(
+            'عالمي عدد\n'
+            'عدد = ٠\n'
+            'استورد خيوط\n'
+            'ق = خيوط.قفل()\n'
+            'غير متزامنة دالة مهمة_أ():\n'
+            '    لكل س في مدى(٥٠٠٠):\n'
+            '        ق.احجز()\n'
+            '        عدد = عدد + ١\n'
+            '        ق.افرح()\n'
+            'غير متزامنة دالة مهمة_ب():\n'
+            '    لكل س في مدى(٥٠٠٠):\n'
+            '        ق.احجز()\n'
+            '        عدد = عدد + ١\n'
+            '        ق.افرح()\n'
+            'انتظر_الجميع([مهمة_أ()، مهمة_ب()])\n'
+            'اطبع(عدد)\n')
+        self.assertEqual(out.strip(), '10000')
+
+    def test_parallel_writes_to_distinct_vars_are_exact(self):
+        """بلا قفل: كتابة متوازية على متغيرات مختلفة لا تفقد شيئًا —
+        دليل أن البيئة نفسها سليمة والسباق في النمط البرمجي فقط."""
+        out = self._run(
+            'عالمي أ\nعالمي ب\n'
+            'أ = ٠\nب = ٠\n'
+            'غير متزامنة دالة مهمة_أ():\n'
+            '    لكل س في مدى(٢٠٠٠):\n'
+            '        أ = أ + ١\n'
+            'غير متزامنة دالة مهمة_ب():\n'
+            '    لكل س في مدى(٢٠٠٠):\n'
+            '        ب = ب + ١\n'
+            'انتظر_الجميع([مهمة_أ()، مهمة_ب()])\n'
+            'اطبع(أ + ب)\n')
+        self.assertEqual(out.strip(), '4000')
+
+    def test_env_direct_threads_stores_are_atomic(self):
+        """خيطان يكتبان مباشرة في Env نفسها بمفاتيح مختلفة: مخزن
+        الذري الواحد لا يتلف شيئًا — القيمتان دقيقتان حتميًا."""
+        import threading as _threading
+        from arabi_lang.runtime import Env
+        env = Env()
+        n = 20000
+
+        def worker(name):
+            for i in range(n):
+                env.set(name, i + 1)
+
+        threads = [_threading.Thread(target=worker, args=('أأ',)),
+                   _threading.Thread(target=worker, args=('بب',))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(env.get('أأ'), n)
+        self.assertEqual(env.get('بب'), n)
 
 
 if __name__ == '__main__':

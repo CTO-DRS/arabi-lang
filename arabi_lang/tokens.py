@@ -98,14 +98,21 @@ class T(Enum):
 
 
 class Token:
-    """رمز واحد من مخرجات المحلل اللفظي."""
+    """رمز واحد من مخرجات المحلل اللفظي.
 
-    __slots__ = ('type', 'value', 'line')
+    line رقم السطر (يبدأ من ١) وcol موقع المحرف الأول في السطر
+    (يبدأ من ١، ومحسوب بالمحارف لا الأعمدة البصرية) — العمود
+    يخدم رسائل الخطأ الدقيقة وعلامة التشير تحت الرمز المذنب.
+    """
 
-    def __init__(self, type_, value, line):
+    __slots__ = ('type', 'value', 'line', 'col')
+
+    def __init__(self, type_, value, line, col=0):
         self.type = type_
         self.value = value
         self.line = line
+        self.col = col
 
     def __repr__(self):
-        return f'Token({self.type.name}, {self.value!r}, line={self.line})'
+        return (f'Token({self.type.name}, {self.value!r}, '
+                f'line={self.line}, col={self.col})')
