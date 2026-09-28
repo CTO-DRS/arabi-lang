@@ -68,7 +68,6 @@ from .processes import (
 )
 
 DEFAULT_PORT = 7700        # المنفذ الافتراضي للموزع والعامل
-DISPATCH_TIMEOUT = 120     # مهلة انتظار نتيجة المهمة الموزعة (ثوانٍ)
 SHUTDOWN_GRACE = 30        # مهلة تصفية المهام عند إنهاء الموزع (ثوانٍ)
 WORKER_TIMEOUT = 30        # دورة استطلاع العامل (يتحقق بعدها من الإيقاف)
 CONNECT_TIMEOUT = 10       # مهلة الاتصال الأولي والعمالة المفتاحية
@@ -105,9 +104,6 @@ def send_raw_frame(sock, blob):
 # حدود الثقة. علامات الترميز: زوج لأزواج بايثون، عقدة لعقد شجرة
 # اللغة (بقائمة بيضاء من صنفها)، ذاتي لعلامة الإغلاق الذاتي، أزواج
 # لقواميس بمفاتيح غير نصية، وب64 للبايتات.
-
-_SELF_SENTINEL = ('__ذاتي__ عربي',)      # يقابل _SELF_MARKER في السجلات
-
 
 def _record_to_wire(rec, _depth=0):
     """يحول سجل قيم عربي (نتاج encode_value) إلى بنية JSON-آمنة."""
@@ -482,6 +478,10 @@ class _Server:
         self._root = interp.globals
         self._key = _check_key(key)
         self._lock = threading.RLock()
+        # قفل البيئة المشتركة: خيوط قارئة النتائج تكتب أصنافًا في الجذر
+        # بينما خيط الرئيس يكرر فوقه في submit — بلا قفل تنهار الحلقة
+        # بـ RuntimeError (تقرير التدقيق م15-2)
+        self._env_lock = threading.Lock()
         self._stopping = False
         self._closed = False
         self._next_id = 0
@@ -673,7 +673,9 @@ class _Server:
                     conn.send(('عمل', job_id, blob))
                 else:
                     continue              # زال العامل — أُعيد عمله
-            except OSError:
+            except (OSError, ArabiRuntimeError):
+                # OSError: سقط الاتصال؛ ArabiRuntimeError: حزمة تتجاوز
+                # حد الإطار — كلاهما يعني فشل الإرسال وإعادة المهمة
                 self._send_failed(wid, job_id, blob)
 
     def _send_failed(self, wid, job_id, blob):
@@ -709,9 +711,12 @@ class _Server:
             return                             # نتيجة مكررة أو لمهمة ساقطة
         try:
             if rkind == 'نهاية':
-                value = decode_value(
-                    rblob,
-                    {'root': self._root, 'raw': None, 'memo': {}})
+                # فك النتيجة قد يعيد تعريف أصناف في الجذر — تحت قفل
+                # البيئة كي لا ينهار submit المتوازي فوق نفس القاموس
+                with self._env_lock:
+                    value = decode_value(
+                        rblob,
+                        {'root': self._root, 'raw': None, 'memo': {}})
                 task._finish(value, None)
             elif rkind == 'خطأ':
                 from .processes import _error_from_record
@@ -731,12 +736,19 @@ class _Server:
         from .runtime import DistributedTaskValue
         _validate_callable(func, 'قدّم', line)
         enc_ctx = _make_enc_ctx(self._root)
+        # ترميز الجذر يكرر فوق قاموسه — تحت قفل البيئة كي لا تتعارض
+        # مع خيوط قارئة النتائج المعيد تعريف الأعضاء فيه
+        with self._env_lock:
+            encoded_root = _encode_root(self._root, enc_ctx, line)
+            encoded_func = encode_value(func, enc_ctx, line)
+            encoded_args = [encode_value(a, enc_ctx, line) for a in args[1:]]
+            encoded_kwargs = {k: encode_value(v, enc_ctx, line)
+                              for k, v in kwargs.items()}
         payload = {
-            'عالمي': _encode_root(self._root, enc_ctx, line),
-            'دالة': encode_value(func, enc_ctx, line),
-            'وسائط': [encode_value(a, enc_ctx, line) for a in args[1:]],
-            'كلمات': {k: encode_value(v, enc_ctx, line)
-                      for k, v in kwargs.items()},
+            'عالمي': encoded_root,
+            'دالة': encoded_func,
+            'وسائط': encoded_args,
+            'كلمات': encoded_kwargs,
         }
         with self._lock:
             if self._closed:
@@ -855,7 +867,7 @@ def _dist_create(interp, args, line):
         if not 0 <= port <= 65535:
             raise ArabiRuntimeError(
                 f'المنفذ {port} خارج المدى المسموح (٠ إلى ٦٥٥٣٥)', line)
-    if len(args) == 2:
+    if len(args) >= 2:
         host = args[1]
         if not isinstance(host, str):
             raise ArabiRuntimeError(

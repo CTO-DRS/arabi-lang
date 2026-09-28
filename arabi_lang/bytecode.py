@@ -3,7 +3,7 @@
 
 المبدأ: تحليل المصدر (لفظيًا ونحويًا) هو أبطأ مرحلة عند تشغيل البرامج
 الكبيرة ومشاريع الوحدات المتعددة. هذه الوحدة تسلسل شجرة الصياغة كاملة
-إلى صيغة JSON بمفاتيح عربية، وتخزنها في مجلد __بايت__ بجانب المصدر:
+بالصيغة الثنائية pickle، وتخزنها في مجلد __بايت__ بجانب المصدر:
 
     ملف.عربي  →  __بايت__/ملف.بيت
 
@@ -144,7 +144,7 @@ def read_program(src_path, source=None):
     from .lexer import Lexer
     from .parser import Parser
     if source is None:
-        with open(src_path, encoding='utf-8') as f:
+        with open(src_path, encoding='utf-8-sig') as f:
             source = f.read()
     tree = Parser(Lexer(source).tokenize()).parse()
     try:
@@ -158,7 +158,7 @@ def compile_file(src_path):
     """يترجم ملفًا إلى كود وسيط ويكتب ذاكرته دون تنفيذ — يعيد مسارها."""
     from .lexer import Lexer
     from .parser import Parser
-    with open(src_path, encoding='utf-8') as f:
+    with open(src_path, encoding='utf-8-sig') as f:
         source = f.read()
     tree = Parser(Lexer(source).tokenize()).parse()
     return write_cache(tree, src_path)

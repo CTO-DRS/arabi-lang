@@ -805,7 +805,7 @@ class Parser:
             self.advance()
             for e in exprs:
                 if not isinstance(e, (Name, Index, Attribute)):
-                    self.error('الجهة اليمين من الإسناد يجب أن تكون اسمًا أو عنصرًا مفهرسًا أو خاصية')
+                    self.error('الجهة اليسرى من الإسناد يجب أن تكون اسمًا أو عنصرًا مفهرسًا أو خاصية')
             values = [self.expression()]
             while self.check(T.COMMA):
                 self.advance()

@@ -206,6 +206,10 @@ def install_package(source):
     except ArabiError as error:
         print(f'✗ {error}', file=sys.stderr)
         sys.exit(1)
+    except ValueError as exc:
+        # روابط غير آسكية وأخطاء تحويل مشابهة — رسالة عربية لا أثر خام
+        print(f"✗ مصدر المكتبة غير صالح: {exc}", file=sys.stderr)
+        sys.exit(1)
     except OSError as exc:
         print(f"✗ فشل تحميل المكتبة: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -316,8 +320,15 @@ def package_cli(args):
                     rest.remove(flag)
                     no_web = True
             # المجلد بعد نزع الأعلام — فيصح الترتيب بأي تسلسل
-            store = rest[0] if rest else registry.DEFAULT_STORE
-            port = int(port_raw) if port_raw else 0
+            # والافتراضي «سجل-الحزم» في دليل العمل (كان يشير لثابت محذوف
+            # فينهار الأمر الموثق بلا مجلد — تقرير التدقيق م11-2)
+            store = rest[0] if rest else registry.default_store_dir()
+            try:
+                port = int(port_raw) if port_raw else 0
+            except ValueError:
+                print(f"خطأ: المنفذ '{port_raw}' يجب أن يكون رقمًا مثل 8000",
+                      file=sys.stderr)
+                sys.exit(1)
             if port_raw and not 0 <= port <= 65535:
                 print(f'خطأ: المنفذ {port} خارج المدى (٠-٦٥٥٣٥)',
                       file=sys.stderr)

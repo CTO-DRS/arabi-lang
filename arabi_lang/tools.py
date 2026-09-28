@@ -21,6 +21,13 @@ from .parser import Parser
 from .tokens import T
 from . import nodes as N
 
+
+def _quote_url(url):
+    """يرمز حروف الرابط غير الآسكية (عربية مثلاً) بترميز النسبة —
+    فسطر طلب HTTP لا يقبل إلا آسكي، والرموز والترميزات القائمة تبقى
+    (تطابق حارس packages._quote_url — تقرير التدقيق م11)."""
+    return urllib.parse.quote(url, safe=";/?:@&=+$,~*'()#%![]")
+
 INDENT_UNIT = '    '
 
 _OPENERS = (T.LPAREN, T.LBRACKET, T.LBRACE)
@@ -886,7 +893,7 @@ def install_package(source, libraries_dir='مكتبات'):
     """
     is_url = source.startswith(('http://', 'https://'))
     if is_url:
-        with urllib.request.urlopen(source, timeout=30) as resp:
+        with urllib.request.urlopen(_quote_url(source), timeout=30) as resp:
             content = resp.read().decode('utf-8')
         name = os.path.basename(urllib.parse.urlsplit(source).path)
     else:

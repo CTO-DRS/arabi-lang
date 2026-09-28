@@ -630,15 +630,18 @@ class ProcessValue:
         if self._received:
             return self._outcome
         if not self.conn.poll(PROCESS_TIMEOUT):
+            self.conn.close()          # لا وصف ملف يتسرب عند المهلة
             raise ArabiRuntimeError(
                 'انتهت مهلة انتظار العملية المنفصلة دون نتيجة — '
                 'ربما علقت في عمل طويل جدًا', line)
         try:
             kind, blob = self.conn.recv()
         except (EOFError, OSError):
+            self.conn.close()
             raise ArabiRuntimeError(
                 'انتهت العملية المنفصلة فجأة دون أن ترسل نتيجة', line)
         self.process.join()
+        self.conn.close()              # إغلاق طرف الاستقبال بعد الاستلام
         self._received = True
         self._outcome = (kind, blob)
         return self._outcome
@@ -704,8 +707,16 @@ class ProcessTaskValue:
         self._event.set()
 
     def result(self, line=None):
-        """ينتظر انتهاء المهمة ويعيد نتيجتها — يعيد رفع خطأها إن فشلت."""
-        self._event.wait()
+        """ينتظر انتهاء المهمة ويعيد نتيجتها — يعيد رفع خطأها إن فشلت.
+
+        بانتظار محدود بمهلة العمليات (120 ثانية) — كان الانتظار بلا
+        حد فيعلّق البرنامج للأبد إذا قُتل عامل التجمع (تقرير التدقيق م6-1).
+        """
+        if not self._event.wait(PROCESS_TIMEOUT):
+            raise ArabiRuntimeError(
+                f'انتهت مهلة انتظار نتيجة المهمة ({PROCESS_TIMEOUT} '
+                'ثانية) — عامل التجمع قد يكون توقف فجأة أو انشغل '
+                'بعمل أطول من المهلة', line)
         if self._error is not None:
             self._error.line = self._error.line or line
             raise self._error

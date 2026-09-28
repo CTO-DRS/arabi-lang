@@ -30,7 +30,16 @@ from .parser import Parser
 
 # ================== الديباجة ==================
 
-VERSION = '1.10.0'
+# إصدار الخادم = إصدار اللغة نفسها — كان ثابتًا يدويًا قديمًا يضلل
+# تكاملات المحررات (تقرير التدقيق م18)
+try:
+    from . import __version__ as VERSION
+except Exception:                          # حارس نظري — لا يحدث عمليًا
+    VERSION = '1.0.0'
+
+# سقف حجم رسالة LSP الواحدة — رأس Content-Length مزور أو معطوب
+# لا يبتلع ذاكرة غير محدودة (تقرير التدقيق م12-4)
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 # رموز LSP للأنواع (SymbolKind)
 KIND_FUNCTION = 12
@@ -63,8 +72,8 @@ def read_message(stream):
         length = int(headers.get('content-length', '0'))
     except ValueError:
         return None
-    if length <= 0:
-        return None
+    if length <= 0 or length > MAX_MESSAGE_BYTES:
+        return None              # مرفوض: صفر أو رأس مزور بحجم وحشي
     body = stream.read(length)
     if not body:
         return None
@@ -190,21 +199,30 @@ class ArabiLanguageServer:
                 break
             method = message.get('method', '')
             if 'id' in message:
-                handler = self.requests.get(method)
-                if handler is not None:
-                    try:
-                        result = handler(message.get('params') or {})
-                        self._reply(message['id'], result)
-                    except RecursionError:
-                        # التعاود العميق: رسالة عربية واضحة لا أثر خام (1.23)
-                        self._error(message['id'], -32603,
-                                    'تعاود عميق جدًا في الطلب — بسّط '
-                                    'التعبير أو قسّمه')
-                    except Exception as exc:            # حماية الخادم
-                        self._error(message['id'], -32603, str(exc))
+                # بعد 'shutdown' لا يُجاب إلا 'exit' بروتوكول LSP —
+                # كان الراية تُضبط ولا تُقرأ فظل الخادم يخدم الطلبات
+                # (تقرير التدقيق م15-28)
+                if self.shutdown_asked and method != 'exit':
+                    self._error(message['id'], -32600,
+                                'الخادم أُوقف بـ shutdown — أرسل exit للإنهاء')
+                elif method == 'exit':
+                    pass                    # الخروج يُعالج بعد الحلقة
                 else:
-                    self._error(message['id'], -32601,
-                                f'طريقة غير مدعومة: {method}')
+                    handler = self.requests.get(method)
+                    if handler is not None:
+                        try:
+                            result = handler(message.get('params') or {})
+                            self._reply(message['id'], result)
+                        except RecursionError:
+                            # التعاود العميق: رسالة عربية واضحة لا أثر خام (1.23)
+                            self._error(message['id'], -32603,
+                                        'تعاود عميق جدًا في الطلب — بسّط '
+                                        'التعبير أو قسّمه')
+                        except Exception as exc:            # حماية الخادم
+                            self._error(message['id'], -32603, str(exc))
+                    else:
+                        self._error(message['id'], -32601,
+                                    f'طريقة غير مدعومة: {method}')
             else:
                 handler = self.notifications.get(method)
                 if handler is not None:

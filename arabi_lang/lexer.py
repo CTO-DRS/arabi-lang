@@ -431,7 +431,7 @@ class Lexer:
             closer = quote * 3
             while True:
                 if self.pos >= n:
-                    self.error('نص غير مغلق — أنسيت ثلاث علامات اقتباس')
+                    self.error('نص غير مغلق — نسيت ثلاث علامات اقتباس')
                 c = self.src[self.pos]
                 if self.src[self.pos:self.pos + 3] == closer:
                     self.pos += 3
@@ -453,7 +453,7 @@ class Lexer:
 
         while True:
             if self.pos >= n:
-                self.error('نص غير مغلق — أنسيت علامة الاقتباس')
+                self.error('نص غير مغلق — نسيت علامة الاقتباس')
             c = self.src[self.pos]
             if c == quote:
                 self.pos += 1
@@ -486,7 +486,7 @@ class Lexer:
             closer = quote * 3
             end = self.src.find(closer, self.pos)
             if end == -1:
-                self.error('سلسلة خام غير مغلقة — أنسيت ثلاث علامات اقتباس')
+                self.error('سلسلة خام غير مغلقة — نسيت ثلاث علامات اقتباس')
             text = self.src[self.pos:end]
             self.line += text.count('\n')
             self.pos = end + 3
@@ -498,7 +498,7 @@ class Lexer:
         buf = []
         while True:
             if self.pos >= n:
-                self.error('سلسلة خام غير مغلقة — أنسيت علامة الاقتباس')
+                self.error('سلسلة خام غير مغلقة — نسيت علامة الاقتباس')
             c = self.src[self.pos]
             if c == quote:
                 self.pos += 1
@@ -527,7 +527,7 @@ class Lexer:
             depth = 0
             while True:
                 if self.pos >= n:
-                    self.error('نص منسق متعدد الأسطر غير مغلق — أنسيت ثلاث علامات اقتباس')
+                    self.error('نص منسق متعدد الأسطر غير مغلق — نسيت ثلاث علامات اقتباس')
                 c = self.src[self.pos]
                 if depth == 0 and self.src[self.pos:self.pos + 3] == closer:
                     self.pos += 3
@@ -558,7 +558,7 @@ class Lexer:
         in_expr_str = None                # اقتباس سلسلة داخل التعبير (1.23)
         while True:
             if self.pos >= n:
-                self.error('نص منسق غير مغلق — أنسيت علامة الاقتباس')
+                self.error('نص منسق غير مغلق — نسيت علامة الاقتباس')
             c = self.src[self.pos]
             if c == quote and depth == 0:
                 self.pos += 1

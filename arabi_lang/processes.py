@@ -5,7 +5,7 @@
 الفلسفة:
 - وحدة 'عمليات' تحاكي واجهة 'خيوط' و'تجمع' المعروفتين: شغّل/تجمع/قدّم/
   إنهاء/حجم، مع طرق نتيجة/الخطأ/جاهز/انتظر/معرف — فمن يعرف الخيوط
-  يعرف العمليات، والفرق الوحيد أن كل عمل يعمل في معالج مستقل ب内اكرة
+  يعرف العمليات، والفرق الوحيد أن كل عمل يعمل في معالج مستقل بذاكرة
   معزولة، فتستفيد الأعمال الحسابية الخالصة من كل أنوية المعالج.
 - النقل بين العمليات يتم بترميز القيم (encode/decode) إلى بنى بيانات
   بسيطة قابلة للتنقيط (pickle): الأعداد والنصوص والقوائم والقواميس
@@ -61,7 +61,6 @@ LIVE_TYPES = (GeneratorValue, DBValue, SuperValue, ThreadValue,
 # أنواع القيم الحية التي لا تعبر حدود العملية — تُتخطى صامتة في الربط
 # العالمي (الابن يبني وحداته الخاصة)، وتُرفض صراحة كوسائط/نتائج.
 
-PROCESS_TIMEOUT = 120        # مهلة انتظار نتيجة العملية الواحدة (ثوان)
 POOL_MAX_SIZE = 64           # حد أعلى لعدد عمليات التجمع (العمليات أثقل من الخيوط)
 
 
@@ -215,19 +214,32 @@ def _encode_class(cls, ctx, line):
 
 
 def _contains_live(v, depth=0):
-    """هل تحوي القيمة (عبر قوائم وقواميس متداخلة) كائنًا حيًا لا يعبر
-    العملية؟ تُستخدم لتخطي هذه الربطات العالمي صامتة — أما الوظائف
-    فسلاسلها تُفحص في ترميزها الخاص."""
-    if depth > 12:
-        return True
-    if isinstance(v, LIVE_TYPES):
-        return True
-    if isinstance(v, list):
-        return any(_contains_live(x, depth + 1) for x in v)
-    if isinstance(v, dict):
-        return any(_contains_live(k, depth + 1)
-                   or _contains_live(x, depth + 1)
-                   for k, x in v.items())
+    """هل تحوي القيمة (عبر قوائم وقواميس متداخلة بأي عمق) كائنًا حيًا
+    لا يعبر العملية؟ تُستخدم لتخطي هذه الربطات العالمي صامتة — أما
+    الوظائف فسلاسلها تُفحص في ترميزها الخاص.
+
+    تكرار تفريغي بمجموعة زيارة — كان الحد العميق 12 يصنّف قيمة
+    قابلة للنقل متداخلة أعمق من ذلك كأنها حية فتتخطى صامتة فيظهر
+    الابن بعنصر مفقود ورسالة غير معرّف بعيدة عن سببها (تقرير التدقيق
+    م6/م15). مجموعة الزارة تحمي من الحلقات المرجعية أيضًا.
+    """
+    stack = [v]
+    seen = set()
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, LIVE_TYPES):
+            return True
+        if isinstance(cur, (list, tuple, set)):
+            if id(cur) in seen:
+                continue
+            seen.add(id(cur))
+            stack.extend(cur)
+        elif isinstance(cur, dict):
+            if id(cur) in seen:
+                continue
+            seen.add(id(cur))
+            stack.extend(cur.keys())
+            stack.extend(cur.values())
     return False
 
 

@@ -283,6 +283,17 @@ def _fetch_into(source, tmp, expected_name, index_info):
     return _fetch_local(source, tmp, expected_name, index_info)
 
 
+def _safe_extractall(zf, target_dir):
+    """يفك الأرشيف في target_dir بعد فحص أسماء مداخله — لا مسارات
+    مطلقة ولا قفز '..' (نفس حارس الخادم في registry — طبقة دفاع
+    ثانية في العميل: تقرير التدقيق م11-6)."""
+    for n in zf.namelist():
+        if n.startswith('/') or '..' in n.replace('\\', '/').split('/'):
+            raise ArabiError(
+                f"الأرشيف يحمل مدخلًا خطيرًا '{n}' — رفض فكه احتياطًا")
+    zf.extractall(target_dir)
+
+
 def _fetch_local(source, tmp, expected_name, index_info, downloaded=False):
     """يعالج مصدرًا محليًا (بعد التنزيل إن كان رابطًا)."""
     version = (index_info or {}).get('النسخة') or '0.0.0'
@@ -293,13 +304,17 @@ def _fetch_local(source, tmp, expected_name, index_info, downloaded=False):
         shutil.copytree(source, dest)
         return dest
     if zipfile.is_zipfile(source):
+        # الفك في مجلد فرعي نظيف — لا بايتات الأرشيف نفسه تتسرب
+        # داخل الحزمة المثبتة (تقرير التدقيق م11-5)
+        extract_dir = os.path.join(tmp, 'فك')
+        os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(source) as zf:
-            zf.extractall(tmp)
+            _safe_extractall(zf, extract_dir)
         # البيان إما في الجذر أو في مجلد واحد داخله
-        if os.path.isfile(os.path.join(tmp, MANIFEST_NAME)):
-            return tmp
-        for entry in sorted(os.listdir(tmp)):
-            sub = os.path.join(tmp, entry)
+        if os.path.isfile(os.path.join(extract_dir, MANIFEST_NAME)):
+            return extract_dir
+        for entry in sorted(os.listdir(extract_dir)):
+            sub = os.path.join(extract_dir, entry)
             if os.path.isdir(sub) and os.path.isfile(
                     os.path.join(sub, MANIFEST_NAME)):
                 return sub
@@ -567,7 +582,12 @@ def remove(name, project_dir=None, _force=False):
 
 
 def update(name=None, project_dir=None, index_source=None):
-    """يحدث حزمة (أو كل الحزم) إلى أحدث نسخة في الفهرس."""
+    """يحدث حزمة (أو كل الحزم) إلى أحدث نسخة في الفهرس.
+
+    مع تراجع كامل: إن فشل تثبيت البديلة بعد الإزالة أعيد النسخة
+    السابقة من اللقطة — كان الفشل يترك الحزمة محذوفة بلا عودة
+    (تقرير التدقيق م11-7).
+    """
     if project_dir is None:
         project_dir = os.getcwd()
     installed = list_installed(project_dir)
@@ -576,10 +596,29 @@ def update(name=None, project_dir=None, index_source=None):
         raise ArabiError(f"الحزمة '{name}' غير مثبتة — لا شيء لتحديثه")
     messages = []
     for target in targets:
+        dest = _pkg_dir(project_dir, target)
+        snapshot = None
+        if os.path.isdir(dest):
+            snapshot = tempfile.mkdtemp(prefix='عربي-تحديث-')
+            shutil.copytree(dest, os.path.join(snapshot, target))
         # أزل ثم ثبت من جديد = تحديث إلى الأحدث — الإزالة القسرية
         # مطلوبة لأن حزمًا معتمدة قد تحجبها، والتثبيت يليها فورًا
         remove(target, project_dir, _force=True)
-        messages.extend(install(target, project_dir, index_source))
+        try:
+            messages.extend(install(target, project_dir, index_source))
+        except Exception:
+            # تراجع: أعد النسخة السابقة كي لا يفقد المشروع الحزمة
+            if snapshot is not None:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if os.path.exists(dest):
+                    shutil.rmtree(dest)
+                shutil.copytree(os.path.join(snapshot, target), dest)
+                shutil.rmtree(snapshot, ignore_errors=True)
+                messages.append((f"{target} — فشل التحديث، أُعيدت النسخة "
+                                 'السابقة', 'تراجع'))
+            raise
+        if snapshot is not None:
+            shutil.rmtree(snapshot, ignore_errors=True)
     return messages
 
 

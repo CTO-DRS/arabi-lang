@@ -1637,8 +1637,8 @@ class Interpreter:
     # ================== أدوات الأصناف ==================
 
     def _lookup_member(self, cls, name):
-        name = strip_tashkeel(name)              # المواصفة ق٢
         """يبحث عن عضو في سلسلة الصنف (MRO للوراثة المتعددة) ويعيد (العضو، الصنف المالك)."""
+        name = strip_tashkeel(name)              # المواصفة ق٢
         for scope in self._class_chain(cls):
             if name in scope.members:
                 return scope.members[name], scope

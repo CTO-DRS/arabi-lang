@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""الدولاب الافتراضي (Virtual Machine) — الإصدار 1.13.
+"""الدولاب الافتراضي (Virtual Machine) — الإصدار 1.24.
 
 يترجم أجسام الدوال إلى تعليمات بايت-كود تنفذها حلقة دولاب واحدة سريعة،
 بدل المرور الشجري على عقد شجرة الصياغة في كل استدعاء (getattr + استدعاء
@@ -210,11 +210,10 @@ class Compiler:
             self._fallback_stmt(node, loop)
 
     def _fallback_stmt(self, node, loop):
-        if loop is not None:
-            arg = (node, loop[0], loop[1])
-        else:
-            arg = (node, None, None)
-        self.emit(OP_EXEC_STMT, arg, node.line)
+        # جملة غير مدعومة تُنفذ شجريًا كما هي — إشارات الكسر/الاستمرار
+        # الخارجة منها تلتقط عند إطار الحلقة في vm_exec فلا حاجة
+        # لمطابقة أهداف القفز هنا (كانت بيانات ميتة مضللة)
+        self.emit(OP_EXEC_STMT, node, node.line)
 
     def _if_chain(self, node, loop):
         end = self.lbl()
@@ -421,7 +420,10 @@ def vm_exec(interp, code, env):
                 else:
                     push(binop(arg, left, right, line))
             elif op == OP_JIF:
-                if not pop():
+                # الصحة عبر المفسر نفسه لا bool الخام — لئلا تنحرف
+                # حلقات/شروط الدولاب عن دلالات و/أو إذا صارت للصحة
+                # دلالة لغوية خاصة (تقرير التدقيق م9-1)
+                if not interp._truthy(pop()):
                     ip = arg
             elif op == OP_STORE_NAME:
                 env_set(names[arg], pop())
@@ -560,7 +562,7 @@ def vm_exec(interp, code, env):
             elif op == OP_EVAL_EXPR:
                 push(interp.evaluate(arg, env))
             elif op == OP_EXEC_STMT:
-                interp.execute(arg[0], env)
+                interp.execute(arg, env)
             else:
                 raise ArabiRuntimeError(
                     f'تعليمة دولاب غير معروفة: {op}', line)

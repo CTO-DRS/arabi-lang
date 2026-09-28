@@ -37,14 +37,13 @@
 import hashlib
 import hmac
 import html as _html
-import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
 import urllib.parse
-import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -70,6 +69,29 @@ except Exception:                          # حارس نظري — لا يحدث
 AUTH_HEADER = 'X-Arabi-Signature'
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024   # حد حجم الحزمة المنشورة (64 م.ب)
 
+# المجلد الافتراضي لمخزن السجل عند تشغيله بلا مجلد صريح
+DEFAULT_STORE_NAME = 'سجل-الحزم'
+
+# مقطع النسخة الصالح في طلبات التنزيل — يمنع أي فاصل مسار (الإصلاح الأمني)
+_SAFE_VERSION_RE = re.compile(r'^[A-Za-z0-9._+~-]+$')
+
+
+def default_store_dir():
+    """مجلد المخزن الافتراضي للسجل — مجلد «سجل-الحزم» في دليل العمل."""
+    return os.path.join(os.getcwd(), DEFAULT_STORE_NAME)
+
+
+def _safe_version_segment(version):
+    """يطهّر مقطع النسخة القادم من طلب تنزيل شبكي — يعيد None إن كان خطيرًا.
+
+    مقطع المسار يفك ترميزه بعد القسمة على '/' فتدسّ '..' أو الفواصل
+    المرمزة (%2F) داخل المقطع الواحد — أي مقطع لا يطابق نمط الإصدارات
+    الصرفة يرفض قبل لمس نظام الملفات (ثغرة التنقل: تقرير التدقيق م11).
+    """
+    if not version or '..' in version or not _SAFE_VERSION_RE.match(version):
+        return None
+    return version
+
 
 # ================== أدوات المخزن ==================
 
@@ -89,8 +111,17 @@ def _version_meta_path(store_dir, name, version):
 
 
 def _version_zip_path(store_dir, name, version):
-    """مسار أرشيف نسخة منشورة."""
-    return os.path.join(_pkg_root(store_dir, name), version + '.zip')
+    """مسار أرشيف نسخة منشورة — حصر داخل جذر الحزمة (دفاع ثانٍ).
+
+    حتى لو تسرب مقطع نسخة خبيث من طبقة التطهير، يرفض الدمج أي مسار
+    يخرج عن جذر الحزمة داخل المخزن.
+    """
+    root = os.path.abspath(_pkg_root(store_dir, name))
+    path = os.path.abspath(os.path.join(root, version + '.zip'))
+    if not path.startswith(root + os.sep):
+        raise ArabiError(
+            f"مقطع النسخة '{version}' يحاول الخروج من مجلد الحزمة")
+    return path
 
 
 def _scan_versions(store_dir, name):
@@ -108,7 +139,25 @@ def _scan_versions(store_dir, name):
                     continue
             if isinstance(meta, dict) and meta.get('النسخة'):
                 versions.append(meta)
-    versions.sort(key=lambda m: [int(x) for x in m['النسخة'].split('.')])
+    # فرز متسامح: المقطع الرقمي يرتب رقميًا، وغير الرقمي (1.0-beta مثلاً)
+    # يرتب نصيًا بعده — بدل انفجار ValueError يأسّر كل مسارات الفحص
+    def _ver_key(v):
+        parts = []
+        for x in v.split('.'):
+            if x.isdigit():
+                parts.append((0, int(x), ''))
+            else:
+                num = ''
+                for ch in x:
+                    if ch.isdigit():
+                        num += ch
+                    else:
+                        break
+                rest = x[len(num):]
+                parts.append((0 if num else 1, int(num) if num else 0, rest))
+        return parts
+
+    versions.sort(key=lambda m: _ver_key(m['النسخة']))
     return versions
 
 
@@ -729,7 +778,12 @@ class _RegistryHandler(BaseHTTPRequestHandler):
                                      'في السجل')
                     return
                 if len(segs) == 3:
-                    version = segs[2]
+                    version = _safe_version_segment(segs[2])
+                    if version is None:
+                        self._error(
+                            400, f"نسخة غير صالحة: '{segs[2]}' — مقطع "
+                                 'النسخة لا يقبل فواصل مسار')
+                        return
                     if not os.path.isfile(_version_zip_path(
                             reg._store, name, version)):
                         self._error(

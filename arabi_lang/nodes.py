@@ -95,15 +95,18 @@ class Yield(Node):
 
 
 class Break(Node):
-    pass
+    def __init__(self, line=None):
+        super().__init__(line)
 
 
 class Continue(Node):
-    pass
+    def __init__(self, line=None):
+        super().__init__(line)
 
 
 class Pass(Node):
-    pass
+    def __init__(self, line=None):
+        super().__init__(line)
 
 
 class Try(Node):
@@ -308,7 +311,8 @@ class Bool(Node):
 
 
 class Null(Node):
-    pass
+    def __init__(self, line=None):
+        super().__init__(line)
 
 
 class Name(Node):
