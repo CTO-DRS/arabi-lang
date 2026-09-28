@@ -25,6 +25,7 @@ CMP_OPS = {
 AUG_OPS = {
     T.PLUS_ASSIGN: '+', T.MINUS_ASSIGN: '-',
     T.STAR_ASSIGN: '*', T.SLASH_ASSIGN: '/',
+    T.PERCENT_ASSIGN: '%',   # %= و ٪= (المرحلة 2 — ق١)
 }
 
 TOKEN_DESC = {
@@ -43,7 +44,7 @@ STMT_KEYWORDS = {
     T.TRY: 'جرب', T.EXCEPT: 'باستثناء', T.FINALLY: 'اخيرا',
     T.RAISE: 'ارفع', T.IMPORT: 'استورد', T.PASS: 'تجاهل',
     T.CLASS: 'صنف', T.THIS: 'هذا', T.SUPER: 'الأصل',
-    T.SWITCH: 'بدّل', T.CASE: 'حالة', T.DEFAULT: 'افتراض',
+    T.SWITCH: 'بدل', T.CASE: 'حالة', T.DEFAULT: 'افتراض',
     T.ENUM: 'تعداد', T.PROPERTY: 'خاصية', T.GLOBAL: 'عالمي',
     T.ASSERT: 'تحقق', T.DELETE: 'احذف',
     T.YIELD: 'أنتج', T.INTERFACE: 'واجهة',
@@ -296,8 +297,16 @@ class Parser:
             self.advance()
             decorators.append(self.expression())
             self.skip_newlines()
-        if not self.check(T.DEF):
-            self.error("المزخرف @ يجب أن يسبق تعريف دالة 'دالة' مباشرة")
+        # يقبل 'دالة' و'غير متزامنة دالة' على السواء (المواصفة ق٩):
+        # المفسر يطبق المزخرف على قيمة الدالة غير المتزامنة كما هي
+        is_async_head = (self.check(T.IDENT)
+                         and self.cur().value == 'غير'
+                         and self.peek(1).type is T.IDENT
+                         and self.peek(1).value in ('متزامنة', 'متزامن')
+                         and self.peek(2).type is T.DEF)
+        if not (self.check(T.DEF) or is_async_head):
+            self.error("المزخرف @ يجب أن يسبق تعريف دالة 'دالة' أو "
+                       "'غير متزامنة دالة' مباشرة")
         func = self.func_def()
         func.decorators = decorators
         func.line = tok.line
@@ -398,23 +407,54 @@ class Parser:
         return Return(self.expression(), tok.line)
 
     def try_stmt(self):
+        """جرب مع كتل باستثناء متعددة — التقاط بالصنف (المواصفة ق٦):
+
+        جرب: ... باستثناء صنف_أ كـ هـ: ... باستثناء كـ هـ: ... اخيرا: ...
+        الصيغ التاريخية (باستثناء: وباستثناء هـ:) متوافقة كاملة.
+        """
         tok = self.advance()                       # جرب
         body = self.block()
-        except_body = None
-        except_binding = None
+        clauses = []
         finally_body = None
-        if self.check(T.EXCEPT):
+        while self.check(T.EXCEPT):
             self.advance()
-            # ربط اختياري: باستثناء هـ:
-            if self.check(T.IDENT):
-                except_binding = self.advance().value
-            except_body = self.block()
+            filter_expr = None
+            binding = None
+            if self.check(T.AS):
+                self.advance()                     # كـ — عام مع ربط اختياري
+                if self.check(T.IDENT):
+                    binding = self.advance().value
+            elif self.check(T.IDENT):
+                if self.peek(1).type is T.AS:
+                    filter_expr = self._class_filter()
+                    self.advance()                 # كـ — فلتر مع ربط اختياري
+                    if self.check(T.IDENT):
+                        binding = self.advance().value
+                else:
+                    # الصيغة التاريخية: باستثناء هـ: — ربط عام
+                    binding = self.advance().value
+            clauses.append((filter_expr, binding, self.block()))
         if self.check(T.FINALLY):
             self.advance()
             finally_body = self.block()
-        if except_body is None and finally_body is None:
+        if not clauses and finally_body is None:
             self.error("'جرب' يتطلب 'باستثناء' أو 'اخيرا' بعده")
-        return Try(body, except_body, finally_body, except_binding, tok.line)
+        return Try(body, clauses, finally_body, tok.line)
+
+    def _class_filter(self):
+        """مسار صنف الفلتر بعد 'باستثناء': اسم أو اسم.اسم... —
+        يُقيَّم وقت الالتقاط ويجب أن يعطي صنفًا (المواصفة ق٦)."""
+        tok = self.advance()
+        e = Name(tok.value, tok.line)
+        while self.check(T.DOT):
+            self.advance()
+            name_tok = self.cur()
+            if (name_tok.type is not T.IDENT
+                    and name_tok.type not in KEYWORD_AS_NAME):
+                self.error("متوقع اسمًا بعد '.' في فلتر 'باستثناء'")
+            self.advance()
+            e = Attribute(e, name_tok.value, tok.line)
+        return e
 
     def raise_stmt(self):
         tok = self.advance()                       # ارفع
@@ -540,7 +580,7 @@ class Parser:
         return FuncDef(name, params, body, tok.line, rest=rest)
 
     def switch_stmt(self):
-        """بدّل التعبير — كتل حالة على أسطر تالية بنفس مستوى 'بدّل':
+        """بدّل التعبير — كتل حالة على أسطر تالية بنفس مستوى 'بدل':
 
         بدّل يوم
         حالة "السبت":
@@ -551,7 +591,7 @@ class Parser:
         tok = self.advance()                       # بدّل
         subject = self.expression()
         self.expect(T.NEWLINE,
-                    "متوقع سطرًا جديدًا بعد تعبير 'بدّل'")
+                    "متوقع سطرًا جديدًا بعد تعبير 'بدل'")
         cases = []
         default_body = None
         while self.check(T.CASE):
@@ -563,7 +603,7 @@ class Parser:
             self.advance()
             default_body = self.block()
         if not cases and default_body is None:
-            self.error("'بدّل' يحتاج 'حالة' واحدة على الأقل أو 'افتراض'")
+            self.error("'بدل' يحتاج 'حالة' واحدة على الأقل أو 'افتراض'")
         return Switch(subject, cases, default_body, tok.line)
 
     # ---------- مطابقة الأنماط (الإصدار 1.9) ----------
@@ -778,6 +818,11 @@ class Parser:
                 value = values[0]                  # تفكيك وقت التشغيل
             else:
                 self.error('عدد القيم لا يطابق عدد المتغيرات في الإسناد')
+            if self.check(T.ASSIGN):
+                # الإسناد المتسلسل أ = ب = ٣ كان يسقط برسالة «متوقع نهاية
+                # السطر» المضللة — رسالة دقيقة الآن (المواصفة ق١٠)
+                self.error('الإسناد المتسلسل غير مدعوم (أ = ب = ٣) — '
+                           'أسند كل متغير في جملة مستقلة')
             return Assign(exprs, value, tok.line)
 
         if self.cur().type in AUG_OPS:
@@ -823,12 +868,23 @@ class Parser:
             tok = self.advance()
             self.advance()
             right = self.additive()
+            self._reject_chained()
             return BinOp('ليس في', e, right, tok.line)
         if self.cur().type in CMP_OPS:
             tok = self.advance()
             right = self.additive()
+            self._reject_chained()
             return BinOp(CMP_OPS[tok.type], e, right, tok.line)
         return e
+
+    def _reject_chained(self):
+        """يرفض المقارنات المتسلسلة برسالة دقيقة (المواصفة ق١٠):
+        كانت تسقط برسالة مضللة مثل «متوقع تعبيرًا» أو «متوقع ')'
+        """
+        if self.cur().type in CMP_OPS or (
+                self.check(T.NOT) and self.peek(1).type is T.IN):
+            self.error('المقارنات المتسلسلة غير مدعومة (مثل أ < ب < ج) '
+                       '— ادمج الشرطين بكلمة «و»: أ < ب و ب < ج')
 
     def additive(self):
         e = self.multiplicative()

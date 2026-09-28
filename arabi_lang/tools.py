@@ -255,11 +255,11 @@ class _Linter:
                 self._define(scope, target, stmt.line, 'متغير')
             self._register_block(stmt.body, scope)
         elif isinstance(stmt, N.Try):
-            if stmt.except_binding:
-                self._define(scope, stmt.except_binding, stmt.line, 'ربط')
             self._register_block(stmt.body, scope)
-            if stmt.except_body:
-                self._register_block(stmt.except_body, scope)
+            for _flt, _binding, _cbody in stmt.clauses:
+                if _binding:
+                    self._define(scope, _binding, stmt.line, 'ربط')
+                self._register_block(_cbody, scope)
             if stmt.finally_body:
                 self._register_block(stmt.finally_body, scope)
         elif isinstance(stmt, N.Global):
@@ -439,9 +439,8 @@ class _Linter:
                 self.report(stmt.line, 'خطأ', "جملة 'استمر' خارج حلقة")
         elif isinstance(stmt, N.Try):
             self._walk_block(stmt.body, scope, in_function, loop_depth)
-            if stmt.except_body:
-                self._walk_block(stmt.except_body, scope, in_function,
-                                 loop_depth)
+            for _flt, _binding, _cbody in stmt.clauses:
+                self._walk_block(_cbody, scope, in_function, loop_depth)
             if stmt.finally_body:
                 self._walk_block(stmt.finally_body, scope, in_function,
                                  loop_depth)

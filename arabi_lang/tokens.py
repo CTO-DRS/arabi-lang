@@ -30,6 +30,7 @@ class T(Enum):
     NOT = auto()       # ليس
     TRY = auto()       # جرب
     EXCEPT = auto()    # باستثناء
+    AS = auto()        # كـ (تعليم فلتر باستثناء أو ربطه)
     FINALLY = auto()   # اخيرا
     RAISE = auto()     # ارفع
     IMPORT = auto()    # استورد
@@ -65,13 +66,14 @@ class T(Enum):
     MINUS = auto()         # -
     STAR = auto()          # *
     SLASH = auto()         # /
-    PERCENT = auto()       # %
+    PERCENT = auto()       # % أو ٪ (U+066A)
     POWER = auto()         # **
     ASSIGN = auto()        # =
     PLUS_ASSIGN = auto()   # +=
     MINUS_ASSIGN = auto()  # -=
     STAR_ASSIGN = auto()   # *=
     SLASH_ASSIGN = auto()  # /=
+    PERCENT_ASSIGN = auto()  # %= أو ٪=
     EQ = auto()            # ==
     NEQ = auto()           # !=
     LT = auto()            # <
@@ -95,6 +97,17 @@ class T(Enum):
     INDENT = auto()
     DEDENT = auto()
     EOF = auto()
+
+
+# محو التشكيل — المصدر الواحد الذي تلتزم به كل الطبقات (المواصفة ق٢):
+# المعرفات والكلمات المفتاحية والجداول المسجلة كلها على الشكل المجرّد
+STRIP_TASHKEEL = str.maketrans('', '', ''.join(chr(c) for c in
+                             range(0x064B, 0x0656)) + '\u0670')
+
+
+def strip_tashkeel(name):
+    """يمحو التشكيل من اسم — محايد للأسماء المجرّدة أصلاً."""
+    return name.translate(STRIP_TASHKEEL)
 
 
 class Token:

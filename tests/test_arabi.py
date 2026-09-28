@@ -14,7 +14,7 @@ sys.path.insert(0, ROOT)
 from arabi import run_code                                  # noqa: E402
 from arabi_lang.interpreter import Interpreter              # noqa: E402
 from arabi_lang.lexer import Lexer                           # noqa: E402
-from arabi_lang.tokens import T                              # noqa: E402
+from arabi_lang.tokens import T, strip_tashkeel       # noqa: E402
 from arabi_lang.parser import Parser                         # noqa: E402
 from arabi_lang.tools import (                                # noqa: E402
     format_source, lint_source, generate_docs, install_package, list_packages,
@@ -7991,9 +7991,9 @@ class TestProcessCodec(unittest.TestCase):
         interp = Interpreter()
         interp.run(Parser(Lexer(src).tokenize()).parse())
         from arabi_lang.processes import _make_enc_ctx, encode_value
-        enc = encode_value(interp.globals.get('شغّل'),
+        enc = encode_value(interp.globals.get('شغل'),
                            _make_enc_ctx(interp.globals))
-        self.assertEqual(enc, {'__جاهزة__': ['عمليات', 'شغّل']})
+        self.assertEqual(enc, {'__جاهزة__': ['عمليات', 'شغل']})
 
     def test_live_value_rejected_as_argument(self):
         from arabi_lang.processes import encode_value, _make_enc_ctx
@@ -8309,7 +8309,8 @@ class TestProcessPool(unittest.TestCase):
     def _func(self, src):
         """يعرف دالة عربية في مفسّر الصنف ويعيد قيمتها."""
         self.interp.run(Parser(Lexer(src).tokenize()).parse())
-        name = src.split('(')[0].replace('دالة ', '')
+        name = strip_tashkeel(
+            src.split('(')[0].replace('دالة ', ''))
         return self.interp.globals.get(name)
 
 
@@ -8473,7 +8474,7 @@ class TestDispatcher(unittest.TestCase):
             func = self._func('دالة هوية(ن):\n    أعد ن\n')
             thr_module = self.interp.globals.get('خيوط')
             live = self.interp._call_value(
-                thr_module.members['شغّل'], [func, 1], {}, None)
+                thr_module.members['شغل'], [func, 1], {}, None)
             with self.assertRaises(ArabiRuntimeError) as caught:
                 disp._server.submit(func, [func, live], {}, None)
             self.assertIn('لا يمكن إرسال', str(caught.exception))
@@ -8519,7 +8520,8 @@ class TestDispatcher(unittest.TestCase):
     def _func(self, src):
         """يعرف دالة عربية في مفسّر الصنف ويعيد قيمتها."""
         self.interp.run(Parser(Lexer(src).tokenize()).parse())
-        name = src.split('(')[0].replace('دالة ', '')
+        name = strip_tashkeel(
+            src.split('(')[0].replace('دالة ', ''))
         return self.interp.globals.get(name)
 
 
@@ -9153,6 +9155,7 @@ class TestRegistryWeb(unittest.TestCase):
     # ---------- اللوحة الرئيسية ----------
 
     def test_home_is_html_dashboard(self):
+        import arabi_lang
         status, page, ctype = self._fetch('/')
         self.assertEqual(status, 200)
         self.assertIn('text/html; charset=utf-8', ctype)
@@ -9168,7 +9171,7 @@ class TestRegistryWeb(unittest.TestCase):
         self.assertIn('<form class="search" action="/" method="get">',
                       page)
         # التذييل بروابطه الثلاثة
-        self.assertIn('مدعوم بلغة عربي 1.23.0', page)
+        self.assertIn('مدعوم بلغة عربي ' + arabi_lang.__version__, page)
         self.assertIn('href="/%D8%A7%D9%84%D9%81%D9%87%D8%B1%D8%B3.json"',
                       page)                       # /الفهرس.json مرمّزًا
         self.assertIn('الترحيب النصي', page)
@@ -9606,66 +9609,66 @@ class TestCipher(unittest.TestCase):
             'طويل\n' * 500,              # نص يمتد على كتل تيار كثيرة
         ]
         for text in cases:
-            blob = self._call('شفّر', text, 'سر_قوي_٤٢')
+            blob = self._call('شفر', text, 'سر_قوي_٤٢')
             self.assertIsInstance(blob, str)
             self.assertTrue(all(c in '0123456789abcdef' for c in blob))
             self.assertNotEqual(blob, text)
-            self.assertEqual(self._call('فكّ', blob, 'سر_قوي_٤٢'), text)
+            self.assertEqual(self._call('فك', blob, 'سر_قوي_٤٢'), text)
 
     def test_same_text_two_ciphertexts(self):
         # الراوند عشوائي لكل نداء — النص نفسه ينتج مشفرين مختلفين
-        a = self._call('شفّر', 'سر', 'م')
-        b = self._call('شفّر', 'سر', 'م')
+        a = self._call('شفر', 'سر', 'م')
+        b = self._call('شفر', 'سر', 'م')
         self.assertNotEqual(a, b)
-        self.assertEqual(self._call('فكّ', a, 'م'), 'سر')
-        self.assertEqual(self._call('فكّ', b, 'م'), 'سر')
+        self.assertEqual(self._call('فك', a, 'م'), 'سر')
+        self.assertEqual(self._call('فك', b, 'م'), 'سر')
 
     def test_wrong_key_rejected(self):
-        blob = self._call('شفّر', 'الرسالة', 'المفتاح_الصحيح')
+        blob = self._call('شفر', 'الرسالة', 'المفتاح_الصحيح')
         with self.assertRaises(ArabiRuntimeError) as caught:
-            self._call('فكّ', blob, 'مفتاح_خاطئ')
+            self._call('فك', blob, 'مفتاح_خاطئ')
         self.assertIn('فشل التحقق', str(caught.exception))
 
     def test_tampering_rejected(self):
-        blob = self._call('شفّر', 'لا تلمسني', 'مفتاح')
+        blob = self._call('شفر', 'لا تلمسني', 'مفتاح')
         raw = bytearray(bytes.fromhex(blob))
         raw[40] ^= 0x01                    # قلب بتًا وسط المشفر
         with self.assertRaises(ArabiRuntimeError) as caught:
-            self._call('فكّ', bytes(raw).hex(), 'مفتاح')
+            self._call('فك', bytes(raw).hex(), 'مفتاح')
         self.assertIn('فشل التحقق', str(caught.exception))
         raw = bytearray(bytes.fromhex(blob))
         raw[-1] ^= 0x80                    # قلب بتًا في البصمة نفسها
         with self.assertRaises(ArabiRuntimeError):
-            self._call('فكّ', bytes(raw).hex(), 'مفتاح')
+            self._call('فك', bytes(raw).hex(), 'مفتاح')
 
     def test_structural_rejections(self):
-        blob = self._call('شفّر', 'س', 'م')
+        blob = self._call('شفر', 'س', 'م')
         raw = bytes.fromhex(blob)
         with self.assertRaises(ArabiRuntimeError) as caught:
-            self._call('فكّ', raw[:10].hex(), 'م')
+            self._call('فك', raw[:10].hex(), 'م')
         self.assertIn('قصيرة جدًا', str(caught.exception))
         with self.assertRaises(ArabiRuntimeError) as caught:
-            self._call('فكّ', (b'\x00\x00' + raw[2:]).hex(), 'م')
+            self._call('فك', (b'\x00\x00' + raw[2:]).hex(), 'م')
         self.assertIn('لا تبدأ بالترويسة', str(caught.exception))
         with self.assertRaises(ArabiRuntimeError) as caught:
-            self._call('فكّ', 'ليس_ستر_سداسي', 'م')
+            self._call('فك', 'ليس_ستر_سداسي', 'م')
         self.assertIn('غير سداسي', str(caught.exception))
 
     def test_argument_validation(self):
         with self.assertRaises(ArabiRuntimeError):
-            self._call('شفّر', 'نص')                      # المفتاح ناقص
+            self._call('شفر', 'نص')                      # المفتاح ناقص
         with self.assertRaises(ArabiRuntimeError):
-            self._call('شفّر', 'نص', 'م', 'زائد')
+            self._call('شفر', 'نص', 'م', 'زائد')
         with self.assertRaises(ArabiRuntimeError):
-            self._call('شفّر', 42, 'م')
+            self._call('شفر', 42, 'م')
         with self.assertRaises(ArabiRuntimeError):
-            self._call('شفّر', 'نص', '')                  # مفتاح فارغ
+            self._call('شفر', 'نص', '')                  # مفتاح فارغ
         with self.assertRaises(ArabiRuntimeError):
-            self._call('فكّ', 'aa', 'م', 'زائد')
+            self._call('فك', 'aa', 'م', 'زائد')
         with self.assertRaises(ArabiRuntimeError):
-            self._call('فكّ', 'aa', '')                   # مفتاح فارغ
+            self._call('فك', 'aa', '')                   # مفتاح فارغ
         with self.assertRaises(ArabiRuntimeError):
-            self._call('فكّ', 42, 'م')
+            self._call('فك', 42, 'م')
 
     # ---------- مستوى البايتات (طبقة الشبكة) ----------
 
@@ -9912,8 +9915,8 @@ class TestDistributedEncryption(unittest.TestCase):
         from arabi_lang.runtime import DISPATCHER_METHODS
         keyed = self._make([0, '127.0.0.1', 'س'])
         free = self._make([0])
-        self.assertTrue(DISPATCHER_METHODS['مشفّر'](keyed, [], None))
-        self.assertFalse(DISPATCHER_METHODS['مشفّر'](free, [], None))
+        self.assertTrue(DISPATCHER_METHODS['مشفر'](keyed, [], None))
+        self.assertFalse(DISPATCHER_METHODS['مشفر'](free, [], None))
 
     def test_keyed_end_to_end(self):
         disp = self._make([0, '127.0.0.1', 'سر_مشفّر_٢١'])
