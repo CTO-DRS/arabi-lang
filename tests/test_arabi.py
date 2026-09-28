@@ -9342,7 +9342,8 @@ class TestRegistryWeb(unittest.TestCase):
             [_sys.executable, os.path.join(ROOT, 'arabi.py'),
              'حزمة', 'خادم', os.path.join(self.tmp, 'مخزن_سطري'),
              '--منفذ', str(port), '--بلا_واجهة'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT,
+            env={**os.environ, 'PYTHONUNBUFFERED': '1'})
         try:
             url = f'http://127.0.0.1:{port}/'
             deadline = _time.time() + 20
