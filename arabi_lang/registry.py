@@ -332,11 +332,12 @@ def _package_html(reg, name, metas):
             f'href="{_link("/تحميل/" + name + "/" + version)}">تحميل</a></td></tr>')
     install = (f'arabi حزمة تثبيت {_esc(name)} --الفهرس '
                f'{_esc(base)}{INDEX_PATH}')
+    no_desc = '<i style="color:#9ca3af">بلا وصف</i>'
     body = f'''<p class="bread"><a href="/">← عودة لكل الحزم</a></p>
 <section class="card" style="min-width:0">
 <b style="font-size:1.3rem">{_esc(name)}</b>
 <span class="badge">{_esc(latest['النسخة'])}</span>
-<p style="margin:8px 0 0">{_esc(desc) or '<i style=\"color:#9ca3af\">بلا وصف</i>'}</p>
+<p style="margin:8px 0 0">{_esc(desc) or no_desc}</p>
 </section>
 <h2 class="sec">التثبيت من هذا السجل</h2>
 <div class="cmd">{install}</div>
