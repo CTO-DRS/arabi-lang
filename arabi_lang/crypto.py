@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""الأمان والتشفير (الإصدار 1.19) — وحدة «تشفير» اللغة العربية.
+"""الأمان والتشفير (الإصدار 1.19، والتشفير التماثلي 1.21) — وحدة «تشفير».
 
 الفلسفة:
 - كل ما يحتاجه برنامج عربي لحماية بياناته من مكتبة بايثون القياسية
@@ -10,6 +10,15 @@
   ورموز عشوائية آمنة تشفيريًا (مفتاح_آمن و رمز_آمن و عدد_آمن)، وتشفير
   كلمات المرور بـ PBKDF2 (شفر_كلمة و تحقق_كلمة) واشتقاق المفاتيح
   (مشتق) — البصمة لا تُخزَّن أبدًا، الملح عشوائي لكل كلمة.
+- التشفير التماثلي (1.21): شفرة انسيابية بتيار مفاتيح HMAC-SHA256 في
+  نمط العدّاد CTR — كل كتلة ٣٢ بايتًا هي HMAC(مفتاح_التشفير، راوند ||
+  عدّاد ٨ بايتات) وتُدمج بالبيانات بـ XOR، فلا كتلة تتكرر أبدًا —
+  وكل نص مشفر يُوقَّع بـ HMAC(مفتاح_التوثيق، راوند || المشفر) تتحقق
+  المقارنة الزمنية منه قبل فك أي بايت فلا تعديل يمر صامتًا. الراوند
+  عشوائي ١٢ بايتًا لكل نص، ومفاتيح القناة مشتقة من السر المشترك بـ
+  HMAC بسياقين منفصلين فلا يُعاد استخدام مفتاح لغرضين. المكوّنات كلها
+  مجرّبة قياسيًا (hmac وhashlib وsecrets) والتركيب مألوف: تشفير ثم
+  توثيق Encrypt-then-MAC كما في TLS.
 - الدوال موقّعة بنفس عقد الوحدات الجاهزة: (المعاملات، رقم السطر)
   وترفع ArabiRuntimeError برسائل عربية واضحة عند كل خطأ.
 
@@ -21,6 +30,7 @@ import base64
 import hashlib
 import hmac
 import secrets as _secrets
+import struct
 
 from .errors import ArabiRuntimeError
 
@@ -372,3 +382,145 @@ def verify_challenge(key, nonce, signature):
     # المقارنة على بايتات utf-8 — ترفض شكلاً بالضبط ولا تستثني أبدًا
     return hmac.compare_digest(expected.encode('utf-8'),
                                signature.encode('utf-8'))
+
+
+# ================== التشفير التماثلي (الإصدار 1.21) ==================
+#
+# شفرة انسيابية بتيار مفاتيح مشتق من HMAC-SHA256 في نمط العدّاد:
+# كتلة التيار رقم i = HMAC(مفتاح_التشفير، راوند || عدّاد ٨ بايتات)
+# وتدمج بالبيانات بـ XOR — فطول المشفر = طول الأصل بالضبط ولا تكرار
+# لأي كتلة. المشفر يُوقَّع كله بـ HMAC(مفتاح_التوثيق، راوند || مشفر)
+# (Encrypt-then-MAC) ويتحقق قبل فك أي بايت — فأي تعديل أو مفتاح خاطئ
+# يُكشف قبل أن يلمس النص الأصلي.
+
+_CIPHER_MAGIC = b'\xa7\xd1'      # ترويسة كل نص مشفر — تُميّزه عن أي بيانات خام
+_CIPHER_NONCE_BYTES = 12         # الراوند العشوائي لكل نص مشفر
+_TAG_BYTES = 32                  # بصمة التوثيق HMAC-SHA256
+_MIN_CIPHER_BLOB = (_CIPHER_NONCE_BYTES + _TAG_BYTES + 2)  # أدنى نص مشفر سليم
+_COUNTER = struct.Struct('>Q')   # عدّاد الكتل ٨ بايتات بأعلى بت أولًا
+
+# سياقا اشتقاق مفتاحي القناة — بادئات تمنع إعادة استخدام مفتاح واحد
+# لغرضين (التشفير ≠ التوثيق ≠ توقيع التحدي) كأي بروتوكول محترم
+_ENC_CONTEXT = 'عربي-مشفّر-مفتاح-1'.encode('utf-8')
+_MAC_CONTEXT = 'عربي-مشفّر-توثيق-1'.encode('utf-8')
+
+
+def _channel_keys(master, salt=b''):
+    """يشتق زوج مفاتيح القناة (تشفير، توثيق) من سر مشترك.
+
+    master بايتات السر المشترك (مفتاح الموزع والعامل مثلًا) وsalt راوند
+    اتصال (تحدي المصافحة) يفصل جلسة عن أخرى فلا تعاد استخدام تيار
+    المفاتيح بين اتصالين وإن تشابهت البيانات.
+    """
+    if isinstance(master, str):
+        master = master.encode('utf-8')
+    enc = hmac.new(_ENC_CONTEXT + master, salt, hashlib.sha256).digest()
+    mac = hmac.new(_MAC_CONTEXT + master, salt, hashlib.sha256).digest()
+    return enc, mac
+
+
+def _keystream_xor(key, nonce, data):
+    """يدمج البيانات بتيار المفاتيح بـ XOR — التشفير والفك فيهما سواء."""
+    out = bytearray(len(data))
+    blocks = (len(data) + _TAG_BYTES - 1) // _TAG_BYTES  # كتلة ٣٢ بايتًا
+    for counter in range(blocks):
+        block = hmac.new(key, nonce + _COUNTER.pack(counter),
+                         hashlib.sha256).digest()
+        start = counter * _TAG_BYTES
+        chunk = data[start:start + _TAG_BYTES]
+        out[start:start + len(chunk)] = bytes(
+            b ^ k for b, k in zip(chunk, block))
+    return bytes(out)
+
+
+def encrypt_payload(data, enc_key, mac_key):
+    """يشفر بايتات نصية ويوثقها — ترويسة + راوند + مشفر + بصمة.
+
+    data بايتات الأصل (فارغة مسموحة)، enc_key/mac_key مفتاحا القناة
+    من _channel_keys — يعيد بايتات آمنة للنقل تبدأ بالترويسة السحرية.
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        raise ArabiRuntimeError(
+            f'التشفير يتوقع بايتات لكنه استلم {type(data).__name__}')
+    nonce = _secrets.token_bytes(_CIPHER_NONCE_BYTES)
+    cipher = _keystream_xor(enc_key, nonce, bytes(data))
+    tag = hmac.new(mac_key, nonce + cipher, hashlib.sha256).digest()
+    return _CIPHER_MAGIC + nonce + cipher + tag
+
+
+def decrypt_payload(blob, enc_key, mac_key):
+    """يفك بايتات مشفرة بعد التحقق من بصمتها بمقارنة زمن ثابت.
+
+    أي تلاعب ببادئة واحدة أو مفتاح خاطئ يرفع خطأ عربيًا قبل فك أي
+    بايت — والناتج بايتات الأصل كما شُفرت بالضبط.
+    """
+    if not isinstance(blob, (bytes, bytearray, memoryview)):
+        raise ArabiRuntimeError(
+            f'فك التشفير يتوقع بايتات لكنه استلم {type(blob).__name__}')
+    blob = bytes(blob)
+    if len(blob) < _MIN_CIPHER_BLOB:
+        raise ArabiRuntimeError(
+            'البيانات المشفرة قصيرة جدًا — لا تحمل نصًا مشفرًا سليمًا '
+            f'(الحد الأدنى {_MIN_CIPHER_BLOB} بايتًا)')
+    if blob[:len(_CIPHER_MAGIC)] != _CIPHER_MAGIC:
+        raise ArabiRuntimeError(
+            'البيانات المشفرة لا تبدأ بالترويسة المتوقعة — ليست من '
+            'مخرجات شفّر أو تالفة البداية')
+    nonce = blob[len(_CIPHER_MAGIC):
+                 len(_CIPHER_MAGIC) + _CIPHER_NONCE_BYTES]
+    body = blob[len(_CIPHER_MAGIC) + _CIPHER_NONCE_BYTES:-_TAG_BYTES]
+    tag = blob[-_TAG_BYTES:]
+    expected = hmac.new(mac_key, nonce + body, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected, tag):
+        raise ArabiRuntimeError(
+            'فشل التحقق من البيانات المشفرة — البصمة لا تطابق '
+            '(مفتاح خاطئ أو بيانات معدلة في الطريق)')
+    return _keystream_xor(enc_key, nonce, body)
+
+
+def _crypto_encrypt(args, line):
+    """تشفير.شفّر(النص، المفتاح) — يشفر نصًا ويعيده سترًا عشريًا.
+
+    الشفرة انسيابية HMAC-SHA256 بتيار عدّاد موقّعة Encrypt-then-MAC
+    (التفصيل أعلاه) — نفس الآلية التي تحمي أعمال الشبكة الموزعة 1.21.
+    الناتج ستر عشري يحمل الترويسة والراوند والمشفر والبصمة — فكّه بـ
+    فكّ بنفس المفتاح حرفيًا، وأي مفتاح آخر يرفض بلا تردد.
+    """
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'شفّر' تأخذ معاملين (النص ثم المفتاح) لكنها استلمت "
+            f'{len(args)}', line)
+    text = _text(args[0], 'شفّر', line)
+    key = _text(args[1], 'شفّر', line)
+    if not key:
+        raise ArabiRuntimeError(
+            "مفتاح 'شفّر' لا يكون فارغًا — مرر نصًا يحمل السر (أنشئه "
+            'بتشفير.مفتاح_آمن())', line)
+    enc, mac = _channel_keys(key)
+    return encrypt_payload(text.encode('utf-8'), enc, mac).hex()
+
+
+def _crypto_decrypt(args, line):
+    """تشفير.فكّ(الستر المشفر، المفتاح) — يفك نصًا شفره شفّر.
+
+    يتحقق من البصمة قبل فك أي بايت — مفتاح خاطئ أو بيانات معدلة أو
+    ستر فاسد يرفع خطأ عربيًا واضحًا ولا يعيد أبدا نصًا مشكوكًا فيه.
+    """
+    if len(args) != 2:
+        raise ArabiRuntimeError(
+            f"'فكّ' تأخذ معاملين (الستر المشفر ثم المفتاح) لكنها "
+            f'استلمت {len(args)}', line)
+    blob_text = _text(args[0], 'فكّ', line)
+    key = _text(args[1], 'فكّ', line)
+    if not key:
+        raise ArabiRuntimeError(
+            "مفتاح 'فكّ' لا يكون فارغًا — هو نفسه المفتاح الذي شفّر "
+            'النص', line)
+    try:
+        blob = bytes.fromhex(blob_text)
+    except ValueError:
+        raise ArabiRuntimeError(
+            "'فكّ' استلم سترًا غير سداسي عشري — ناتج شفّر يُكتب بأحرف "
+            '0-9 وa-f فقط دون أي فاصل', line)
+    enc, mac = _channel_keys(key)
+    return decrypt_payload(blob, enc, mac).decode('utf-8')

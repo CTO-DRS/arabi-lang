@@ -21,9 +21,19 @@
   إلا بتوقيع HMAC-SHA256 على تحدٍّ عشوائي (nonce) يرسله الموزع لحظة
   الاتصال، والتحقق بمقارنة زمن ثابت فلا يكشف التوقيت شيئًا — والموزع
   بلا مفتاح يعمل كالسابق (توافق كامل مع 1.18) مع رسالة ترحيب
-  بلا_مفتاح تخبر العامل المفتاحي فورًا أن التكوين غير متوافق. شغّل
-  الموزع المفتاحي على شبكة موثوقة كذلك — المصادقة تمنع العمالة
-  الأجنبية، لا تشفير البيانات العابرة.
+  بلا_مفتاح تخبر العامل المفتاحي فورًا أن التكوين غير متوافق.
+- التشفير الكامل (1.21): في الموزع المفتاحي لم تعد المصادقة تحمي
+  التسجيل وحده — فبعد نجاحها تُشتق مفاتيح جلسة من المفتاح المشترك
+  وتحدي المصافحة (HMAC بسياقين منفصلين: تشفير وتوثيق) ويُغلَّف المقبس
+  بقناة مشفرة: كل إطار أعمال أو نتائج أو وداع يشفّر بتيار مفاتيح
+  HMAC-SHA256 في نمط العدّاد ويُوقَّع Encrypt-then-MAC قبل الإرسال
+  ويتحقق المستقبل من البصمة بمقارنة زمن ثابت قبل فك أي بايت — فلا
+  يقرأ تنصّت على السلك كود مهامك ولا نتائجها. الإطارات المشفرة تبدأ
+  بترويسة سحرية تميزها فميّز العامل رفض المصافحة (نص صريح) من
+  قناة مفعلة، والمسار الحر يبقى pickle خامًا كما في 1.18 تمامًا.
+  الوضع المفتاحي يتطلب الموزع والعامل كليهما نسخة 1.21 على الأقل —
+  عامل قديم عند موزع 1.21 مفتاحي يُسقط اتصاله فورًا (فشل مغلق لا
+  صمت أمني)، والمسار الحر متوافق بالاتجاهين كما كان.
 
 هذا الملف يحمّل أسماء القيم من runtime فقط — وruntime لا يستورد
 هذا الملف إلا داخل دالة التثبيت (بعد اكتمال تعريفه) تفاديًا للدورانية.
@@ -38,8 +48,10 @@ import threading
 import time
 from collections import deque
 
+from .crypto import (sign_challenge, verify_challenge, _channel_keys,
+                     encrypt_payload, decrypt_payload, _CIPHER_MAGIC,
+                     _CIPHER_NONCE_BYTES, _TAG_BYTES)
 from .errors import ArabiError, ArabiRuntimeError
-from .crypto import sign_challenge, verify_challenge
 from .processes import (
     _run_job, _encode_error, _validate_callable,
     encode_value, decode_value, _make_enc_ctx, _encode_root,
@@ -55,21 +67,29 @@ POLL_INTERVAL = 0.01       # نبضة استطلاع حلقات الانتظار
 MAX_FRAME = 256 * 1024 * 1024   # الحد الأعلى لحجم الإطار الواحد (256 م.ب)
 
 _HEAD = struct.Struct('>I')    # رأس الإطار: طول بياناته بأربعة بايتات
+_CHANNEL_OVERHEAD = (len(_CIPHER_MAGIC) + _CIPHER_NONCE_BYTES
+                     + _TAG_BYTES)   # زيادة الإطار المشفر على الأصل
 
 
 # ================== الإطارات الشبكية ==================
 #
 # كل رسالة قائمة منقطّة تسبقها ٤ بايتات بطولها — فالقارئ يعرف متى
 # تكتمل الرسالة مهما تجاورت الحزم، والقيمة القصوى تحرس الحجم الوهمي.
+# الإطار المشفر (1.21) يحمل البايتات المشفرة الموثقة نفسها داخل طول
+# الـ ٤ بايتات — فالطول الشبكي يشمل ترويسة القناة وراوندها وبصمتها.
 
-def send_frame(sock, obj):
-    """يرسل رسالة في إطار موسوم بالطول — ٤ بايتات رأسًا ثم البيانات."""
-    blob = pickle.dumps(obj)
+def send_raw_frame(sock, blob):
+    """يرسل بايتات خامًا في إطار موسوم بالطول — ٤ بايتات رأسًا ثمها."""
     if len(blob) > MAX_FRAME:
         raise ArabiRuntimeError(
             f'حجم الرسالة الموزعة ({len(blob)} بايتًا) يتجاوز الحد '
             f'الأعلى المسموح ({MAX_FRAME} بايتًا)')
     sock.sendall(_HEAD.pack(len(blob)) + blob)
+
+
+def send_frame(sock, obj):
+    """يرسل رسالة منقطّة في إطار موسوم بالطول — مسار حر (بلا تشفير)."""
+    send_raw_frame(sock, pickle.dumps(obj))
 
 
 def _recv_exact(sock, count):
@@ -85,14 +105,60 @@ def _recv_exact(sock, count):
     return b''.join(chunks)
 
 
-def recv_frame(sock):
-    """يقرأ إطارًا كاملًا ويعيد رسالته المنقطّة."""
+def recv_raw_frame(sock, extra=0):
+    """يقرأ إطارًا كاملًا ويعيد بايتاته الخام — دون فك أي ترميز.
+
+    extra سماح الحجم الإضافي للإطارات المشفرة (ترويسة القناة وراوند
+    وبصمة فوق الأصل) — فالحد الأعلى يحمي الأصل لا يرفض المشفر.
+    """
     (size,) = _HEAD.unpack(_recv_exact(sock, _HEAD.size))
-    if size > MAX_FRAME:
+    if size > MAX_FRAME + extra:
         raise ArabiRuntimeError(
             f'حجم الإطار الواصل ({size} بايتًا) يتجاوز الحد الأعلى '
-            f'المسموح ({MAX_FRAME} بايتًا) — اتصال غير صالح')
-    return pickle.loads(_recv_exact(sock, size))
+            f'المسموح ({MAX_FRAME + extra} بايتًا) — اتصال غير صالح')
+    return _recv_exact(sock, size)
+
+
+def recv_frame(sock):
+    """يقرأ إطارًا كاملًا ويعيد رسالته المنقطّة — مسار حر (بلا تشفير)."""
+    return pickle.loads(recv_raw_frame(sock))
+
+
+# ================== القناة المشفرة (1.21) ==================
+
+class SecureChannel:
+    """مقبس مغلَّف بقناة مشفرة موثقة — يظهر للطرفين إرسالًا واستقبالًا.
+
+    كل رسالة: pickle ثم تشفير بتيار HMAC-SHA256 العدّادي (راوند عشوائي
+    لكل رسالة) ثم توقيع Encrypt-then-MAC — والمستقبل يتحقق من البصمة
+    بمقارنة زمن ثابت قبل فك أي بايت فلا تعديل أو مفتاح خاطئ يمر صامتًا.
+    مفاتيح الجلسة مشتقة من المفتاح المشترك وتحدي المصافحة فكل اتصال
+    له تيار مستقل — وإعادة إرسال إطار قديم على اتصال جديد تُرفض بصمة.
+    """
+
+    __slots__ = ('sock', '_enc', '_mac')
+
+    def __init__(self, sock, enc_key, mac_key):
+        self.sock = sock
+        self._enc = enc_key
+        self._mac = mac_key
+
+    @classmethod
+    def from_master(cls, sock, master, salt):
+        """يشتق مفاتيح الجلسة من السر المشترك وتحدي الاتصال ويغلف."""
+        enc, mac = _channel_keys(master, salt)
+        return cls(sock, enc, mac)
+
+    def send(self, obj):
+        """يشفر الرسالة ويوثقها ثم يرسلها في إطار موسوم بالطول."""
+        send_raw_frame(self.sock,
+                       encrypt_payload(pickle.dumps(obj),
+                                       self._enc, self._mac))
+
+    def recv(self):
+        """يقرأ إطارًا ويتحقق من بصمته ثم يفكه ويعيد رسالته."""
+        blob = recv_raw_frame(self.sock, extra=_CHANNEL_OVERHEAD)
+        return pickle.loads(decrypt_payload(blob, self._enc, self._mac))
 
 
 # ================== العامل ==================
@@ -108,6 +174,11 @@ def run_worker(host, port, stop_event=None, key=None):
     المفتاح (1.19): إذا مرر فينتظر العامل تحدي الموزع ويوقعه
     HMAC-SHA256 بالمفتاح المشترك — والموزع بلا مفتاح (أو بمفتاح
     آخر) يرسل رفضًا واضحًا فلا جدال صامت في أي اتجاه.
+    التشفير (1.21): بعد قبول المصافحة تشتق مفاتيح الجلسة من المفتاح
+    وتحديها فيغلف الاتصال بقناة مشفرة موثقة — أول إطار بعد الترحيب
+    هو الدليل: ترويسته السحرية تفعّل القناة، وغير المشفر يكون رفضًا
+    نصيًا يعرض كما هو. عامل قديم (<1.21) عند موزع 1.21 مفتاحي لا
+    يفهم الإطارات المشفرة فيُسقط — فشل مغلق حصين لا صمت أمني.
     """
     _check_key(key)
     try:
@@ -118,6 +189,7 @@ def run_worker(host, port, stop_event=None, key=None):
             f'تعذر الاتصال بالموزع {host}:{port} — {exc}')
     sock.settimeout(CONNECT_TIMEOUT)      # مهلة المصافحة ثم استطلاع طويل
     try:
+        challenge = None                  # تحدي المصافحة لمشتقات القناة
         if key is not None:
             # العامل المفتاحي ينتظر تحدي الموزع أولًا ثم يوقع
             try:
@@ -138,23 +210,45 @@ def run_worker(host, port, stop_event=None, key=None):
                 raise ArabiRuntimeError(
                     'أول رسالة من الموزع ليست تحدي مصافحة — '
                     'البروتوكولان غير متوافقين')
-            signature = sign_challenge(key, msg[1])
+            challenge = msg[1]
+            signature = sign_challenge(key, challenge)
             send_frame(sock, ('مرحبا', os.getpid(),
                               socket.gethostname(), signature))
         else:
             # التسجيل: الوصف (معرف العملية واسم الجهاز) للتوثيق والتشخيص
             send_frame(sock, ('مرحبا', os.getpid(), socket.gethostname()))
         sock.settimeout(WORKER_TIMEOUT)
+        chan = None                       # القناة المشفرة بعد التسجيل
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
             try:
-                msg = recv_frame(sock)
+                blob = recv_raw_frame(
+                    sock, extra=_CHANNEL_OVERHEAD if chan is not None
+                    else 0)
             except socket.timeout:
                 continue          # نبضة استطلاع — تحقق من الإيقاف ثم عُد
             except (ConnectionError, OSError):
                 raise ArabiRuntimeError(
                     'انقطع الاتصال بالموزع فجأة دون رسالة وداع')
+            except ArabiError:
+                raise
+            if chan is None:
+                if blob[:len(_CIPHER_MAGIC)] == _CIPHER_MAGIC:
+                    # أول إطار مشفر — الموزع قبلك وفعّل قناته
+                    if key is None or challenge is None:
+                        raise ArabiRuntimeError(
+                            'وصل إطار مشفر لعامل بلا مفتاح — بروتوكول '
+                            'غير متوافق')
+                    chan = SecureChannel.from_master(
+                        sock, key, challenge)
+                    msg = pickle.loads(
+                        decrypt_payload(blob, chan._enc, chan._mac))
+                else:
+                    msg = pickle.loads(blob)   # رفض مصافحة نصي كما كان
+            else:
+                msg = pickle.loads(
+                    decrypt_payload(blob, chan._enc, chan._mac))
             if not (isinstance(msg, tuple) and msg):
                 continue          # رسالة شاذة — تجاهل صامت (توافق مستقبلي)
             kind = msg[0]
@@ -178,7 +272,11 @@ def run_worker(host, port, stop_event=None, key=None):
                     rkind, rblob = 'عطل', pickle.dumps(
                         f'عطل داخل العامل: {exc}')
                 try:
-                    send_frame(sock, ('نتيجة', job_id, rkind, rblob))
+                    result = ('نتيجة', job_id, rkind, rblob)
+                    if chan is not None:
+                        chan.send(result)
+                    else:
+                        send_frame(sock, result)
                 except OSError:
                     raise ArabiRuntimeError(
                         'تعذر إرسال نتيجة المهمة إلى الموزع — انقطع '
@@ -238,15 +336,23 @@ def parse_target(target):
 # ================== خادم الموزع ==================
 
 class _WorkerConn:
-    """اتصال عامل مسجل — بمقبسه وعنوانه ووصفه وعمله الطائر الحالي."""
+    """اتصال عامل مسجل — بمقبسه وعنوانه ووصفه وقناته وعمله الطائر."""
 
-    __slots__ = ('sock', 'addr', 'info', 'inflight')
+    __slots__ = ('sock', 'addr', 'info', 'chan', 'inflight')
 
-    def __init__(self, sock, addr, info):
+    def __init__(self, sock, addr, info, chan=None):
         self.sock = sock
         self.addr = addr
         self.info = info
+        self.chan = chan            # قناة مشفرة (موزع مفتاحي) أو لا شيء
         self.inflight = None        # (معرف المهمة، حزمتها) أو لا شيء
+
+    def send(self, obj):
+        """يرسل رسالة عبر القناة المشفرة أو الحرة بحسب وضع الاتصال."""
+        if self.chan is not None:
+            self.chan.send(obj)
+        else:
+            send_frame(self.sock, obj)
 
 
 class _Server:
@@ -303,6 +409,10 @@ class _Server:
         with self._lock:
             return self._total
 
+    def encrypted(self):
+        """هل قناة هذا الموزع مشفرة؟ (الصح إذا بدأ بمفتاح سري)."""
+        return self._key is not None
+
     # ---------- الاستقبال والتسجيل ----------
 
     def _accept_loop(self):
@@ -326,6 +436,9 @@ class _Server:
         إلا عاملًا وقّعه بالمفتاح المشترك — والباقي يرفض برسالة عربية
         واضحة. الموزع الحر يرسل إعلان بلا_مفتاح فيعرف العامل المفتاحي
         فورًا أن التكوين غير متوافق بلا أي انتظار.
+        التشفير (1.21): بعد قبول توقيع العامل تُشتق مفاتيح الجلسة من
+        المفتاح وتحديه ويغلَّف الاتصال بقناة مشفرة — فمهما قرأ تنصّت
+        لاحقًا لن يفهم إطارًا واحدًا من أعمال العمالة أو نتائجها.
         """
         if self._key is not None:
             nonce = _secrets.token_bytes(NONCE_BYTES)
@@ -348,6 +461,7 @@ class _Server:
             return
         hello_ok = (isinstance(msg, tuple) and msg
                     and msg[0] == 'مرحبا')
+        chan = None
         if hello_ok and self._key is not None:
             hello_ok = (len(msg) == 4
                         and verify_challenge(self._key, nonce, msg[3]))
@@ -360,25 +474,33 @@ class _Server:
                     pass
                 self._close_quietly(sock)
                 return
+            # توقيع سليم — القناة تُشتق من المفتاح وتحديه فتفرّد الجلسة
+            chan = SecureChannel.from_master(sock, self._key, nonce)
         if not hello_ok:
             self._close_quietly(sock)     # أول رسالة ليست تسجيلًا صالحًا
             return
         with self._lock:
             if self._stopping:
                 try:
-                    send_frame(sock, ('وداع',))
+                    if chan is not None:
+                        chan.send(('وداع',))
+                    else:
+                        send_frame(sock, ('وداع',))
                 except OSError:
                     pass
                 self._close_quietly(sock)
                 return
             self._worker_seq += 1
             wid = self._worker_seq
-            self._workers[wid] = _WorkerConn(sock, addr, msg[1:3])
+            self._workers[wid] = _WorkerConn(sock, addr, msg[1:3], chan)
             self._idle.append(wid)
         self._pump()
         while True:
             try:
-                msg = recv_frame(sock)
+                if chan is not None:
+                    msg = chan.recv()
+                else:
+                    msg = recv_frame(sock)
             except socket.timeout:
                 if self._stopping:
                     break
@@ -432,7 +554,11 @@ class _Server:
                 sends.append((wid, conn.sock, job_id, blob))
         for wid, sock, job_id, blob in sends:
             try:
-                send_frame(sock, ('عمل', job_id, blob))
+                conn = self._workers.get(wid)
+                if conn is not None:
+                    conn.send(('عمل', job_id, blob))
+                else:
+                    continue              # زال العامل — أُعيد عمله
             except OSError:
                 self._send_failed(wid, job_id, blob)
 
@@ -566,9 +692,11 @@ class _Server:
         for conn in workers:                 # وداع بنظافة ثم إغلاق
             try:
                 conn.sock.settimeout(2)
-                send_frame(conn.sock, ('وداع',))
+                conn.send(('وداع',))
             except OSError:
                 pass
+            except ArabiError:
+                pass                # قناة مشفرة رفض وداعًا — يُغلق كذلك
             self._close_quietly(conn.sock)
         try:
             self._server_sock.close()
@@ -592,8 +720,11 @@ def _dist_create(interp, args, line):
     المنفذ الافتراضي 7700 والصفر يعني اختيارًا تلقائيًا من النظام
     (مفيد للاختبارات والبرامج المتعددة)، والعنوان الافتراضي 127.0.0.1
     (محلي فقط) — للشبكة العامة مرر '0.0.0.0' بوعي كامل. المفتاح
-    الثالث (1.19) يشغل المصادقة: لا عامل يُسجّل إلا بتوقيع HMAC على
-    تحدي عشوائي بمفتاحه — أنشئه بتشفير.مفتاح_آمن() وشاركه سرًا.
+    الثالث (1.19) يشغل المصادقة والتشفير معًا: لا عامل يُسجّل إلا
+    بتوقيع HMAC على تحدي عشوائي بمفتاحه، وبعد القبول تُشتق مفاتيح
+    الجلسة من المفتاح وتحديه فتُشفَّر كل أعمال العمالة ونتائجها
+    (1.21) — أنشئ المفتاح بتشفير.مفتاح_آمن() وشاركه سرًا. موزع.مشفّر()
+    تعيد صح في هذا الوضع، والموزع الحر يبقى كما هو بلا تشفير.
     """
     port = DEFAULT_PORT
     host = '127.0.0.1'

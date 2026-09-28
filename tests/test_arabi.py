@@ -9188,7 +9188,7 @@ class TestCrypto(unittest.TestCase):
         for broken in ({'الخوارزمية': 'x', 'الجولات': 1000,
                         'الملح': 'aa', 'البصمة': 'bb'},
                        {'الخوارزمية': 'pbkdf2_sha256', 'الجولات': 1000,
-                        'الملح': '!!', 'البصمة': 'bb'},
+                        'الملح': '!!', 'البصمة': 'b'},
                        dict(record, الملح='zz')):
             with self.assertRaises(ArabiRuntimeError):
                 self._call('تحقق_كلمة', 'كلمة_سر', broken)
@@ -9236,6 +9236,141 @@ class TestCrypto(unittest.TestCase):
         self.assertFalse(verify_challenge('سر مشترك', nonce, None))
         # التوقيع حتمي بنفس المدخلات ومتغير بغيرها
         self.assertEqual(sig, sign_challenge('سر مشترك', nonce))
+
+
+class TestCipher(unittest.TestCase):
+    """الشفرة التماثلية (1.21) — شفّر/فكّ على مستوى اللغة والبايتات."""
+
+    def setUp(self):
+        self.interp = Interpreter(use_vm=False)
+        self.interp.run(Parser(Lexer('استورد تشفير\n').tokenize()).parse())
+        self.mod = self.interp.globals.get('تشفير')
+
+    def _call(self, name, *args):
+        fn = self.mod.members[name]
+        return self.interp._call_value(fn, list(args), {}, None)
+
+    # ---------- مستوى اللغة ----------
+
+    def test_language_roundtrip(self):
+        cases = [
+            'مرحبا بالعالم العربي',
+            'English mixed مع العربية 123',
+            'علامات!، ؟ (أقواس) "اقتباس"',
+            '',                          # النص الفارغ يشفّر ويُفك كذلك
+            'طويل\n' * 500,              # نص يمتد على كتل تيار كثيرة
+        ]
+        for text in cases:
+            blob = self._call('شفّر', text, 'سر_قوي_٤٢')
+            self.assertIsInstance(blob, str)
+            self.assertTrue(all(c in '0123456789abcdef' for c in blob))
+            self.assertNotEqual(blob, text)
+            self.assertEqual(self._call('فكّ', blob, 'سر_قوي_٤٢'), text)
+
+    def test_same_text_two_ciphertexts(self):
+        # الراوند عشوائي لكل نداء — النص نفسه ينتج مشفرين مختلفين
+        a = self._call('شفّر', 'سر', 'م')
+        b = self._call('شفّر', 'سر', 'م')
+        self.assertNotEqual(a, b)
+        self.assertEqual(self._call('فكّ', a, 'م'), 'سر')
+        self.assertEqual(self._call('فكّ', b, 'م'), 'سر')
+
+    def test_wrong_key_rejected(self):
+        blob = self._call('شفّر', 'الرسالة', 'المفتاح_الصحيح')
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._call('فكّ', blob, 'مفتاح_خاطئ')
+        self.assertIn('فشل التحقق', str(caught.exception))
+
+    def test_tampering_rejected(self):
+        blob = self._call('شفّر', 'لا تلمسني', 'مفتاح')
+        raw = bytearray(bytes.fromhex(blob))
+        raw[40] ^= 0x01                    # قلب بتًا وسط المشفر
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._call('فكّ', bytes(raw).hex(), 'مفتاح')
+        self.assertIn('فشل التحقق', str(caught.exception))
+        raw = bytearray(bytes.fromhex(blob))
+        raw[-1] ^= 0x80                    # قلب بتًا في البصمة نفسها
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('فكّ', bytes(raw).hex(), 'مفتاح')
+
+    def test_structural_rejections(self):
+        blob = self._call('شفّر', 'س', 'م')
+        raw = bytes.fromhex(blob)
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._call('فكّ', raw[:10].hex(), 'م')
+        self.assertIn('قصيرة جدًا', str(caught.exception))
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._call('فكّ', (b'\x00\x00' + raw[2:]).hex(), 'م')
+        self.assertIn('لا تبدأ بالترويسة', str(caught.exception))
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            self._call('فكّ', 'ليس_ستر_سداسي', 'م')
+        self.assertIn('غير سداسي', str(caught.exception))
+
+    def test_argument_validation(self):
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفّر', 'نص')                      # المفتاح ناقص
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفّر', 'نص', 'م', 'زائد')
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفّر', 42, 'م')
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('شفّر', 'نص', '')                  # مفتاح فارغ
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('فكّ', 'aa', 'م', 'زائد')
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('فكّ', 'aa', '')                   # مفتاح فارغ
+        with self.assertRaises(ArabiRuntimeError):
+            self._call('فكّ', 42, 'م')
+
+    # ---------- مستوى البايتات (طبقة الشبكة) ----------
+
+    def test_payload_roundtrip_sizes(self):
+        import os as _os
+        from arabi_lang.crypto import (_channel_keys, encrypt_payload,
+                                       decrypt_payload)
+        enc, mac = _channel_keys('سر_القناة', 'راوند-ثابت'.encode('utf-8'))
+        for size in (0, 1, 31, 32, 33, 64, 1000, 70000):
+            data = _os.urandom(size)
+            blob = encrypt_payload(data, enc, mac)
+            # ترويسة ٢ + راوند ١٢ + بصمة ٣٢ = ٤٦ بايتًا فوق الأصل
+            self.assertEqual(len(blob), size + 46)
+            self.assertEqual(decrypt_payload(blob, enc, mac), data)
+
+    def test_payload_rejects_garbage(self):
+        from arabi_lang.crypto import (_channel_keys, encrypt_payload,
+                                       decrypt_payload)
+        enc, mac = _channel_keys('سر', 'صل'.encode('utf-8'))
+        with self.assertRaises(ArabiRuntimeError):
+            encrypt_payload('نص_وليس_بايتات', enc, mac)
+        with self.assertRaises(ArabiRuntimeError):
+            decrypt_payload('قصير'.encode('utf-8'), enc, mac)
+        blob = bytearray(encrypt_payload('بيانات'.encode('utf-8'), enc, mac))
+        blob[20] ^= 0xFF
+        with self.assertRaises(ArabiRuntimeError) as caught:
+            decrypt_payload(bytes(blob), enc, mac)
+        self.assertIn('فشل التحقق', str(caught.exception))
+
+    def test_channel_keys_separation(self):
+        from arabi_lang.crypto import _channel_keys
+        enc1, mac1 = _channel_keys('سر', 'جلسة'.encode('utf-8'))
+        enc2, mac2 = _channel_keys('سر', 'جلسة'.encode('utf-8'))
+        self.assertEqual((enc1, mac1), (enc2, mac2))   # حتمية بالمدخلات
+        enc3, mac3 = _channel_keys('سر', 'جلسة_أخرى'.encode('utf-8'))
+        self.assertNotEqual(enc1, enc3)
+        self.assertNotEqual(mac1, mac3)
+        # سر نصًا أو بايتات — المفاتيح نفسها
+        enc4, mac4 = _channel_keys('سر'.encode('utf-8'), 'جلسة'.encode('utf-8'))
+        self.assertEqual((enc1, mac1), (enc4, mac4))
+        # مفتا التشفير والتوثيق مختلفان أصلًا — لا مفتاح لغرضين
+        self.assertNotEqual(enc1, mac1)
+
+    def test_keystream_involutive(self):
+        from arabi_lang.crypto import _keystream_xor
+        data = bytes(range(256)) * 3
+        nonce = 'راوند_12بايت'.encode('utf-8')
+        once = _keystream_xor('م'.encode('utf-8'), nonce, data)
+        self.assertNotEqual(once, data)      # تغيّر فعلًا
+        self.assertEqual(_keystream_xor('م'.encode('utf-8'), nonce, once), data)  # والثانية تعيد الأصل
 
 
 class TestDistributedAuth(unittest.TestCase):
@@ -9351,6 +9486,228 @@ class TestDistributedAuth(unittest.TestCase):
             _dist_worker(self.interp, ['h', 7700, ''], None)
         with self.assertRaises(ArabiRuntimeError):
             _dist_worker(self.interp, ['h', 7700, 'س', 'زائد'], None)
+
+
+class TestDistributedEncryption(unittest.TestCase):
+    """التشفير الكامل للبيانات العابرة (1.21) — سلك حقيقي وتنصّت وهمي."""
+
+    MARKER = 'علامة_سرية_مميزة_٢٠٢١'
+
+    def setUp(self):
+        import threading
+        self.threading = threading
+        from arabi_lang.distributed import _dist_create, run_worker
+        self._dist_create = _dist_create
+        self._run_worker = run_worker
+        self.interp = Interpreter(use_vm=False)
+        self.interp.run(Parser(Lexer(
+            'دالة جمع(أ، ب):\n    أعد أ + ب\n').tokenize()).parse())
+        self.func = self.interp.globals.get('جمع')
+        self.threads = []
+        self.disps = []
+
+    def tearDown(self):
+        for d in self.disps:
+            d.shutdown()
+        for t in self.threads:
+            t.join(timeout=10)
+
+    def _make(self, args):
+        d = self._dist_create(self.interp, args, None)
+        self.disps.append(d)
+        return d
+
+    def _spawn(self, disp, key=None):
+        t = self.threading.Thread(
+            target=self._run_worker,
+            args=('127.0.0.1', disp.port()), kwargs={'key': key},
+            daemon=True)
+        t.start()
+        self.threads.append(t)
+        return t
+
+    def _submit(self, *args):
+        return self.disps[0]._server.submit(
+            self.func, [self.func, *args], {}, None)
+
+    def _handshake(self, disp, key, host='127.0.0.1'):
+        """مصافحة عميل بالبايتات الخام — يعيد (المقبس، التحدي)."""
+        import pickle as _pickle
+        import socket as _socket
+        from arabi_lang.crypto import sign_challenge
+        from arabi_lang.distributed import recv_raw_frame, send_frame
+        sock = _socket.create_connection((host, disp.port()), timeout=30)
+        if key is None:
+            send_frame(sock, ('مرحبا', 1, 'وهمي'))
+            challenge = None
+            # الموزع الحر يرسل إعلانه أولًا — العامل الحقيقي لا يقرأه،
+            # والوهمي يستوعبه من المخزن كي لا يخالف ترتيب الإطارات
+            _pickle.loads(recv_raw_frame(sock))
+        else:
+            challenge = _pickle.loads(recv_raw_frame(sock))[1]
+            send_frame(sock, ('مرحبا', 1, 'وهمي',
+                              sign_challenge(key, challenge)))
+        return sock, challenge
+
+    def _wait_gone(self, disp, timeout=10):
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            if disp.workers() == 0:
+                return True
+            _time.sleep(0.05)
+        return False
+
+    # ---------- الحالة والسلامة ----------
+
+    def test_encrypted_flag(self):
+        self.assertTrue(self._make([0, '127.0.0.1', 'س']).encrypted())
+        self.assertFalse(self._make([0]).encrypted())
+        # عبر اللغة أيضًا — موزع.مشفّر()
+        from arabi_lang.runtime import DISPATCHER_METHODS
+        keyed = self._make([0, '127.0.0.1', 'س'])
+        free = self._make([0])
+        self.assertTrue(DISPATCHER_METHODS['مشفّر'](keyed, [], None))
+        self.assertFalse(DISPATCHER_METHODS['مشفّر'](free, [], None))
+
+    def test_keyed_end_to_end(self):
+        disp = self._make([0, '127.0.0.1', 'سر_مشفّر_٢١'])
+        self._spawn(disp, key='سر_مشفّر_٢١')
+        disp._server.wait_workers(1, 30, None)
+        self.assertEqual(self._submit(20, 22).result(), 42)
+
+    # ---------- التنصت على السلك ----------
+
+    def test_wire_is_encrypted(self):
+        """الاختبار الحاسم: لا أثر للوسيط في السلك، والمحتوى يُفك بالمفتاح."""
+        import pickle as _pickle
+        from arabi_lang.crypto import (_CIPHER_MAGIC, _channel_keys,
+                                       decrypt_payload)
+        from arabi_lang.distributed import recv_raw_frame
+        from arabi_lang.processes import (_encode_root, _make_enc_ctx,
+                                          encode_value)
+        disp = self._make([0, '127.0.0.1', 'سر_التنصت'])
+        sock, challenge = self._handshake(disp, 'سر_التنصت')
+        try:
+            disp._server.wait_workers(1, 30, None)
+            task = disp._server.submit(
+                self.func, [self.func, 20, self.MARKER], {}, None)
+            wire = recv_raw_frame(sock, extra=46)
+            # (١) الإطار مشفر موثق — لا pickle خام على السلك المفتاحي
+            self.assertTrue(wire.startswith(_CIPHER_MAGIC))
+            # (٢) التنصت لا يقرأ شيئًا — الوسيط السري غائب عن السلك
+            self.assertNotIn(self.MARKER.encode('utf-8'), wire)
+            # والوسيط فعلًا داخل الحزمة النظرية (شاهد على فاعلية التشفير)
+            ctx = _make_enc_ctx(disp._server._root)
+            plain = _pickle.dumps({
+                'وسائط': [encode_value(self.MARKER, ctx, None)]})
+            self.assertIn(self.MARKER.encode('utf-8'), plain)
+            # (٣) صاحب المفتاح يفك ويجد رسالة العمل بمعرفها
+            enc, mac = _channel_keys('سر_التنصت', challenge)
+            msg = _pickle.loads(decrypt_payload(wire, enc, mac))
+            self.assertEqual(msg[0], 'عمل')
+            self.assertEqual(msg[1], task.id)
+            self.assertIn(self.MARKER.encode('utf-8'), msg[2])
+            # (٤) رد مشفر صحيح يُكمل المهمة بنتيجتها
+            from arabi_lang.distributed import SecureChannel
+            chan = SecureChannel.from_master(sock, 'سر_التنصت', challenge)
+            record = encode_value(42, ctx, None)
+            chan.send(('نتيجة', task.id, 'نهاية', _pickle.dumps(record)))
+            self.assertEqual(task.result(), 42)
+        finally:
+            sock.close()
+
+    def test_free_mode_wire_unchanged(self):
+        """المسار الحر كما في 1.18 تمامًا — pickle خام بالاتجاهين."""
+        import pickle as _pickle
+        from arabi_lang.crypto import _CIPHER_MAGIC
+        from arabi_lang.distributed import recv_raw_frame, send_frame
+        from arabi_lang.processes import (_make_enc_ctx, encode_value)
+        disp = self._make([0])
+        sock, _ = self._handshake(disp, None)
+        try:
+            disp._server.wait_workers(1, 30, None)
+            task = disp._server.submit(
+                self.func, [self.func, 20, self.MARKER], {}, None)
+            wire = recv_raw_frame(sock)
+            self.assertFalse(wire.startswith(_CIPHER_MAGIC))
+            self.assertIn(self.MARKER.encode('utf-8'), wire)
+            msg = _pickle.loads(wire)
+            self.assertEqual(msg[0], 'عمل')
+            self.assertEqual(msg[1], task.id)
+            record = encode_value(42,
+                                  _make_enc_ctx(disp._server._root), None)
+            send_frame(sock, ('نتيجة', task.id, 'نهاية',
+                              _pickle.dumps(record)))
+            self.assertEqual(task.result(), 42)
+        finally:
+            sock.close()
+
+    def test_legacy_worker_fail_closed(self):
+        """عامل قديم (1.19) لا يفهم السلك المشفر — فشل مغلق لا صمت أمني."""
+        import pickle as _pickle
+        from arabi_lang.crypto import _CIPHER_MAGIC
+        from arabi_lang.distributed import recv_raw_frame
+        disp = self._make([0, '127.0.0.1', 'سر'])
+        sock, challenge = self._handshake(disp, 'سر')
+        try:
+            disp._server.wait_workers(1, 30, None)
+            self._submit(1, 2)
+            wire = recv_raw_frame(sock, extra=46)
+            self.assertTrue(wire.startswith(_CIPHER_MAGIC))
+            # عامل قديم يفك مباشرة بلا فك تشفير — يفشل حتمًا
+            with self.assertRaises(Exception):
+                _pickle.loads(wire)
+        finally:
+            sock.close()
+        # الموزع يُسقط الاتصال المعطوب — والمهمة تعود للطابور لا تضيع
+        self.assertTrue(self._wait_gone(disp))
+
+    def test_tampered_frame_drops_worker(self):
+        """إطار معدَّل بصمةً يُسقط اتصال العامل فورًا — لا تعديل يمر."""
+        import pickle as _pickle
+        from arabi_lang.crypto import (_channel_keys, decrypt_payload,
+                                       encrypt_payload)
+        from arabi_lang.distributed import recv_raw_frame, send_raw_frame
+        disp = self._make([0, '127.0.0.1', 'سر'])
+        sock, challenge = self._handshake(disp, 'سر')
+        try:
+            disp._server.wait_workers(1, 30, None)
+            task = self._submit(1, 2)
+            wire = recv_raw_frame(sock, extra=46)
+            enc, mac = _channel_keys('سر', challenge)
+            msg = _pickle.loads(decrypt_payload(wire, enc, mac))
+            self.assertEqual(msg[0], 'عمل')          # القناة تعمل سليمًا
+            record = _pickle.dumps({'م': 1})          # أي نتيجة — مفسودة
+            bad = bytearray(encrypt_payload(
+                _pickle.dumps(('نتيجة', task.id, 'عطل', record)),
+                enc, mac))
+            bad[-1] ^= 0x01                           # بت واحد في البصمة
+            send_raw_frame(sock, bytes(bad))
+        finally:
+            sock.close()
+        # الموزع كشف التلاعب وأسقط العامل
+        self.assertTrue(self._wait_gone(disp))
+
+    def test_cross_session_replay_rejected(self):
+        """إطار مسروق من جلسة لا يُقبل في جلسة أخرى — مفاتيح مستقلة."""
+        from arabi_lang.distributed import recv_raw_frame, send_raw_frame
+        disp = self._make([0, '127.0.0.1', 'سر'])
+        sock1, _ = self._handshake(disp, 'سر')
+        try:
+            disp._server.wait_workers(1, 30, None)
+            self._submit(1, 2)
+            stolen = recv_raw_frame(sock1, extra=46)   # إطار جلسة أولى
+        finally:
+            sock1.close()
+        sock2, _ = self._handshake(disp, 'سر')         # جلسة ثانية
+        try:
+            disp._server.wait_workers(1, 30, None)
+            send_raw_frame(sock2, stolen)              # إعادة تشغيل مسروقة
+        finally:
+            sock2.close()
+        # مفاتيح الجلسة مشتقة من تحديها — بصمة الجلسة الأولى لا تنجح
+        self.assertTrue(self._wait_gone(disp))
 
 
 class TestDistributedCliWorker(unittest.TestCase):

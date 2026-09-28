@@ -861,6 +861,7 @@ class DispatcherValue:
       (بعد الاختيار التلقائي)، حجم() عدد المهام المقدَّمة كله.
     - انتظر_العمال(عدد، مهلة) يحجب حتى تكتمل العمالة المطلوبة.
     - إنهاء() يوقف قبول المهام وينتظر تصفية الجاري ثم يودّع العمالة.
+    - مشفّر() هل بدأ الموزع بمفتاح سري؟ (قناته مشفرة بالكامل — 1.21).
     """
 
     __slots__ = ('_server',)
@@ -884,6 +885,9 @@ class DispatcherValue:
 
     def total(self):
         return self._server.total()
+
+    def encrypted(self):
+        return self._server.encrypted()
 
     def wait_workers(self, count, timeout, line=None):
         return self._server.wait_workers(count, timeout, line)
@@ -1667,13 +1671,13 @@ def install_builtins(env):
         'عامل': BuiltinFunc('عامل', _dist_worker, takes_interp=True),
     }))
 
-    # ============ وحدة التشفير (الإصدار 1.19) ============
+    # ============ وحدة التشفير (الإصدار 1.19، والتشفير التماثلي 1.21) ============
     # استيراد آمن: crypto لا يستورد من runtime فلا دورانية أبدًا
 
     from .crypto import (_crypto_hash, _crypto_hash512, _crypto_hmac,
                          _crypto_compare, _crypto_key, _crypto_token,
                          _crypto_rand, _crypto_pw_hash, _crypto_pw_verify,
-                         _crypto_derive)
+                         _crypto_derive, _crypto_encrypt, _crypto_decrypt)
     env.define('تشفير', ModuleValue('تشفير', {
         'هش': BuiltinFunc('هش', _crypto_hash),
         'هش512': BuiltinFunc('هش512', _crypto_hash512),
@@ -1685,6 +1689,8 @@ def install_builtins(env):
         'شفر_كلمة': BuiltinFunc('شفر_كلمة', _crypto_pw_hash),
         'تحقق_كلمة': BuiltinFunc('تحقق_كلمة', _crypto_pw_verify),
         'مشتق': BuiltinFunc('مشتق', _crypto_derive),
+        'شفّر': BuiltinFunc('شفّر', _crypto_encrypt),
+        'فكّ': BuiltinFunc('فكّ', _crypto_decrypt),
     }))
 
     # ============ وحدة التواريخ (الإصدار 1.9) ============
@@ -2859,6 +2865,16 @@ def _dist_size(obj, args, line):
     return obj._server.total()
 
 
+def _dist_encrypted(obj, args, line):
+    """موزع.مشفّر() — هل قناة الموزع مشفرة؟ (بدأ بمفتاح سري — 1.21).
+
+    الموزع المفتاحي يشتق مفاتيح جلسة من مفتاحه وتحدي كل اتصال فتُشفّر
+    كل الأعمال والنتائج العابرة للشبكة — والحر يعمل كالسابق بلا تشفير.
+    """
+    _require_args('مشفّر', args, 0, 0, line)
+    return obj._server.encrypted()
+
+
 def _dist_wait_workers(obj, args, line):
     """موزع.انتظر_العمال(عدد؟، مهلة؟) — يحجب حتى يتصل عدد كافٍ من
     العمالة (الافتراضي: عامل واحد حتى 30 ثانية) — وإلا رفع خطأ
@@ -2889,6 +2905,7 @@ DISPATCHER_METHODS.update({
     'منفذ': _dist_port,
     'عنوان': _dist_host,
     'حجم': _dist_size,
+    'مشفّر': _dist_encrypted,
     'انتظر_العمال': _dist_wait_workers,
     'إنهاء': _dist_shutdown,
 })
