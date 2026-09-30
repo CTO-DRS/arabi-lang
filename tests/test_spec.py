@@ -12,6 +12,15 @@
   ق٨  ربط الحلقة المثبت (متوافق بايثون 3) → TestLoopBinding
   ق٩  المزخرفات مع غير المتزامنة          → TestAsyncDecorators
   ق١٠ الرسائل الدقيقة للصيغ المرفوضة      → TestImprovedMessages
+
+المرحلة 3 (الإصدار 1.25.0) — الفصل ٥ من المواصفة:
+  ق١١ عقد بروتوكول التكرار (رفض المولد)   → TestIterationProtocol
+  ق١٢ توحيد الانتظار الخلفي              → TestUnifiedAwait
+  ٥٫٢ كسل التكرار على المدى والنص         → TestLazyRange
+  ٥٫٤ كاش ترجمة الدولاب                  → TestVmCodeCache
+  ٣٫٥ القسمة النظيفة (اختبار التدقيق)     → TestCleanDivision
+  تدقيق ف9 تكافؤ الصحة عبر المسارين       → TestTruthyParityAcrossPaths
+  تدقيق ف6 لا تسريب تمثيل خام            → TestSpecialValueDisplay
 """
 
 import io
@@ -630,6 +639,422 @@ class TestImprovedMessages(unittest.TestCase):
         self.assertEqual(run_code('اطبع(١ < ٢)'), 'صح\n')
         self.assertEqual(run_code('اطبع(٣ >= ٣)'), 'صح\n')
         self.assertEqual(run_code('اطبع(٥ ليس في [١، ٢])'), 'صح\n')
+
+
+# ======================= ق١١: عقد بروتوكول التكرار =======================
+
+_GEN_CLASS = '''صنف باب:
+    دالة تالٍ():
+        أنتج ١
+        أنتج ٢
+
+'''
+
+_COUNTER_CLASS = '''صنف عدّاد:
+    دالة إنشاء():
+        هذا.ن = ٠
+
+    دالة تالٍ():
+        هذا.ن = هذا.ن + ١
+        لو هذا.ن <= ٣:
+            أعد هذا.ن
+        وإلا:
+            أعد ولا شيء
+
+'''
+
+
+class TestIterationProtocol(unittest.TestCase):
+    """ق١١ — تالٍ تعيد قيمة واحدة أو لا شيء؛ المولد مرفوض برسالة موجِّهة.
+
+    قبل 1.25 كانت الحلقة تدور بلا نهاية بصمت (مسبر حي: تعليق > 6 ثوانٍ
+    بلا أي مخرجات) — أسوأ نمط فشل لمستخدم مبتدئ.
+    """
+
+    def test_next_as_generator_rejected_in_for(self):
+        expect_error(_GEN_CLASS + 'لكل س في باب():\n    اطبع(س)\n',
+                     ArabiRuntimeError, 'أعادت مولدًا')
+
+    def test_next_as_generator_rejected_in_for_inside_function(self):
+        # مسار الدولاب: OP_FOR_SETUP يسلم الكائن للممسح داخل جسم دالة
+        # (لا تسمّ الدالة «جرّب» — شدّتها تُمحى فتصير كلمة جرب المحجوزة)
+        expect_error(_GEN_CLASS + '''دالة اختبار():
+    لكل س في باب():
+        اطبع(س)
+
+اختبار()
+''', ArabiRuntimeError, 'أعادت مولدًا')
+
+    def test_next_as_generator_rejected_in_membership(self):
+        expect_error(_GEN_CLASS + 'اطبع(٥ في باب())',
+                     ArabiRuntimeError, 'أعادت مولدًا')
+
+    def test_next_as_generator_rejected_in_spread(self):
+        # مسار التفكيك (...) يمشي على البروتوكول نفسه — نفس الحرس
+        expect_error(_GEN_CLASS + '''دالة اجمع(...ق):
+    أعد طول(ق)
+
+اطبع(اجمع(...باب()))
+''', ArabiRuntimeError, 'أعادت مولدًا')
+
+    def test_guard_also_in_tree_mode(self):
+        tree = Parser(Lexer(
+            _GEN_CLASS + 'لكل س في باب():\n    اطبع(س)\n').tokenize()).parse()
+        interp = Interpreter(use_vm=False)
+        with self.assertRaises(ArabiRuntimeError) as ctx:
+            interp.run(tree)
+        self.assertIn('أعادت مولدًا', str(ctx.exception))
+
+    def test_valid_protocol_still_iterates_for(self):
+        self.assertEqual(
+            run_code(_COUNTER_CLASS + 'لكل س في عدّاد():\n    اطبع(س)\n'),
+            '1\n2\n3\n')
+
+    def test_valid_protocol_still_iterates_membership(self):
+        self.assertEqual(
+            run_code(_COUNTER_CLASS + 'اطبع(٢ في عدّاد())\n'), 'صح\n')
+
+    def test_valid_protocol_with_first_returns_iterator(self):
+        src = '''صنف دفتر:
+    دالة إنشاء():
+        هذا.فهرس = ٠
+
+    دالة أول():
+        أعد هذا
+
+    دالة تالٍ():
+        هذا.فهرس = هذا.فهرس + ١
+        لو هذا.فهرس <= ٢:
+            أعد هذا.فهرس * ١٠
+        وإلا:
+            أعد ولا شيء
+
+لكل قيمة في دفتر():
+    اطبع(قيمة)
+'''
+        self.assertEqual(run_code(src), '10\n20\n')
+
+
+# ======================= ق١٢: توحيد الانتظار الخلفي =======================
+
+class TestUnifiedAwait(unittest.TestCase):
+    """ق١٢ — انتظر_الجميع/سباق تقبل الخيوط والعمليات كالمهام (واجهة واحدة)."""
+
+    def test_wait_all_accepts_threads_in_order(self):
+        src = '''استورد خيوط
+
+دالة مهمة(ن):
+    أعد ن * ٢
+
+خ١ = خيوط.شغّل(مهمة، ٢١)
+خ٢ = خيوط.شغّل(مهمة، ٥٠)
+اطبع(انتظر_الجميع([خ١، خ٢]))
+'''
+        self.assertEqual(run_code(src), '[42، 100]\n')
+
+    def test_wait_all_accepts_process(self):
+        src = '''استورد عمليات
+
+دالة مربع(ن):
+    أعد ن * ن
+
+ع = عمليات.شغّل(مربع، ٧)
+اطبع(انتظر_الجميع([ع]))
+'''
+        self.assertEqual(run_code(src), '[49]\n')
+
+    def test_race_accepts_threads(self):
+        src = '''استورد خيوط
+
+دالة أ():
+    أعد ١
+
+دالة ب():
+    أعد ٢
+
+ن = انتظر سباق([خيوط.شغّل(أ)، خيوط.شغّل(ب)])
+اطبع(ن == ١ أو ن == ٢)
+'''
+        self.assertEqual(run_code(src), 'صح\n')
+
+    def test_thread_error_propagates_through_wait_all(self):
+        src = '''استورد خيوط
+
+دالة منهارة():
+    ارفع("انفجرت")
+
+خ = خيوط.شغّل(منهارة)
+انتظر_الجميع([خ])
+'''
+        expect_error(src, ArabiRuntimeError, 'انفجرت')
+
+    def test_reject_message_lists_all_sources(self):
+        expect_error('انتظر_الجميع([٥])', ArabiRuntimeError, 'خيوط.شغّل')
+
+
+# ======================= ٥٫٢: كسل التكرار =======================
+
+class TestLazyRange(unittest.TestCase):
+    """٥٫٢ — لكل على مدى/نص بكسل في المسارين، ولقطة القوائم/المفاتيح مثبتة.
+
+    مسبر التدقيق P4: التمويد كان يستهلك قمة تخصيص ~80MB لمدى ٢ مليون.
+    """
+
+    def test_range_sum_inside_function_vm_path(self):
+        src = '''دالة مجموع_حتى(ن):
+    مجموع = ٠
+    لكل س في مدى(ن):
+        مجموع += س
+    أعد مجموع
+
+اطبع(مجموع_حتى(٢٠٠٠٠٠))
+'''
+        self.assertEqual(run_code(src), '19999900000\n')
+
+    def test_range_with_step_top_level_tree_path(self):
+        src = '''نصي = ""
+لكل س في مدى(٠، ١٠، ٣):
+    نصي += نص(س) + "،"
+اطبع(نصي)
+'''
+        self.assertEqual(run_code(src), '0،3،6،9،\n')
+
+    def test_string_chars_iteration(self):
+        src = '''دالة إحصاء(مدخل):
+    عدد = ٠
+    لكل حرف في مدخل:
+        عدد += ١
+    أعد عدد
+
+اطبع(إحصاء("سلام عليكم"))
+'''
+        self.assertEqual(run_code(src), '10\n')
+
+    def _peak_mb(self, src, use_vm):
+        import tracemalloc
+        tree = Parser(Lexer(src).tokenize()).parse()
+        tracemalloc.start()
+        try:
+            Interpreter(use_vm=use_vm).run(tree)
+        finally:
+            _cur, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+        return peak
+
+    def test_big_range_memory_is_constant_tree(self):
+        peak = self._peak_mb('لكل س في مدى(٥٠٠٠٠٠):\n    ص = س\n', False)
+        self.assertLess(peak, 8 * 1024 * 1024,
+                        f'قمة التخصيص {peak / 1e6:.1f}MB — التمويد عاد؟')
+
+    def test_big_range_memory_is_constant_vm(self):
+        peak = self._peak_mb(
+            'دالة ف():\n    لكل س في مدى(٥٠٠٠٠٠):\n        ص = س\n\nف()\n',
+            True)
+        self.assertLess(peak, 8 * 1024 * 1024,
+                        f'قمة التخصيص {peak / 1e6:.1f}MB — التمويد عاد؟')
+
+    def test_list_snapshot_during_iteration(self):
+        # دلالة مثبتة (٥٫٢): القائمة تُلتقط عند دخول الحلقة — التعديل
+        # أثناء الحلقة لا يمددها (لو كانت حية لدارت الاختبار للأبد)
+        src = '''ل = [١، ٢، ٣]
+عدد = ٠
+لكل س في ل:
+    ل.أضف(س)
+    عدد += ١
+
+اطبع(عدد)
+'''
+        self.assertEqual(run_code(src), '3\n')
+
+    def test_dict_keys_snapshot_during_iteration(self):
+        src = '''ق = {"أ": ١، "ب": ٢}
+عدد = ٠
+لكل مفتاح في ق:
+    ق["ج"] = ٣
+    عدد += ١
+
+اطبع(عدد)
+'''
+        self.assertEqual(run_code(src), '2\n')
+
+
+# ======================= ٣٫٥: القسمة النظيفة (اختبار التدقيق) =======================
+
+class TestCleanDivision(unittest.TestCase):
+    """٣٫٥ — `/` بين صحيحين يقسمان يساويًا تعطي صحيحًا؛ وإلا عشري.
+
+    التدقيق (الفصل 7-2): القرار حساس وموثق في المواصفة لكنه بلا
+    اختبار مواصفة يثبته — هذا هو الاختبار المطلوب.
+    """
+
+    def test_clean_division_values_both_modes(self):
+        for helper in (last, last_vm):
+            self.assertEqual(helper('٤ / ٢'), 2)
+            self.assertEqual(helper('-٤ / ٢'), -2)
+            self.assertEqual(helper('٠ / ٥'), 0)
+            self.assertEqual(helper('٥ / ٢'), 2.5)
+            self.assertEqual(helper('٧ / ٢'), 3.5)
+
+    def test_clean_division_types_both_modes(self):
+        for helper in (last, last_vm):
+            self.assertEqual(helper('نوع(٤ / ٢)'), 'عدد صحيح')
+            self.assertEqual(helper('نوع(٥ / ٢)'), 'عدد عشري')
+
+    def test_zero_division_error(self):
+        expect_error('١ / ٠', ArabiRuntimeError, 'قسمة على صفر')
+
+
+# ======================= تدقيق ف9: تكافؤ الصحة عبر المسارين =======================
+
+class TestTruthyParityAcrossPaths(unittest.TestCase):
+    """الفصل 9 (بند 1) — لو/و/أو/الثلاثي متطابقة شجريًا ودولابيًا على
+    القيم الحدية كلها. OP_JIF صار عبر _truthy في 1.24 — هذا الاختبار
+    يثبت التكافؤ دائمًا فلا تنحرف دلالة الدولاب مستقبلًا.
+    """
+
+    EDGE = ['٠', '١', '""', '[]', '{}', '[٠]', 'خطأ', 'صح', 'ولا شيء',
+            '٠٫٠', '"صفر"', '٠٫٠٠١']
+
+    BRANCH = '''دالة ف(س):
+    لو س:
+        أعد "نعم"
+    وإلا:
+        أعد "لا"
+
+اطبع(ف(%s))
+'''
+
+    def _run(self, src, use_vm):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            tree = Parser(Lexer(src).tokenize()).parse()
+            Interpreter(use_vm=use_vm).run(tree)
+        return out.getvalue()
+
+    def test_if_statement_parity(self):
+        for value in self.EDGE:
+            self.assertEqual(
+                self._run(self.BRANCH % value, True),
+                self._run(self.BRANCH % value, False),
+                msg=f'انحراف لو بين المسارين على القيمة {value}')
+
+    def test_logical_and_or_parity(self):
+        for value in self.EDGE:
+            for expr in (f'{value} و ٤٢', f'{value} أو ٤٢',
+                         f'٤٢ و {value}', f'٤٢ أو {value}'):
+                self.assertEqual(
+                    self._run('اطبع(' + expr + ')', True),
+                    self._run('اطبع(' + expr + ')', False),
+                    msg=f'انحراف منطق بين المسارين على: {expr}')
+
+    def test_ternary_parity(self):
+        for value in self.EDGE:
+            expr = f'لو {value}: "أ" وإلا "ب"'
+            self.assertEqual(
+                self._run('اطبع(' + expr + ')', True),
+                self._run('اطبع(' + expr + ')', False),
+                msg=f'انحراف الثلاثي بين المسارين على القيمة {value}')
+
+
+# ======================= تدقيق ف6: لا تسريب تمثيل خام =======================
+
+class TestSpecialValueDisplay(unittest.TestCase):
+    """الفصل 6/9 — كل قيمة تُعرض عربيًا؛ لا <arabi_lang.runtime.X object>."""
+
+    def test_property_display_not_raw(self):
+        out = run_code('''صنف دائرة:
+    خاصية المساحة:
+        أعِد ٧
+
+اطبع(دائرة.المساحة)
+''')
+        self.assertIn('<خاصية المساحة>', out)
+        self.assertNotIn('arabi_lang.runtime', out)
+
+    def test_property_via_instance_still_computes(self):
+        out = run_code('''صنف دائرة:
+    خاصية المساحة:
+        أعِد ٧
+
+ك = دائرة()
+اطبع(ك.المساحة)
+''')
+        self.assertEqual(out, '7\n')
+
+    def test_property_typename(self):
+        src = '''صنف دائرة:
+    خاصية المساحة:
+        أعِد ٧
+
+'''
+        for helper in (last, last_vm):
+            self.assertEqual(helper(src + 'نوع(دائرة.المساحة)'), 'خاصية')
+
+    def test_native_ctor_display(self):
+        out = run_code('اطبع(استثناء.إنشاء)')
+        self.assertIn('<منشئ أصلي إنشاء>', out)
+        self.assertNotIn('arabi_lang.runtime', out)
+
+
+# ======================= ٥٫٤: كاش ترجمة الدولاب =======================
+
+class TestVmCodeCache(unittest.TestCase):
+    """٥٫٤ — الدالة المعرفة داخل حلقة ساخنة تُترجم مرة واحدة (كاش على
+    عقدة AST) ويبقى سلوك الإغلاق والتعاود مطابقًا.
+    """
+
+    def test_funcdef_in_hot_loop_correct_results(self):
+        src = '''دالة خارجية():
+    مجموع = ٠
+    لكل س في مدى(٥٠):
+        دالة داخلية(ن):
+            أعد ن + س
+        مجموع += داخلية(س)
+    أعد مجموع
+
+اطبع(خارجية())
+'''
+        self.assertEqual(run_code(src), '2450\n')
+
+    def test_closures_still_capture_own_env(self):
+        src = '''دالة مصنع(ن):
+    دالة داخل(س):
+        أعد س + ن
+    أعد داخل
+
+د١ = مصنع(١٠)
+د٢ = مصنع(٢٠)
+اطبع(د١(٥))
+اطبع(د٢(٥))
+'''
+        self.assertEqual(run_code(src), '15\n25\n')
+
+    def test_recursion_unaffected_by_cache(self):
+        src = '''دالة فيبو(ن):
+    لو ن < ٢:
+        أعد ن
+    أعد فيبو(ن - ١) + فيبو(ن - ٢)
+
+اطبع(فيبو(١٥))
+'''
+        self.assertEqual(run_code(src), '610\n')
+
+    def test_cache_key_is_node_not_instance(self):
+        # عقدتان مختلفتان بنفس النص = كودان مستقلان؛ وعقدة واحدة تُترجم مرة
+        src = '''دالة أ():
+    دالة داخلية():
+        أعد ١
+    أعد داخلية
+
+دالة ب():
+    دالة داخلية():
+        أعد ٢
+    أعد داخلية
+
+اطبع(أ()())
+اطبع(ب()())
+'''
+        self.assertEqual(run_code(src), '1\n2\n')
 
 
 if __name__ == '__main__':

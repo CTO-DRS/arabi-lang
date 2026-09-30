@@ -977,6 +977,10 @@ def typename(v):
         return 'كائن'
     if isinstance(v, BoundMethod):
         return 'طريقة'
+    if isinstance(v, Property):
+        return 'خاصية'
+    if isinstance(v, NativeCtor):
+        return 'منشئ أصلي'
     if isinstance(v, EnumValue):
         return 'تعداد'
     if isinstance(v, EnumMember):
@@ -1033,6 +1037,12 @@ def display(v):
         return f'<كائن من صنف {v.cls.name}>'
     if isinstance(v, BoundMethod):
         return f'<طريقة {v.func.name}>'
+    if isinstance(v, Property):
+        # كانت تسرب <arabi_lang.runtime.Property object> عند قراءتها
+        # من الصنف مباشرة (مسبر التدقيق P2)
+        return f'<خاصية {v.func.name}>'
+    if isinstance(v, NativeCtor):
+        return f'<منشئ أصلي {v.name}>'
     if isinstance(v, EnumValue):
         return f'<تعداد {v.name}>'
     if isinstance(v, EnumMember):
@@ -2533,8 +2543,11 @@ def _net_download(args, line):
 def _task_list(args, name, line):
     """يتحقق من معامل قائمة مهام لـ انتظر_الجميع/سباق ويعيدها.
 
-    المهام نتاج دوال غير متزامنة أو قدّم على تجمع الخيوط أو تجمع
-    العمليات (1.17) أو موزع (1.18) — الأربعة بواجهة واحدة.
+    المواصفة ق١٢ (1.25): كل نتيجة عمل خلفي تقبل — مهمة دالة غير
+    متزامنة، أو قدّم على تجمع خيوط/عمليات، أو خيط من خيوط.شغّل، أو
+    عملية من عمليات.شغّل، أو مهمة موزع — بواجهة واحدة مطابقة لوعد
+    'انتظر' نفسها (كانت الخيوط والعمليات تُرفض هنا رغم قبول 'انتظر'
+    إياها — تناقض واجهة في التدقيق).
     """
     from .processes import ProcessTaskValue
     if len(args) != 1 or not isinstance(args[0], list):
@@ -2542,11 +2555,12 @@ def _task_list(args, name, line):
             f"'{name}' تحتاج قائمة مهام — مثال: {name}([م١، م٢])", line)
     for i, t in enumerate(args[0]):
         if not isinstance(t, (TaskValue, ProcessTaskValue,
-                              DistributedTaskValue)):
+                              DistributedTaskValue, ThreadValue,
+                              ProcessValue)):
             raise ArabiRuntimeError(
                 f'العنصر رقم {i + 1} ليس مهمة بل {typename(t)} — '
-                'المهام نتاج استدعاء دوال غير متزامنة أو قدّم على تجمع '
-                'أو موزع',
+                'المهام نتاج دوال غير متزامنة أو قدّم على تجمع أو '
+                'خيوط.شغّل أو عمليات.شغّل أو موزع',
                 line)
     return args[0]
 

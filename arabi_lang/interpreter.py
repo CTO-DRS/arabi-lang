@@ -107,6 +107,13 @@ class Interpreter:
         self._loading = set()
         # سياق لكل خيط: مكدس 'هذا' الحالي (للدوال المستدعاة من طرق)
         self._tls = threading.local()
+        # كاش ترجمة الدولاب (1.25): جسم الدالة (عقدة AST) ← VmCode.
+        # كل تنفيذ لدالة داخل حلقة يبني ArabiFunc جديدًا (يلتقط البيئة
+        # الحالية — دلالة أصيلة) وكان يعيد ترجمة الجسم كل مرة؛ الكود
+        # نفسه ثابت لكل عقدة فتُترجم مرة واحدة وتشارَك بأمان (كائن
+        # VmCode لا يتغير بعد إغلاقه). المفتاح id(جسم الدالة) والعقد
+        # حية طوال تنفيذ الشجرة
+        self._vm_code_cache = {}
 
     # ================== التنفيذ ==================
 
@@ -277,10 +284,15 @@ class Interpreter:
         """يتكرر على قيمة محسوبة مسبقًا (يشاركه الدولاب في المسارات البطيئة)."""
         if isinstance(iterable, dict):
             items = list(iterable.keys())
-        elif isinstance(iterable, (list, range)):
+        elif isinstance(iterable, list):
+            # لقطة عن الاصطلاح — تعديل القائمة أثناء الحلقة لا يغير مسارها
+            # (والدولاب يأخذ اللقطة نفسها فتبقى دلالة الوضعين واحدة)
             items = list(iterable)
-        elif isinstance(iterable, str):
-            items = list(iterable)
+        elif isinstance(iterable, (range, str)):
+            # كسل (1.25): مدى ونص غير قابلين للتعديل فتُتكرر مباشرة —
+            # التمويد كقائمة كان يستهلك ذاكرة بحجم المدى كله (مسبر P4:
+            # مدى ٢ مليون = 80MB قمة تخصيص)
+            items = iterable
         elif isinstance(iterable, GeneratorValue):
             # التكرار على مولد: قيم تباعًا مع إغلاقه عند الخروج (كسر/خطأ)
             try:
@@ -304,7 +316,8 @@ class Interpreter:
             # تالٍ() تعيد القيمة التالية، وعودة 'لا شيء' تنهي التكرار.
             iterator, next_func = self._custom_iterator(iterable, node.line)
             while True:
-                item = self._invoke_bound(next_func, iterator, [], {}, node.line)
+                item = self._next_value(iterator, next_func, iterable,
+                                        node.line)
                 if item is None:
                     break
                 self._for_bind(node, item, env)
@@ -348,6 +361,24 @@ class Interpreter:
                 f'لا يمكن التكرار على {typename(obj)} — استخدم قائمة أو نصًا '
                 'أو مدى أو صنفًا يعرّف طريقة تالٍ', line)
         return target, next_func
+
+    def _next_value(self, iterator, next_func, obj, line):
+        """يستدعي 'تالٍ' ويتحقق من عقد البروتوكول (المواصفة ق١١).
+
+        العقد: 'تالٍ' تعيد قيمة واحدة، أو 'لا شيء' لإنهاء التكرار. الدالة
+        المعرّفة بـ'أنتج' تعيد مولدًا كاملًا (لا يكون 'لا شيء' أبدًا) فكانت
+        الحلقة تدور بلا نهاية بصمت — إعادة إنتاج مثبتة في مسابر التدقيق —
+        لذا يُرفض المولد هنا برسالة موجِّهة بدل التعليق الصامت.
+        """
+        item = self._invoke_bound(next_func, iterator, [], {}, line)
+        if isinstance(item, GeneratorValue):
+            raise ArabiRuntimeError(
+                f"طريقة 'تالٍ' في الصنف '{obj.cls.name}' معرّفة بـ'أنتج' "
+                f'فأعادت مولدًا — بروتوكول التكرار يتوقع أن تعيد تالٍ قيمة '
+                'واحدة في كل استدعاء أو لا شيء لإنهاء التكرار. إن أردت '
+                "تكرارًا على قيم متعددة فاجعل 'تالٍ' تحفظ موضعها وتعيد "
+                'القيمة التالية في كل مرة', line)
+        return item
 
     def _for_bind(self, node, item, env):
         """يربط عنصر حلقة 'لكل' بمتغير أو متغيرات التفكيك."""
@@ -1009,7 +1040,7 @@ class Interpreter:
             # بروتوكول التكرار المخصص: تفكيك كائن يعرّف 'تالٍ' (و'أول' اختياريًا)
             iterator, next_func = self._custom_iterator(value, line)
             while True:
-                item = self._invoke_bound(next_func, iterator, [], {}, line)
+                item = self._next_value(iterator, next_func, value, line)
                 if item is None:
                     break
                 target.append(item)
@@ -1103,7 +1134,7 @@ class Interpreter:
             iterator, next_func = self._custom_iterator(value, line)
             items = []
             while True:
-                item = self._invoke_bound(next_func, iterator, [], {}, line)
+                item = self._next_value(iterator, next_func, value, line)
                 if item is None:
                     break
                 items.append(item)
@@ -1733,10 +1764,14 @@ class Interpreter:
             return None
         code = func.vm_code
         if code is _VM_PENDING:
-            try:
-                code = _vm.compile_function(func.body)
-            except Exception:            # أي عطل في الترجمة — أمان كامل
-                code = _VM_NO
+            key = id(func.body)
+            code = self._vm_code_cache.get(key)
+            if code is None:
+                try:
+                    code = _vm.compile_function(func.body)
+                except Exception:        # أي عطل في الترجمة — أمان كامل
+                    code = _VM_NO
+                self._vm_code_cache[key] = code
             func.vm_code = code
         if code is _VM_NO:
             try:
@@ -1901,7 +1936,7 @@ class Interpreter:
             if has_first is not None or has_next is not None:
                 iterator, next_func = self._custom_iterator(right, line)
                 while True:
-                    item = self._invoke_bound(next_func, iterator, [], {}, line)
+                    item = self._next_value(iterator, next_func, right, line)
                     if item is None:
                         return False
                     if self._values_equal(item, left):

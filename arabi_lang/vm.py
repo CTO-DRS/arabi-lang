@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""الدولاب الافتراضي (Virtual Machine) — الإصدار 1.24.
+"""الدولاب الافتراضي (Virtual Machine) — الإصدار 1.25.
 
 يترجم أجسام الدوال إلى تعليمات بايت-كود تنفذها حلقة دولاب واحدة سريعة،
 بدل المرور الشجري على عقد شجرة الصياغة في كل استدعاء (getattr + استدعاء
@@ -477,8 +477,13 @@ def vm_exec(interp, code, env):
                 iterable = pop()
                 if isinstance(iterable, dict):
                     for_states.append([list(iterable.keys()), 0])
-                elif isinstance(iterable, (list, range, str)):
+                elif isinstance(iterable, list):
+                    # لقطة — تكافئ الممسح الشجري في دلالة التعديل أثناء الحلقة
                     for_states.append([list(iterable), 0])
+                elif isinstance(iterable, (range, str)):
+                    # كسل (1.25): غير قابلين للتعديل والفهرسة فيهما O(1) —
+                    # لا تمويد (مسبر التدقيق: مدى ٢ مليون كان 80MB)
+                    for_states.append([iterable, 0])
                 else:
                     # مولد أو كائن بتالٍ أو غيره — الممسح الشجري يدير
                     # الحلقة كاملة (مع إغلاق المولدات) ولا تسرّ إشاراتها
