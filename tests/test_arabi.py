@@ -6916,6 +6916,552 @@ class TestPackageCLI(unittest.TestCase):
         self.assertIn('حدّد حزمة', r.stderr)
 
 
+class TestSplitRequest(unittest.TestCase):
+    """فصل 'اسم>=قيد' — الصيغة الموثقة التي لم تكن تعمل حتى 1.28."""
+
+    def test_name_with_constraint(self):
+        self.assertEqual(packages.split_request('مركبة>=1.0'),
+                         ('مركبة', '>=1.0'))
+
+    def test_plain_name(self):
+        self.assertEqual(packages.split_request('مركبة'), ('مركبة', None))
+
+    def test_spaces_normalized(self):
+        self.assertEqual(packages.split_request(' مركبة ^ 1.2 '),
+                         ('مركبة', '^1.2'))
+
+    def test_equals_operator(self):
+        self.assertEqual(packages.split_request('مركبة=2.0.0'),
+                         ('مركبة', '=2.0.0'))
+
+    def test_caret_and_tilde(self):
+        self.assertEqual(packages.split_request('أ~1.2'), ('أ', '~1.2'))
+        self.assertEqual(packages.split_request('أ^1.2'), ('أ', '^1.2'))
+
+    def test_path_untouched(self):
+        self.assertEqual(packages.split_request('سجل/مركبة'),
+                         ('سجل/مركبة', None))
+
+    def test_url_untouched(self):
+        self.assertEqual(packages.split_request('http://x/مركبة.zip'),
+                         ('http://x/مركبة.zip', None))
+
+    def test_non_string_passthrough(self):
+        self.assertEqual(packages.split_request(None), (None, None))
+
+
+class TestInstallConstraintSyntax(unittest.TestCase):
+    """install() بفصل القيد — الصيغة 'اسم>=1.0' تعمل فعلًا (1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-قيد-')
+        self.registry = os.path.join(self.tmp, 'سجل')
+        os.makedirs(self.registry)
+        self.src = os.path.join(self.registry, 'حزمة_أ')
+        os.makedirs(self.src)
+        _write_arabi(os.path.join(self.src, 'حزمة_أ.عربي'), 'ثابت = 1\n')
+        _write_json(os.path.join(self.src, 'حزمة.json'), {
+            'الاسم': 'حزمة_أ', 'النسخة': '1.0.0'})
+        self.index = os.path.join(self.registry, 'الفهرس.json')
+        _write_json(self.index, {
+            'حزمة_أ': {'النسخة': '1.0.0', 'الوصف': '',
+                       'المصدر': self.src}})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_constraint_syntax_installs(self):
+        msgs = packages.install('حزمة_أ>=0.5', self.project_dir(), self.index)
+        self.assertTrue(any(k == 'ثُبتت' for _, k in msgs))
+
+    def test_constraint_syntax_rejects_incompatible(self):
+        with self.assertRaises(ArabiError) as ctx:
+            packages.install('حزمة_أ>=2.0', self.project_dir(), self.index)
+        self.assertIn('لا تلبي القيد', str(ctx.exception))
+
+    def test_plain_name_still_works(self):
+        msgs = packages.install('حزمة_أ', self.project_dir(), self.index)
+        self.assertTrue(any(k == 'ثُبتت' for _, k in msgs))
+
+    def project_dir(self):
+        d = os.path.join(self.tmp, 'مشروع')
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
+class TestProjectManifestIO(unittest.TestCase):
+    """قراءة/كتابة بيان المشروع — قارئ متسامح وكتابة ذرية (1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-بيان-')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_missing_manifest_mentions_init(self):
+        with self.assertRaises(ArabiError) as ctx:
+            packages.read_project_manifest(self.tmp)
+        self.assertIn('حزمة إنشاء', str(ctx.exception))
+
+    def test_tolerant_read_optional_fields(self):
+        _write_json(os.path.join(self.tmp, 'حزمة.json'),
+                    {'التبعيات': {'أ': '>=1.0'}})
+        data = packages.read_project_manifest(self.tmp)
+        self.assertEqual(data['التبعيات'], {'أ': '>=1.0'})
+
+    def test_invalid_deps_shape_rejected(self):
+        _write_json(os.path.join(self.tmp, 'حزمة.json'),
+                    {'التبعيات': ['قائمة']})
+        with self.assertRaises(ArabiError):
+            packages.read_project_manifest(self.tmp)
+
+    def test_invalid_version_rejected(self):
+        _write_json(os.path.join(self.tmp, 'حزمة.json'),
+                    {'النسخة': 'ليست-نسخة', 'التبعيات': {}})
+        with self.assertRaises(ArabiError):
+            packages.read_project_manifest(self.tmp)
+
+    def test_atomic_write_leaves_no_residue(self):
+        packages.write_project_manifest(self.tmp, {'النسخة': '0.1.0',
+                                                   'التبعيات': {}})
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, 'حزمة.json')))
+        leftovers = [f for f in os.listdir(self.tmp) if 'بيان' in f]
+        self.assertEqual(leftovers, [])
+
+
+class TestRecordDependency(unittest.TestCase):
+    """تسجيل التبعيات في بيان المشروع (ق١٧ — 1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-تسجيل-')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_record_into_existing_manifest(self):
+        _write_json(os.path.join(self.tmp, 'حزمة.json'),
+                    {'الاسم': 'مشروع', 'التبعيات': {}})
+        changed, used = packages.record_dependency(self.tmp, 'أ', '>=1.0')
+        self.assertTrue(changed)
+        data = packages.read_project_manifest(self.tmp)
+        self.assertEqual(data['التبعيات']['أ'], '>=1.0')
+        self.assertEqual(data['الاسم'], 'مشروع')   # بقية الحقول محفوظة
+
+    def test_record_same_value_no_change(self):
+        packages.record_dependency(self.tmp, 'أ', '^1.0')
+        changed, _ = packages.record_dependency(self.tmp, 'أ', '^1.0')
+        self.assertFalse(changed)
+
+    def test_auto_create_minimal_manifest(self):
+        changed, used = packages.record_dependency(self.tmp, 'أ', '^1.0')
+        self.assertTrue(changed)
+        data = packages.read_project_manifest(self.tmp)
+        self.assertEqual(data['التبعيات'], {'أ': '^1.0'})
+        self.assertEqual(data['النسخة'], '0.1.0')
+
+    def test_invalid_constraint_rejected(self):
+        with self.assertRaises(ArabiError):
+            packages.record_dependency(self.tmp, 'أ', 'قيد-معطوب')
+
+    def test_invalid_name_rejected(self):
+        with self.assertRaises(ArabiError):
+            packages.record_dependency(self.tmp, 'اسم-خطير/', '^1.0')
+
+
+class TestUnrecordDependency(unittest.TestCase):
+    """محو التبعيات من بيان المشروع (1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-محو-')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_unrecord_removes_entry(self):
+        packages.record_dependency(self.tmp, 'أ', '^1.0')
+        self.assertTrue(packages.unrecord_dependency(self.tmp, 'أ'))
+        data = packages.read_project_manifest(self.tmp)
+        self.assertNotIn('أ', data.get('التبعيات', {}))
+
+    def test_missing_manifest_false(self):
+        self.assertFalse(packages.unrecord_dependency(self.tmp, 'أ'))
+
+    def test_unrecorded_name_false(self):
+        packages.record_dependency(self.tmp, 'أ', '^1.0')
+        self.assertFalse(packages.unrecord_dependency(self.tmp, 'ب'))
+
+    def test_corrupt_manifest_does_not_break(self):
+        with open(os.path.join(self.tmp, 'حزمة.json'), 'w',
+                  encoding='utf-8') as f:
+            f.write('{معطوب')
+        self.assertFalse(packages.unrecord_dependency(self.tmp, 'أ'))
+
+
+class TestCreateProject(unittest.TestCase):
+    """حزمة إنشاء — هيكل مشروع بلا كتابة فوق شيء (1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-إنشاء-')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_creates_manifest_and_entry(self):
+        created = packages.create_project(self.tmp, name='حزمة_جديدة')
+        self.assertEqual(len(created), 2)
+        # البيان المنشأ سليم كبيان حزمة كاملة — يصلح للنشر لاحقًا
+        data = packages.read_manifest(self.tmp)
+        self.assertEqual(data['الاسم'], 'حزمة_جديدة')
+        self.assertEqual(data['النسخة'], '0.1.0')
+
+    def test_refuses_existing_manifest(self):
+        packages.create_project(self.tmp, name='أ')
+        with self.assertRaises(ArabiError) as ctx:
+            packages.create_project(self.tmp, name='أ')
+        self.assertIn('مسبقًا', str(ctx.exception))
+
+    def test_invalid_dir_name_requires_explicit(self):
+        bad = os.path.join(self.tmp, 'اسم-غير-صالح')
+        os.makedirs(bad)
+        with self.assertRaises(ArabiError) as ctx:
+            packages.create_project(bad)
+        self.assertIn('حزمة إنشاء اسم', str(ctx.exception))
+
+    def test_explicit_name_in_invalid_dir(self):
+        bad = os.path.join(self.tmp, 'اسم-غير-صالح')
+        os.makedirs(bad)
+        packages.create_project(bad, name='صالح')
+        self.assertEqual(packages.read_manifest(bad)['الاسم'], 'صالح')
+
+    def test_existing_entry_not_overwritten(self):
+        entry = os.path.join(self.tmp, 'حزمة_جديدة.عربي')
+        _write_arabi(entry, 'كودي_الخاص = 1\n')
+        packages.create_project(self.tmp, name='حزمة_جديدة')
+        self.assertIn('كودي_الخاص',
+                      open(entry, encoding='utf-8').read())
+
+    def test_dangerous_entry_rejected(self):
+        with self.assertRaises(ArabiError):
+            packages.create_project(self.tmp, name='أ', entry='../شرير.عربي')
+
+    def test_invalid_version_rejected(self):
+        with self.assertRaises(ArabiError):
+            packages.create_project(self.tmp, name='أ', version='نسخة')
+
+
+class TestSyncEnv(unittest.TestCase):
+    """حزمة مزامنة — موازنة البيئة مع البيان (ق١٧/ق١٩ — 1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-مزامنة-')
+        self.registry = os.path.join(self.tmp, 'سجل')
+        self.src_a = os.path.join(self.registry, 'حزمة_أ')
+        os.makedirs(self.src_a)
+        _write_arabi(os.path.join(self.src_a, 'حزمة_أ.عربي'), 'ثابت = 1\n')
+        _write_json(os.path.join(self.src_a, 'حزمة.json'),
+                    {'الاسم': 'حزمة_أ', 'النسخة': '1.0.0'})
+        self.old_a = os.path.join(self.registry, '_قديمة', 'حزمة_أ')
+        os.makedirs(self.old_a)
+        _write_arabi(os.path.join(self.old_a, 'حزمة_أ.عربي'),
+                     'ثابت = "قديم"\n')
+        _write_json(os.path.join(self.old_a, 'حزمة.json'),
+                    {'الاسم': 'حزمة_أ', 'النسخة': '0.9.0'})
+        self.index = os.path.join(self.registry, 'الفهرس.json')
+        _write_json(self.index, {
+            'حزمة_أ': {'النسخة': '1.0.0', 'الوصف': '',
+                       'المصدر': self.src_a}})
+        self.project = os.path.join(self.tmp, 'مشروع')
+        os.makedirs(self.project)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _manifest(self, deps):
+        _write_json(os.path.join(self.project, 'حزمة.json'),
+                    {'الاسم': 'مشروع', 'النسخة': '0.1.0',
+                     'التبعيات': deps})
+
+    def test_missing_dependency_installed(self):
+        self._manifest({'حزمة_أ': '^1.0'})
+        msgs = packages.sync(self.project, self.index)
+        kinds = [k for _, k in msgs]
+        self.assertIn('ثُبتت', kinds)
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.project, 'حزم', 'حزمة_أ')))
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.project, 'قفل.json')))
+
+    def test_satisfying_dependency_matched(self):
+        self._manifest({'حزمة_أ': '^1.0'})
+        packages.install_dep('حزمة_أ', '^1.0', self.project, self.index, [])
+        msgs = packages.sync(self.project, self.index)
+        self.assertIn(('مطابقة',), [(k,) for _, k in msgs])
+
+    def test_violating_dependency_replaced(self):
+        self._manifest({'حزمة_أ': '^1.0'})
+        shutil.copytree(self.old_a,
+                        os.path.join(self.project, 'حزم', 'حزمة_أ'))
+        msgs = packages.sync(self.project, self.index)
+        kinds = [k for _, k in msgs]
+        self.assertIn('استُبدلت', kinds)
+        installed = packages.list_installed(self.project)
+        self.assertEqual(installed['حزمة_أ']['نسخة'], '1.0.0')
+
+    def test_extraneous_reported_not_touched(self):
+        self._manifest({'حزمة_أ': '^1.0'})
+        packages.install_dep('حزمة_أ', '^1.0', self.project, self.index, [])
+        extra_dir = os.path.join(self.tmp, 'زيادة_حزمة')
+        os.makedirs(extra_dir)
+        _write_arabi(os.path.join(extra_dir, 'زيادة_حزمة.عربي'), 'س = 1\n')
+        _write_json(os.path.join(extra_dir, 'حزمة.json'),
+                    {'الاسم': 'زيادة_حزمة', 'النسخة': '1.0.0'})
+        shutil.copytree(extra_dir,
+                        os.path.join(self.project, 'حزم', 'زيادة_حزمة'))
+        packages._write_lock(self.project)
+        msgs = packages.sync(self.project, self.index)
+        self.assertIn('زيادة', [k for _, k in msgs])
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.project, 'حزم', 'زيادة_حزمة')))
+
+    def test_missing_manifest_raises(self):
+        with self.assertRaises(ArabiError):
+            packages.sync(self.project, self.index)
+
+    def test_unsatisfiable_collected_not_raised(self):
+        self._manifest({'حزمة_أ': '>=9.0'})
+        msgs = packages.sync(self.project, self.index)
+        self.assertIn('تعذر', [k for _, k in msgs])
+
+
+class TestOutdatedEnv(unittest.TestCase):
+    """حزمة ترقيات — عرض الأحدث المتاح (1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-ترقيات-')
+        self.registry = os.path.join(self.tmp, 'سجل')
+        self.src = os.path.join(self.registry, 'حزمة_أ')
+        os.makedirs(self.src)
+        _write_arabi(os.path.join(self.src, 'حزمة_أ.عربي'), 'ثابت = 1\n')
+        _write_json(os.path.join(self.src, 'حزمة.json'),
+                    {'الاسم': 'حزمة_أ', 'النسخة': '2.0.0'})
+        self.index = os.path.join(self.registry, 'الفهرس.json')
+        _write_json(self.index, {
+            'حزمة_أ': {'النسخة': '2.0.0', 'الوصف': 'وصف',
+                       'المصدر': self.src}})
+        self.project = os.path.join(self.tmp, 'مشروع')
+        os.makedirs(self.project)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_newer_version_reported(self):
+        packages.install('حزمة_أ', self.project, self.index)
+        # أعد الفهرس بنسخة أحدث
+        _write_json(self.index, {
+            'حزمة_أ': {'النسخة': '3.1.0', 'الوصف': 'وصف',
+                       'المصدر': self.src}})
+        rows = packages.outdated(self.project, self.index)
+        self.assertEqual(len(rows), 1)
+        name, current, latest, desc = rows[0]
+        self.assertEqual((name, current, latest),
+                         ('حزمة_أ', '2.0.0', '3.1.0'))
+
+    def test_up_to_date_has_no_rows(self):
+        packages.install('حزمة_أ', self.project, self.index)
+        self.assertEqual(packages.outdated(self.project, self.index), [])
+
+    def test_unknown_package_skipped(self):
+        src_b = os.path.join(self.registry, 'غريبة')
+        os.makedirs(src_b)
+        _write_arabi(os.path.join(src_b, 'غريبة.عربي'), 'س = 1\n')
+        _write_json(os.path.join(src_b, 'حزمة.json'),
+                    {'الاسم': 'غريبة', 'النسخة': '1.0.0'})
+        packages.install(src_b, self.project, self.index)  # مصدر مباشر
+        self.assertEqual(packages.outdated(self.project, self.index), [])
+
+
+class TestVerifyEnv(unittest.TestCase):
+    """حزمة فحص — انحراف البيئة يُعلن (ق٢٠ — 1.28)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='اختبار-فحص-')
+        self.registry = os.path.join(self.tmp, 'سجل')
+        self.src = os.path.join(self.registry, 'حزمة_أ')
+        os.makedirs(self.src)
+        _write_arabi(os.path.join(self.src, 'حزمة_أ.عربي'), 'ثابت = 1\n')
+        _write_json(os.path.join(self.src, 'حزمة.json'),
+                    {'الاسم': 'حزمة_أ', 'النسخة': '1.0.0'})
+        self.index = os.path.join(self.registry, 'الفهرس.json')
+        _write_json(self.index, {
+            'حزمة_أ': {'النسخة': '1.0.0', 'الوصف': '',
+                       'المصدر': self.src}})
+        self.project = os.path.join(self.tmp, 'مشروع')
+        os.makedirs(self.project)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _setup_clean(self):
+        packages.record_dependency(self.project, 'حزمة_أ', '^1.0')
+        packages.install('حزمة_أ', self.project, self.index)
+
+    def test_clean_environment(self):
+        self._setup_clean()
+        self.assertEqual(packages.verify(self.project), [])
+
+    def test_deleted_lock_detected(self):
+        self._setup_clean()
+        os.remove(os.path.join(self.project, 'قفل.json'))
+        issues = packages.verify(self.project)
+        self.assertTrue(any('قفل' in i for i in issues))
+
+    def test_deleted_package_detected(self):
+        self._setup_clean()
+        # القفل كُتب عند التثبيت وذكرها — ومجلد الحزمة حُذف يدويًا
+        self.assertTrue('حزمة_أ' in packages.read_lock(self.project))
+        shutil.rmtree(os.path.join(self.project, 'حزم', 'حزمة_أ'))
+        issues = packages.verify(self.project)
+        self.assertTrue(any('غائبة' in i for i in issues))
+
+    def test_uninstalled_manifest_dependency_detected(self):
+        _write_json(os.path.join(self.project, 'حزمة.json'),
+                    {'الاسم': 'مشروع', 'التبعيات': {'حزمة_أ': '^1.0'}})
+        issues = packages.verify(self.project)
+        self.assertTrue(any('مزامنة' in i for i in issues))
+
+    def test_violating_manifest_dependency_detected(self):
+        packages.install('حزمة_أ', self.project, self.index)
+        _write_json(os.path.join(self.project, 'حزمة.json'),
+                    {'الاسم': 'مشروع',
+                     'التبعيات': {'حزمة_أ': '>=2.0'}})
+        issues = packages.verify(self.project)
+        self.assertTrue(any('تخالف' in i for i in issues))
+
+    def test_invalid_package_manifest_detected(self):
+        self._setup_clean()
+        bad = os.path.join(self.project, 'حزم', 'مكسورة')
+        os.makedirs(bad)
+        with open(os.path.join(bad, 'حزمة.json'), 'w',
+                  encoding='utf-8') as f:
+            f.write('{معطوب')
+        issues = packages.verify(self.project)
+        self.assertTrue(any('غير صالح' in i for i in issues))
+
+    def test_plain_dir_without_manifest_detected(self):
+        self._setup_clean()
+        os.makedirs(os.path.join(self.project, 'حزم', 'مجهول'))
+        issues = packages.verify(self.project)
+        self.assertTrue(any('مجهول' in i for i in issues))
+
+
+class TestCliPackageEnv(unittest.TestCase):
+    """دورة بيئة المشروع عبر سطر الأوامر كاملة (1.28)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix='اختبار-بيئة-cli-')
+        cls.registry = os.path.join(cls.tmp, 'سجل')
+        os.makedirs(cls.registry)
+        src_a = os.path.join(cls.registry, 'ادوات_نص')
+        os.makedirs(src_a)
+        _write_arabi(os.path.join(src_a, 'ادوات_نص.عربي'),
+                     'دالة كرر_مرتين(ن):\n'
+                     '    أعد ن + ن\n')
+        _write_json(os.path.join(src_a, 'حزمة.json'), {
+            'الاسم': 'ادوات_نص', 'النسخة': '1.4.0',
+            'الوصف': 'أدوات معالجة النصوص'})
+        cls.index = os.path.join(cls.registry, 'الفهرس.json')
+        _write_json(cls.index, {
+            'ادوات_نص': {'النسخة': '1.4.0', 'الوصف': 'أدوات معالجة النصوص',
+                         'المصدر': src_a}})
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _cli(self, project, *args):
+        return subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'arabi.py'), 'حزمة',
+             '--الفهرس', self.index, *args],
+            capture_output=True, text=True, cwd=project, timeout=60)
+
+    def setUp(self):
+        self.project = tempfile.mkdtemp(prefix='مشروع-بيئة-')
+
+    def tearDown(self):
+        shutil.rmtree(self.project, ignore_errors=True)
+
+    def _manifest_deps(self):
+        with open(os.path.join(self.project, 'حزمة.json'),
+                  encoding='utf-8') as f:
+            return json.load(f).get('التبعيات', {})
+
+    def test_full_cycle_init_install_verify(self):
+        r = self._cli(self.project, 'إنشاء', 'مشتاري')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.project, 'حزمة.json')))
+        r = self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('سُجّلت التبعية', r.stdout)
+        self.assertEqual(self._manifest_deps(), {'ادوات_نص': '^1.4.0'})
+        r = self._cli(self.project, 'فحص')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('سليمة', r.stdout)
+
+    def test_install_explicit_constraint_recorded(self):
+        r = self._cli(self.project, 'تثبيت', 'ادوات_نص>=1.0')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._manifest_deps(), {'ادوات_نص': '>=1.0'})
+
+    def test_install_existing_constraint_preserved(self):
+        self._cli(self.project, 'تثبيت', 'ادوات_نص>=1.0')
+        self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        self.assertEqual(self._manifest_deps(), {'ادوات_نص': '>=1.0'})
+
+    def test_source_install_not_recorded(self):
+        src = os.path.join(self.tmp, 'مصدر_مباشر')
+        os.makedirs(src)
+        _write_arabi(os.path.join(src, 'مصدر_مباشر.عربي'), 'س = 1\n')
+        _write_json(os.path.join(src, 'حزمة.json'),
+                    {'الاسم': 'مصدر_مباشر', 'النسخة': '1.0.0'})
+        r = self._cli(self.project, 'تثبيت', src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.project, 'حزمة.json')))
+
+    def test_remove_unrecords(self):
+        self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        r = self._cli(self.project, 'إزالة', 'ادوات_نص')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('حُذفت التبعية', r.stdout)
+        self.assertEqual(self._manifest_deps(), {})
+
+    def test_sync_installs_missing(self):
+        _write_json(os.path.join(self.project, 'حزمة.json'),
+                    {'الاسم': 'مشروع',
+                     'التبعيات': {'ادوات_نص': '>=1.0'}})
+        r = self._cli(self.project, 'مزامنة')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('ثُبتت', r.stdout)
+        self.assertTrue(os.path.isdir(
+            os.path.join(self.project, 'حزم', 'ادوات_نص')))
+
+    def test_verify_drift_exits_one(self):
+        self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        os.remove(os.path.join(self.project, 'قفل.json'))
+        r = self._cli(self.project, 'فحص')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('انحراف', r.stdout)
+
+    def test_outdated_informational(self):
+        self._cli(self.project, 'تثبيت', 'ادوات_نص')
+        r = self._cli(self.project, 'ترقيات')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('أحدث نسخة', r.stdout)
+
+
 class TestExecutablePackaging(unittest.TestCase):
     """التوزيع كملف تنفيذي مستقل (الإصدار 1.14)."""
 

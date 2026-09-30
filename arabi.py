@@ -257,7 +257,7 @@ def _parse_flag_value(args, names, error_message):
 
 
 def package_cli(args):
-    """مدير الحزم: python arabi.py حزمة تثبيت|إزالة|قائمة|بحث|تحديث|خادم|نشر ..."""
+    """مدير الحزم: إنشاء|تثبيت|إزالة|قائمة|بحث|تحديث|مزامنة|ترقيات|فحص|خادم|نشر"""
     from arabi_lang import packages
     index_source = _parse_index_flag(args)
     # إزالة العلم وقيمته من المعاملات
@@ -275,8 +275,9 @@ def package_cli(args):
 
     if not args:
         print(f'استخدام: {prog_name()} حزمة <أمر> [معاملات]')
-        print('الأوامر: تثبيت [اسم|مسار|رابط] — إزالة اسم — قائمة — '
+        print('الأوامر: إنشاء [اسم] — تثبيت [اسم|مسار|رابط] — إزالة اسم — قائمة — '
               'بحث [كلمة] — تحديث [اسم]')
+        print('        مزامنة — ترقيات — فحص            بيئة المشروع (1.28)')
         print('        خادم [مجلد] --منفذ N --عنوان H --مفتاح سر [--بلا_واجهة]  '
               'سجل مجتمعي (1.20، واجهة متصفح 1.22)')
         print('        نشر مسار --الفهرس رابط [--نسخة X] [--مفتاح سر]  '
@@ -288,7 +289,20 @@ def package_cli(args):
     cmd = args[0]
     rest = args[1:]
     try:
-        if cmd in ('تثبيت', '--تثبيت', 'install'):
+        if cmd in ('إنشاء', '--إنشاء', 'init'):
+            # إنشاء هيكل مشروع جديد (1.28): بيان + مدخل نموذجي
+            version, rest = _parse_flag_value(
+                rest, ('--نسخة', '--version'), 'نسخة مثل 0.1.0')
+            desc, rest = _parse_flag_value(
+                rest, ('--وصف', '--desc'), 'نص وصف الحزمة')
+            created = packages.create_project(
+                os.getcwd(), name=rest[0] if rest else None,
+                version=version or '0.1.0', description=desc or '')
+            for path in created:
+                print(f'✓ أنشئ: {os.path.relpath(path)}')
+            print(f'الخطوة التالية: {prog_name()} حزمة تثبيت اسم_الحزمة '
+                  '— تُسجّل التبعيات في البيان')
+        elif cmd in ('تثبيت', '--تثبيت', 'install'):
             target = rest[0] if rest else None
             _package_install(packages, target, index_source)
         elif cmd in ('إزالة', '--إزالة', 'remove'):
@@ -297,6 +311,9 @@ def package_cli(args):
                       file=sys.stderr)
                 sys.exit(1)
             print(packages.remove(rest[0]))
+            if packages.unrecord_dependency(os.getcwd(), rest[0]):
+                print(f'→ حُذفت التبعية {rest[0]} من '
+                      f'{packages.MANIFEST_NAME}')
         elif cmd in ('قائمة', '--قائمة', 'list'):
             _package_list(packages)
         elif cmd in ('بحث', '--بحث', 'search'):
@@ -304,6 +321,12 @@ def package_cli(args):
         elif cmd in ('تحديث', '--تحديث', 'update'):
             target = rest[0] if rest else None
             _package_update(packages, target, index_source)
+        elif cmd in ('مزامنة', '--مزامنة', 'sync'):
+            _package_sync(packages, index_source)
+        elif cmd in ('ترقيات', '--ترقيات', 'outdated'):
+            _package_outdated(packages, index_source)
+        elif cmd in ('فحص', '--فحص', 'verify'):
+            _package_verify(packages)
         elif cmd in ('خادم', '--خادم', 'server'):
             # سجل مجتمعي محلي (1.20): يخدم الفهرس والتنزيل والنشر
             # وواجهة متصفح عربية (1.22) يعطلها علم --بلا_واجهة
@@ -354,7 +377,8 @@ def package_cli(args):
                                    auth_key=key, version=version))
         else:
             print(f"خطأ: أمر حزمة غير معروف: '{cmd}' — الأوامر: "
-                  'تثبيت، إزالة، قائمة، بحث، تحديث، خادم، نشر',
+                  'إنشاء، تثبيت، إزالة، قائمة، بحث، تحديث، مزامنة، '
+                  'ترقيات، فحص، خادم، نشر',
                   file=sys.stderr)
             sys.exit(1)
     except packages.ArabiError as error:
@@ -380,7 +404,46 @@ def _package_install(packages, target, index_source):
             _print_install(packages.install_dep(
                 name, constraint, os.getcwd(), index_source, []))
     else:
-        _print_install(packages.install(target, os.getcwd(), index_source))
+        messages = packages.install(target, os.getcwd(), index_source)
+        _print_install(messages)
+        _record_installed(packages, target)
+
+
+def _record_installed(packages, target):
+    """يسجل التثبيت بالاسم من السجل في بيان المشروع (1.28 — ق١٧/ق١٨).
+
+    القيد: الصريح من صيغة 'اسم>=قيد'، أو القيد الموجود سلفًا، أو
+    '^النسخة المثبتة' — وبيان غائب ينشأ أدنى. مصادر المسار/الرابط
+    لا تُسجّل (غير قابلة لإعادة الإنتاج من البيان).
+    """
+    if not isinstance(target, str):
+        return
+    if ('/' in target or '\\' in target
+            or target.startswith(('http://', 'https://', 'file://'))
+            or os.path.exists(target)):
+        return                            # مصدر مباشر — لا تسجيل
+    name, parsed = packages.split_request(target)
+    if not packages.NAME_RE.match(name):
+        return                            # فشل التثبيت يبرّر نفسه في الأعلى
+    installed = packages.list_installed(os.getcwd())
+    if name not in installed or not installed[name]['نسخة']:
+        return
+    constraint = parsed
+    if constraint is None:
+        existing = None
+        if os.path.isfile(os.path.join(os.getcwd(),
+                                       packages.MANIFEST_NAME)):
+            try:
+                existing = packages.read_project_manifest(
+                    os.getcwd()).get('التبعيات', {}).get(name)
+            except packages.ArabiError:
+                existing = None
+        constraint = existing or ('^' + installed[name]['نسخة'])
+    changed, used = packages.record_dependency(os.getcwd(), name,
+                                               constraint)
+    if changed:
+        print(f'→ سُجّلت التبعية {name} {used} في '
+              f'{packages.MANIFEST_NAME}')
 
 
 def _print_install(messages):
@@ -419,12 +482,83 @@ def _package_search(packages, term, index_source):
 
 
 def _package_update(packages, target, index_source):
-    """تحديث حزمة أو كل الحزم إلى أحدث نسخة في السجل."""
+    """تحديث حزمة أو كل الحزم إلى أحدث نسخة في السجل.
+
+    بعد النجاح: قيد التبعية في بيان المشروع يصحّح فقط حين تخالف
+    النسخة الجديدة القيد المسجل (ق١٧) — ولا يدسّ عند بيان فاسد.
+    """
     messages = packages.update(target, os.getcwd(), index_source)
     if not messages:
         print('لا حزم مثبتة لتحديثها')
         return
     _print_install(messages)
+    manifest_path = os.path.join(os.getcwd(), packages.MANIFEST_NAME)
+    if not os.path.isfile(manifest_path):
+        return
+    try:
+        data = packages.read_project_manifest(os.getcwd())
+        deps = data.get('التبعيات') or {}
+        installed = packages.list_installed(os.getcwd())
+        changed = False
+        for dep, constraint in list(deps.items()):
+            version = installed.get(dep, {}).get('نسخة')
+            if version and not packages.satisfies(version, constraint):
+                deps[dep] = '^' + version
+                print(f'→ حُدّث قيد {dep} في البيان إلى {deps[dep]}')
+                changed = True
+        if changed:
+            packages.write_project_manifest(os.getcwd(), data)
+    except packages.ArabiError as exc:
+        print(f'تنبيه: تعذر تحديث قيود البيان: '
+              f'{getattr(exc, "message", None) or exc}', file=sys.stderr)
+
+
+def _package_sync(packages, index_source):
+    """مزامنة بيئة المشروع مع بيان حزمة.json (1.28)."""
+    try:
+        messages = packages.sync(os.getcwd(), index_source)
+    except packages.ArabiError as error:
+        print(f'✗ {getattr(error, "message", None) or error}',
+              file=sys.stderr)
+        sys.exit(1)
+    for text, kind in messages:
+        icon = {'ثُبتت': '✓', 'استُبدلت': '✓', 'مطابقة': '•',
+                'زيادة': '•', 'تعذر': '✗'}.get(kind, '•')
+        print(icon + ' ' + text)
+    if not messages:
+        print('البيئة موزونة مع البيان — لا تبعيات ولا حزم زيادة')
+        return
+    if any(kind == 'ثُبتت' for _, kind in messages):
+        print(f'→ سُجّلت النسخ المثبتة في {packages.LOCK_NAME}')
+    if any(kind == 'تعذر' for _, kind in messages):
+        print('✗ المزامنة انتهت بأعطال — بقية البيئة موزونة',
+              file=sys.stderr)
+        sys.exit(1)
+
+
+def _package_outdated(packages, index_source):
+    """عرض الحزم التي لها نسخة أحدث في السجل (1.28) — معلوماتي."""
+    rows = packages.outdated(os.getcwd(), index_source)
+    if not rows:
+        print('كل الحزم المثبتة على أحدث نسخة في السجل')
+        return
+    print(f'حزم لها نسخة أحدث في السجل ({len(rows)}):')
+    for name, current, latest, desc in rows:
+        note = f' — {desc}' if desc else ''
+        print(f'  - {name} v{current} ← v{latest}{note}')
+    print(f'  للتحديث: {prog_name()} حزمة تحديث')
+
+
+def _package_verify(packages):
+    """فحص سلامة بيئة المشروع — رمز خروج 1 عند الانحراف (ق٢٠)."""
+    issues = packages.verify(os.getcwd())
+    if not issues:
+        print('✓ البيئة سليمة: القفل والبيان ومجلد الحزم متطابقة')
+        return
+    print(f'انحراف في بيئة المشروع ({len(issues)}):')
+    for issue in issues:
+        print(f'  - {issue}')
+    sys.exit(1)
 
 
 def run_file(path, use_bytecode=True, use_vm=True):
@@ -624,12 +758,17 @@ def show_help():
     {prog} --وثق ملف [ناتج] توليد توثيق Markdown
     {prog} --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
     {prog} --حزم           عرض المكتبات المثبتة
+    {prog} حزمة إنشاء [اسم]             إنشاء مشروع جديد ببيان ومدخل نموذجي
     {prog} حزمة تثبيت [اسم|مسار|رابط]
-                                    تثبيت حزمة أو تبعيات المشروع (سجل الحزم)
+                                    تثبيت حزمة أو تبعيات المشروع (سجل الحزم) —
+                                    التثبيت بالاسم يُسجّل التبعية في حزمة.json
     {prog} حزمة قائمة       عرض الحزم المثبتة في حزم/
-    {prog} حزمة إزالة اسم   إزالة حزمة مثبتة
+    {prog} حزمة إزالة اسم   إزالة حزمة مثبتة (ومحوها من البيان)
     {prog} حزمة بحث [كلمة]  البحث في فهرس السجل
     {prog} حزمة تحديث [اسم] تحديث إلى أحدث نسخة في السجل
+    {prog} حزمة مزامنة      موازنة بيئة المشروع مع بيان حزمة.json
+    {prog} حزمة ترقيات      عرض الحزم التي لها نسخة أحدث في السجل
+    {prog} حزمة فحص         فحص سلامة البيئة (رمز خروج 1 عند الانحراف)
     {prog} --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
     {prog} --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
     {prog} --لا-دولاب ملف  تشغيل معطّلًا الدولاب الافتراضي (ممسح شجري)

@@ -11,11 +11,27 @@
     الفهرس.json         فهرس السجل: اسم الحزمة ← نسختها ومصدرها
 
 أوامر المدير (عبر المفسّر):
+    python arabi.py حزمة إنشاء [اسم]             إنشاء مشروع جديد ببيان ومدخل
     python arabi.py حزمة تثبيت [اسم|مسار|رابط]   تثبيت حزمة أو تبعيات المشروع
-    python arabi.py حزمة إزالة اسم               إزالة حزمة مثبتة
+                                                 (التثبيت بالاسم يُسجّل التبعية في بيان المشروع)
+    python arabi.py حزمة إزالة اسم               إزالة حزمة مثبتة (ومحوها من البيان)
     python arabi.py حزمة قائمة                   عرض الحزم المثبتة
     python arabi.py حزمة بحث [كلمة]              البحث في فهرس السجل
     python arabi.py حزمة تحديث [اسم]             تحديث إلى أحدث نسخة في السجل
+    python arabi.py حزمة مزامنة                  موازنة البيئة مع بيان المشروع
+    python arabi.py حزمة ترقيات                  عرض الحزم التي لها نسخة أحدث
+    python arabi.py حزمة فحص                     فحص سلامة البيئة (رمز خروج 1 عند الانحراف)
+
+قرارات البيئة (1.28):
+    * البيان مصدر الحقيقة: التثبيت بالاسم من السجل يُسجّل «الاسم: قيد»
+      في حزمة.json للمشروع، والإزالة تمحوه، والتحديث يصحّح القيد فقط
+      حين تخالف النسخة الجديدة القيد المسجل.
+    * القيد الافتراضي عند التسجيل «^النسخة» (توافق semver) — والقفل
+      يثبت النسخة الدقيقة كما كان.
+    * حزم «الزيادة» (مثبتة بلا تبعية في البيان) تُعلن ولا تُمس أبدًا —
+      لا مسح صامت.
+    * التسجيل في طبقة سطر الأوامر فقط: دوال المكتبة نقية، والتبعيات
+      الانتقالية لا تُسجّل في بيان المشروع (ق١٨).
 
 مصدر الفهرس: رابط افتراضي (مستودع arabi-registry على GitHub) يُستبدل
 بمتغير البيئة عربي_الفهرس أو بالعلم --الفهرس — ويدعم المسارات المحلية
@@ -60,9 +76,11 @@ NAME_RE = re.compile(r'^[^\W\d]\w*$', re.UNICODE)
 
 __all__ = ['MANIFEST_NAME', 'LOCK_NAME', 'PACKAGES_DIR', 'INDEX_NAME',
            'DEFAULT_INDEX', 'INDEX_ENV',
-           'parse_version', 'compare_versions', 'satisfies',
-           'read_manifest', 'load_index', 'install', 'remove',
-           'list_installed', 'update', 'search', 'read_lock', 'publish']
+           'parse_version', 'compare_versions', 'satisfies', 'split_request',
+           'read_manifest', 'read_project_manifest', 'write_project_manifest',
+           'record_dependency', 'unrecord_dependency', 'create_project',
+           'load_index', 'install', 'remove', 'list_installed', 'update',
+           'search', 'read_lock', 'publish', 'sync', 'outdated', 'verify']
 
 
 # ================== النسخ والقيود ==================
@@ -215,11 +233,14 @@ def load_index(index_source=None):
                                         timeout=30) as resp:
                 content = resp.read().decode('utf-8')
         except (OSError, ValueError) as exc:
-            raise ArabiError(f"فشل تحميل فهرس السجل: {exc}")
+            raise ArabiError(f"فشل تحميل فهرس السجل من "
+                             f"'{index_source}': {exc}")
     else:
         if not os.path.isfile(index_source):
             raise ArabiError(
-                f"ملف فهرس السجل '{index_source}' غير موجود")
+                f"ملف فهرس السجل '{index_source}' غير موجود — مرر "
+                "المصدر بعلم --الفهرس أو اضبط متغير البيئة "
+                + INDEX_ENV)
         with open(index_source, encoding='utf-8') as f:
             content = f.read()
     try:
@@ -408,16 +429,43 @@ def read_lock(project_dir):
     return data.get('الحزم', {}) if isinstance(data, dict) else {}
 
 
+def split_request(request):
+    """يفصل 'اسم>=1.0' إلى (الاسم، القيد) — أو يعيد (النص، None).
+
+    يقبل المعاملات >= <= == > < = ^ ~ مع مسافات اختيارية. المسارات
+    والروابط لا تطابق النمط أصلًا (لأن اسم الحزمة معرف بلا فواصل)،
+    فتُعاد كما هي بلا قيد.
+    """
+    if not isinstance(request, str):
+        return request, None
+    m = re.match(r'^([^\W\d]\w*)\s*(>=|<=|==|>|<|=|\^|~)\s*(.+)$',
+                 request.strip(), re.UNICODE)
+    if m:
+        return m.group(1), m.group(2) + m.group(3).strip()
+    return request.strip(), None
+
+
 def install(request, project_dir=None, index_source=None, _stack=None):
     """يثبت حزمة بالاسم (من الفهرس) أو بمصدر مباشر، مع تبعياتها.
 
     يعيد قائمة رسائل النتائج [(نص، نوع)] حيث نوع: ثُبتت/موجودة.
-    القيد الاختياري يمر مع الاسم بصيغة 'اسم>=1.0' — أو استخدم install_dep.
+    القيد الاختياري يمر مع الاسم بصيغة 'اسم>=1.0' (يفصلها split_request
+    — كانت موثقة بلا سلك فعلي حتى 1.28) — أو استخدم install_dep.
     """
     if project_dir is None:
         project_dir = os.getcwd()
     if _stack is None:
         _stack = []
+    # فصل القيد عن الاسم للصيغة الموثقة — لكن المصدر الموجود فعلًا
+    # على القرص (اسم ملف مثلًا) يبقى مصدرًا كما هو
+    if isinstance(request, str) and not (
+            '/' in request or '\\' in request
+            or request.startswith(('http://', 'https://', 'file://'))
+            or os.path.exists(request)):
+        request, parsed = split_request(request)
+        if parsed is not None:
+            return _install_one(request, parsed, project_dir,
+                                index_source, _stack)
     return _install_one(request, '*', project_dir, index_source, _stack)
 
 
@@ -620,6 +668,317 @@ def update(name=None, project_dir=None, index_source=None):
         if snapshot is not None:
             shutil.rmtree(snapshot, ignore_errors=True)
     return messages
+
+
+# ================== بيئة المشروع (الإصدار 1.28) ==================
+# البيان مصدر الحقيقة: تثبيت بالاسم يسجّل، إزالة تمحو، تحديث يصحّح
+# القيد عند المخالفة فقط، والمزامنة توازن بلا مسح صامت (ق١٧-ق١٩).
+
+MANIFEST_PLACEHOLDER = 'بيان'         # اسم ملف مؤقت للكتابة الذرية
+
+
+def read_project_manifest(project_dir):
+    """يقرأ بيان المشروع (حزمة.json في جذر المشروع) — قارئ متسامح.
+
+    بيان المشروع هو نفسه بيان الحزمة (يخدم النشر لاحقًا)، لكن هنا
+    الاسم والنسخة اختياريان — المطلوب فقط أن تكون التبعيات قاموس
+    اسم ← قيد سليم، وأن تكون الاسم/النسخة سليمتين إن وُجدتا.
+    """
+    path = os.path.join(project_dir, MANIFEST_NAME)
+    if not os.path.isfile(path):
+        raise ArabiError(
+            f"لا بيان مشروع في '{project_dir}' — أنشئه بأمر "
+            "'حزمة إنشاء' أو أدرج تبعياتك في " + MANIFEST_NAME)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except ValueError as exc:
+        raise ArabiError(f"بيان مشروع غير صالح في '{path}': {exc}")
+    except OSError as exc:
+        raise ArabiError(f"لا يمكن قراءة بيان المشروع '{path}': {exc}")
+    if not isinstance(data, dict):
+        raise ArabiError(f"بيان المشروع '{path}' يجب أن يكون كائن JSON")
+    if data.get('الاسم') and not NAME_RE.match(data['الاسم']):
+        raise ArabiError(
+            f"حقل 'الاسم' في بيان المشروع '{data['الاسم']}' غير صالح — "
+            'يجب أن يكون معرفًا قابلًا للاستيراد')
+    if data.get('النسخة'):
+        parse_version(data['النسخة'])
+    deps = data.get('التبعيات') or {}
+    if not isinstance(deps, dict):
+        raise ArabiError(
+            f"حقل 'التبعيات' في '{path}' يجب أن يكون قاموس اسم ← قيد")
+    for dep, constraint in deps.items():
+        if not NAME_RE.match(dep):
+            raise ArabiError(
+                f"اسم تبعية غير صالح في '{path}': '{dep}'")
+        satisfies('0.0.0', constraint)   # تحقق من صيغة القيد
+    return data
+
+
+def write_project_manifest(project_dir, data):
+    """يكتب بيان المشروع كتابة ذرية — لا بيان نصف مكتوب أبدًا."""
+    parse_version(data.get('النسخة') or '0.0.0')
+    path = os.path.join(project_dir, MANIFEST_NAME)
+    tmp = path + '.' + MANIFEST_PLACEHOLDER
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
+
+
+def record_dependency(project_dir, name, constraint):
+    """يسجل تبعية «اسم: قيد» في بيان المشروع — وينشئ بيانًا أدنى إن لم يوجد.
+
+    يعيد (تغير، القيد المسجل). بيان المشروع الأدنى الجديد يأخذ اسم
+    المجلد إن كان معرفًا صالحًا (يُترك فارغًا وإلا — النشر يطلبه حينئذٍ
+    برسالة واضحة).
+    """
+    if not NAME_RE.match(name):
+        raise ArabiError(
+            f"اسم الحزمة '{name}' غير صالح — لا يُسجَّل في بيان المشروع")
+    satisfies('0.0.0', constraint)       # لا قيد معطوب يُكتب في البيان
+    path = os.path.join(project_dir, MANIFEST_NAME)
+    if os.path.isfile(path):
+        data = read_project_manifest(project_dir)
+    else:
+        data = {'النسخة': '0.1.0', 'التبعيات': {}}
+        base = os.path.basename(os.path.abspath(project_dir))
+        if NAME_RE.match(base):
+            data['الاسم'] = base
+    deps = data.setdefault('التبعيات', {})
+    if deps.get(name) == constraint:
+        return False, constraint
+    deps[name] = constraint
+    write_project_manifest(project_dir, data)
+    return True, constraint
+
+
+def unrecord_dependency(project_dir, name):
+    """يمحو تبعية من بيان المشروع — يعيد True إن تغير شيء.
+
+    بيان فاسد أو غائب لا يعطل الإزالة — تُترك البيئة كما هي.
+    """
+    path = os.path.join(project_dir, MANIFEST_NAME)
+    if not os.path.isfile(path):
+        return False
+    try:
+        data = read_project_manifest(project_dir)
+    except ArabiError:
+        return False
+    deps = data.get('التبعيات') or {}
+    if name not in deps:
+        return False
+    del deps[name]
+    write_project_manifest(project_dir, data)
+    return True
+
+
+def create_project(project_dir=None, name=None, version='0.1.0',
+                   description='', entry=None):
+    """ينشئ هيكل مشروع جديد: بيان حزمة.json وملف مدخل (1.28).
+
+    لا يكتب فوق بيان قائم ولا فوق ملف مدخل موجود — ويعيد قائمة
+    المسارات المنشأة. الاسم يُؤخذ من المعامل أو من اسم المجلد —
+    وإن لم يكن معرفًا صالحًا رُفض الأمر برسالة تطلب اسمًا صريحًا.
+    """
+    project_dir = project_dir or os.getcwd()
+    manifest_path = os.path.join(project_dir, MANIFEST_NAME)
+    if os.path.isfile(manifest_path):
+        raise ArabiError(
+            f'المشروع يحمل {MANIFEST_NAME} مسبقًا — لا أكتب فوقه؛ '
+            'أضف تبعياتك بأمر: حزمة تثبيت اسم')
+    parse_version(version)
+    name = name or os.path.basename(os.path.abspath(project_dir))
+    if not NAME_RE.match(name):
+        raise ArabiError(
+            f"الاسم '{name}' غير صالح — مرر اسمًا معرفًا قابلًا "
+            f"للاستيراد بعد الأمر: حزمة إنشاء اسم")
+    entry = entry or (name + '.عربي')
+    if entry.startswith('/') or '..' in entry or '\\' in entry:
+        raise ArabiError(
+            f"المدخل '{entry}' يجب أن يكون مسارًا داخليًا بسيطًا "
+            'بلا قفزات')
+    write_project_manifest(project_dir, {
+        'الاسم': name, 'النسخة': version, 'الوصف': description,
+        'المدخل': entry, 'التبعيات': {}})
+    created = [manifest_path]
+    entry_path = os.path.join(project_dir, entry)
+    if not os.path.exists(entry_path):
+        os.makedirs(os.path.dirname(entry_path) or project_dir,
+                    exist_ok=True)
+        with open(entry_path, 'w', encoding='utf-8') as f:
+            f.write(f'# حزمة «{name}» — أنشئت بأمر «حزمة إنشاء»\n\n'
+                    f'اطبع("مرحبًا من {name}")\n')
+        created.append(entry_path)
+    return created
+
+
+def _reinstall_matching(name, constraint, project_dir, index_source,
+                        messages):
+    """يستبدل حزمة مثبتة بنسخة تلبي القيد — مع تراجع عند الفشل.
+
+    نفس نمط تراجع update: لقطة قبل الإزالة، وإعادتها إن فشل
+    التثبيت البديل — فلا تبقى الحزمة محذوفة.
+    """
+    dest = _pkg_dir(project_dir, name)
+    snapshot = None
+    if os.path.isdir(dest):
+        snapshot = tempfile.mkdtemp(prefix='عربي-مزامنة-')
+        shutil.copytree(dest, os.path.join(snapshot, name))
+    remove(name, project_dir, _force=True)
+    try:
+        messages.extend(install_dep(name, constraint, project_dir,
+                                    index_source, []))
+    except Exception:
+        if snapshot is not None:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if os.path.exists(dest):
+                shutil.rmtree(dest)
+            shutil.copytree(os.path.join(snapshot, name), dest)
+            shutil.rmtree(snapshot, ignore_errors=True)
+        raise
+    if snapshot is not None:
+        shutil.rmtree(snapshot, ignore_errors=True)
+
+
+def sync(project_dir=None, index_source=None):
+    """يوازن بيئة المشروع مع بيان حزمة.json (1.28).
+
+    لكل تبعية في البيان:
+      غير مثبتة → تُثبت وفق قيدها
+      مثبتة تلبي القيد → تبقى كما هي (مطابقة)
+      مثبتة تخالف القيد → تُستبدل بنسخة تلبيه (بتراجع عند الفشل)
+    والحزم المثبتة بلا تبعية في البيان تُعلن «زيادة» ولا تُمس (ق١٩).
+    الأعطال تُجمع في رسائل نوع «تعذر» ولا تقطع الباقي — يعيد القائمة
+    كاملة [(نص، نوع)] بأنواع: ثُبتت/مطابقة/استُبدلت/زيادة/تعذر، والنداء
+    (سطر الأوامر) يقرر رمز الخروج من وجود «تعذر». غياب البيان نفسه
+    خطأ فوري يرفع ArabiError.
+    """
+    if project_dir is None:
+        project_dir = os.getcwd()
+    data = read_project_manifest(project_dir)
+    deps = data.get('التبعيات') or {}
+    installed = list_installed(project_dir)
+    messages = []
+    for dep in sorted(deps):
+        constraint = deps[dep]
+        version = installed.get(dep, {}).get('نسخة')
+        if version is not None and satisfies(version, constraint):
+            messages.append((f'{dep} v{version} تلبي القيد '
+                             f"'{constraint}'", 'مطابقة'))
+            continue
+        try:
+            if dep in installed:
+                # مخالفة أو ملف مفرد بلا نسخة — استبدال بتراجع
+                _reinstall_matching(dep, constraint, project_dir,
+                                    index_source, messages)
+                messages.append((f'{dep} — استُبدلت بنسخة تلبي القيد '
+                                 f"'{constraint}'", 'استُبدلت'))
+            else:
+                messages.extend(install_dep(dep, constraint,
+                                            project_dir, index_source,
+                                            []))
+        except ArabiError as exc:
+            messages.append((f'{dep} — تعذر التوافق: '
+                             f'{getattr(exc, "message", None) or exc}',
+                             'تعذر'))
+    for extra in sorted(set(installed) - set(deps)):
+        version = installed[extra]['نسخة']
+        shown = f' v{version}' if version else ''
+        messages.append((f"{extra}{shown} مثبتة ولا تذكرها التبعيات "
+                         '(زيادة — لم تُمس)', 'زيادة'))
+    return messages
+
+
+def outdated(project_dir=None, index_source=None):
+    """يعيد الحزم المثبتة التي لها نسخة أحدث في السجل (1.28).
+
+    كل سطر: (الاسم، النسخة المثبتة، الأحدث في السجل، الوصف).
+    الحزم بلا نسخة أو الغائبة عن الفهرس تُتخطى بصمت.
+    """
+    if project_dir is None:
+        project_dir = os.getcwd()
+    installed = list_installed(project_dir)
+    if not installed:
+        return []
+    index = load_index(index_source)
+    rows = []
+    for name in sorted(installed):
+        version = installed[name]['نسخة']
+        if version is None or name not in index:
+            continue
+        latest = index[name].get('النسخة') or '0.0.0'
+        if compare_versions(latest, version) > 0:
+            rows.append((name, version, latest,
+                         index[name].get('الوصف', '')))
+    return rows
+
+
+def verify(project_dir=None):
+    """يفحص سلامة بيئة المشروع — يعيد قائمة مشكلات (فارغة = سليمة).
+
+    الفحوص: القفل مقابل حزم/ من الاتجاهين، تطابق النسخ، تبعيات
+    البيان مثبتة وملبي لقيودها، وسلامة بيانات كل مجلد حزمة.
+    """
+    if project_dir is None:
+        project_dir = os.getcwd()
+    issues = []
+    installed = {}
+    root = _packages_root(project_dir)
+    if os.path.isdir(root):
+        for entry in sorted(os.listdir(root)):
+            sub = os.path.join(root, entry)
+            if os.path.isdir(sub) and os.path.isfile(
+                    os.path.join(sub, MANIFEST_NAME)):
+                try:
+                    data = read_manifest(sub)
+                    installed[data['الاسم']] = data['النسخة']
+                except ArabiError as exc:
+                    issues.append(
+                        f'حزمة ببيان غير صالح في {PACKAGES_DIR}/{entry}: '
+                        f'{getattr(exc, "message", None) or exc}')
+            elif entry.endswith('.عربي') and os.path.isfile(sub):
+                installed[entry[:-len('.عربي')]] = None
+            elif os.path.isdir(sub):
+                issues.append(
+                    f"مجلد بلا {MANIFEST_NAME} داخل {PACKAGES_DIR}/: "
+                    f'{entry} — أصلحه أو أزله يدويًا')
+    lock = read_lock(project_dir)
+    for name in sorted(set(installed) - set(lock)):
+        issues.append(
+            f"'{name}' مثبتة في {PACKAGES_DIR}/ ولا تذكرها "
+            f'{LOCK_NAME} — شغل تثبيت لإعادة بناء القفل')
+    for name in sorted(set(lock) - set(installed)):
+        issues.append(
+            f"'{name}' مسجلة في {LOCK_NAME} وملفاتها غائبة عن "
+            f'{PACKAGES_DIR}/ — شغل مزامنة أو أعِد التثبيت')
+    for name in sorted(set(lock) & set(installed)):
+        lv, iv = lock[name].get('النسخة'), installed[name]
+        if lv and iv and lv != iv:
+            issues.append(
+                f"'{name}' نسختها في {PACKAGES_DIR}/ هي {iv} وفي "
+                f'القفل {lv} — البيئتان غير متطابقتين')
+    if os.path.isfile(os.path.join(project_dir, MANIFEST_NAME)):
+        try:
+            data = read_project_manifest(project_dir)
+            for dep, constraint in (data.get('التبعيات') or {}).items():
+                if dep not in installed:
+                    issues.append(
+                        f"التبعية '{dep}' في البيان غير مثبتة — "
+                        'شغل مزامنة')
+                    continue
+                version = installed[dep]
+                if version is not None and not satisfies(
+                        version, constraint):
+                    issues.append(
+                        f"التبعية '{dep}' مثبتة بنسخة {version} تخالف "
+                        f"قيد البيان '{constraint}'")
+        except ArabiError as exc:
+            issues.append(
+                'بيان المشروع غير صالح: '
+                + (getattr(exc, 'message', None) or str(exc)))
+    return issues
 
 
 # ================== النشر إلى سجل مجتمعي (الإصدار 1.20) ==================
