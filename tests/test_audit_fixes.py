@@ -301,8 +301,8 @@ class TestPackageSafety(unittest.TestCase):
         with zipfile.ZipFile(archive, 'w') as z:
             z.write(os.path.join(src, 'مكتبة.عربي'), 'مكتبة.عربي')
             z.write(os.path.join(src, 'حزمة.json'), 'حزمة.json')
-        fetched = packages._fetch_local(archive, tmp, 'مكتبة', None,
-                                        downloaded=True)
+        fetched, _fp = packages._fetch_local(archive, tmp, 'مكتبة',
+                                             None, downloaded=True)
         files = []
         for base, _dirs, names in os.walk(fetched):
             files.extend(names)

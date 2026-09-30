@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -270,10 +271,12 @@ def search(term, index_source=None):
 # ================== جلب المصدر ==================
 
 def _fetch_source(source, expected_name=None, index_info=None):
-    """يجلب مصدر الحزمة إلى مجلد مؤقت ويعيد مساره المحلي.
+    """يجلب مصدر الحزمة إلى مجلد مؤقت ويعيد (المسار، حالة البصمة).
 
     يدعم: مجلدًا محليًا ببيان، ملف .عربي مفرد (يُغلَّف ببيان تلقائي)،
     أرشيف .zip، أو رابط http(s)/file لأيٍّ من ذلك.
+    حالة البصمة: True تحققت وتطابقت، False أعلنها الفهرس ولم
+    تطابق (يرفع الخطأ قبل الوصول إلى هنا)، None لا إعلان.
     """
     tmp = tempfile.mkdtemp(prefix='عربي-حزمة-')
     try:
@@ -291,6 +294,15 @@ def _fetch_into(source, tmp, expected_name, index_info):
             urllib.parse.urlsplit(source).path)
         return _fetch_local(local, tmp, expected_name, index_info)
     if source.startswith(('http://', 'https://')):
+        # تحذير صادق (ق٢٢): محتوى يعبر الشبكة بلا إعلان بصمة سلامة —
+        # فهرس ببروتوكول أقدم من 1.29. التثبيت يتم لكن بلا تحقق محتوى.
+        if index_info is not None and 'البصمة' not in index_info:
+            _warn = expected_name or os.path.basename(
+                urllib.parse.urlsplit(source).path) or source
+            print(f'تحذير: مصدر الحزمة «{_warn}» رابط شبكي والفهرس '
+                  'لا يعلن بصمة سلامة (sha256) — التثبيت بلا تحقق '
+                  'محتوى؛ حدّث السجل إلى بروتوكول 1.29 فما فوق',
+                  file=sys.stderr)
         # حفظ باسمه الأصلي من الرابط حتى تُعرف صيغته (.عربي أو .zip)
         basename = os.path.basename(urllib.parse.urlsplit(source).path) \
             or '_تنزيل'
@@ -302,6 +314,65 @@ def _fetch_into(source, tmp, expected_name, index_info):
         return _fetch_local(local, tmp, expected_name, index_info,
                             downloaded=True)
     return _fetch_local(source, tmp, expected_name, index_info)
+
+
+def _sha256_file(path):
+    """بصمة sha256 لملف — قراءة بالدفعات (حزم حتى 64MB لا تُحمل كاملة)."""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+FP_RE = re.compile(r'^[0-9a-f]{64}$')
+
+
+def _verify_fingerprint(path, declared, name):
+    """يتحقق من بصمة sha256 المعلنة للملف — فشل مغلق عند الخلاف (ق٢٢).
+
+    المعلن يُطبّع (تر، تقليم) ويُرفض إن لم يكن ستر sha256 ساريًا؛
+    المقارنة زمن-ثابت (hmac.compare_digest) كعادة المشروع في
+    مواضع التحقق كلها.
+    """
+    if not isinstance(declared, str):
+        raise ArabiError(
+            f"بصمة الحزمة '{name}' في الفهرس ليست نصًا — بصمة ستر "
+            'sha256 ستارية مطلوبة')
+    declared = declared.strip().lower()
+    if not FP_RE.match(declared):
+        raise ArabiError(
+            f"الفهرس يعلن بصمة غير سليمة للحزمة '{name}' — المطلوب "
+            f'ستر sha256 (64 محرفًا سداسيًا) والمعلن: {declared[:70]}')
+    actual = _sha256_file(path)
+    if not hmac.compare_digest(actual, declared):
+        raise ArabiError(
+            f"بصمة الحزمة '{name}' لا تطابق ما أعلنه الفهرس — رُفض "
+            'التثبيت (فشل مغلق): المحتوى تالف أو مُعبث بين الإعلان '
+            f'والتنزيل. المعلن: {declared}، الفعلي: {actual}')
+
+
+def _tree_fingerprint(pkg_path):
+    """بصمة الشجرة لمحتوى حزمة مثبتة — هاش شامل لكل ملف مرتب (ق٢٣).
+
+    يُحسب لكل ملف بصمته ثم يُمزج المسار النسبي بالترتيب المحدد —
+    فأي تعديل محتوى أو إضافة أو حذف ملف يغير البصمة كله. مجلد
+    __بايت__ (كاش الترجمة المولد عند التشغيل) مستثنى.
+    """
+    if os.path.isfile(pkg_path):
+        return _sha256_file(pkg_path)
+    digest = hashlib.sha256()
+    for root, dirs, files in os.walk(pkg_path):
+        dirs[:] = sorted(d for d in dirs if d != '__بايت__')
+        for fname in sorted(files):
+            full = os.path.join(root, fname)
+            rel = os.path.relpath(full, pkg_path).replace(os.sep, '/')
+            file_fp = _sha256_file(full)
+            digest.update(rel.encode('utf-8'))
+            digest.update(b'\0')
+            digest.update(bytes.fromhex(file_fp))
+            digest.update(b'\n')
+    return digest.hexdigest()
 
 
 def _safe_extractall(zf, target_dir):
@@ -316,14 +387,26 @@ def _safe_extractall(zf, target_dir):
 
 
 def _fetch_local(source, tmp, expected_name, index_info, downloaded=False):
-    """يعالج مصدرًا محليًا (بعد التنزيل إن كان رابطًا)."""
+    """يعالج مصدرًا محليًا (بعد التنزيل إن كان رابطًا) — ويتحقق من
+    البصمة المعلنة أولًا لكل مصدر ملف (ق٢٢: فشل مغلق عند الخلاف)."""
     version = (index_info or {}).get('النسخة') or '0.0.0'
+    declared_fp = (index_info or {}).get('البصمة')
+    if declared_fp is not None:
+        if os.path.isfile(source):
+            _verify_fingerprint(source, declared_fp,
+                                expected_name or os.path.basename(source))
+        else:
+            # مصدر مجلد: بصمة الأرشيف لا تنطبق عليه — تحذير صادق لا صمت
+            print(f'تحذير: بصمة الفهرس تخص أرشيفًا والمصدر مجلد '
+                  f'«{source}» — تخطي التحقق (بصمات المجلدات غير '
+                  'معرفة في البروتوكول)', file=sys.stderr)
+    fp_state = True if declared_fp is not None else None
     if os.path.isdir(source) and os.path.isfile(
             os.path.join(source, MANIFEST_NAME)):
         # مجلد حزمة كامل — انسخه كما هو
         dest = os.path.join(tmp, 'حزمة')
         shutil.copytree(source, dest)
-        return dest
+        return dest, fp_state
     if zipfile.is_zipfile(source):
         # الفك في مجلد فرعي نظيف — لا بايتات الأرشيف نفسه تتسرب
         # داخل الحزمة المثبتة (تقرير التدقيق م11-5)
@@ -333,12 +416,12 @@ def _fetch_local(source, tmp, expected_name, index_info, downloaded=False):
             _safe_extractall(zf, extract_dir)
         # البيان إما في الجذر أو في مجلد واحد داخله
         if os.path.isfile(os.path.join(extract_dir, MANIFEST_NAME)):
-            return extract_dir
+            return extract_dir, fp_state
         for entry in sorted(os.listdir(extract_dir)):
             sub = os.path.join(extract_dir, entry)
             if os.path.isdir(sub) and os.path.isfile(
                     os.path.join(sub, MANIFEST_NAME)):
-                return sub
+                return sub, fp_state
         raise ArabiError(
             f"الأرشيف '{os.path.basename(source)}' لا يحتوي {MANIFEST_NAME}")
     if os.path.isfile(source) and source.endswith('.عربي'):
@@ -359,7 +442,7 @@ def _fetch_local(source, tmp, expected_name, index_info, downloaded=False):
             'الوصف': (index_info or {}).get('الوصف', ''),
             'المدخل': fname,
         })
-        return dest
+        return dest, fp_state
     raise ArabiError(
         f"مصدر غير مفهوم للحزمة: '{source}' — المطلوب مجلد ببيان، "
         "أو ملف .عربي، أو أرشيف .zip، أو رابط إليها")
@@ -401,15 +484,24 @@ def list_installed(project_dir):
 
 
 def _write_lock(project_dir):
-    """يعيد بناء قفل.json من بيانات الحزم المثبتة فعليًا."""
+    """يعيد بناء قفل.json من بيانات الحزم المثبتة فعليًا — مع بصمة
+    الشجرة لكل حزمة (ق٢٣): فحص يكشف أي عبث بالملفات بعد التثبيت."""
     installed = list_installed(project_dir)
-    lock = {'الحزم': {
-        name: {
+    entries = {}
+    for name, info in installed.items():
+        pkg_path = _pkg_dir(project_dir, name)
+        if not os.path.isdir(pkg_path):
+            single = os.path.join(_packages_root(project_dir),
+                                  name + '.عربي')
+            pkg_path = single if os.path.isfile(single) else None
+        entry = {
             'النسخة': info['نسخة'],
             'التبعيات': info['تبعيات'],
         }
-        for name, info in installed.items()
-    }}
+        if pkg_path is not None:
+            entry['بصمة_الشجرة'] = _tree_fingerprint(pkg_path)
+        entries[name] = entry
+    lock = {'الحزم': entries}
     path = os.path.join(project_dir, LOCK_NAME)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(lock, f, ensure_ascii=False, indent=2)
@@ -485,12 +577,12 @@ def _install_one(request, constraint, project_dir, index_source, _stack):
 
     if is_source:
         # مصدر مباشر: الاسم من البيان داخل المصدر
-        fetched = _fetch_source(request)
+        fetched, fp_state = _fetch_source(request)
         try:
             data = read_manifest(fetched)
             messages.extend(_commit_package(
                 fetched, data, constraint, project_dir, index_source,
-                _stack))
+                _stack, fp_state=fp_state))
         finally:
             shutil.rmtree(fetched, ignore_errors=True)
         return messages
@@ -533,9 +625,10 @@ def _install_one(request, constraint, project_dir, index_source, _stack):
             f"الحزمة '{name}' مثبتة بنسخة {current} لا تلبي القيد "
             f"'{constraint}' — أزلها أولًا: حزمة إزالة {name}")
 
-    # اجلب المصدر واقرأ البيان الحقيقي
-    fetched = _fetch_source(info['المصدر'], expected_name=name,
-                            index_info=info)
+    # اجلب المصدر واقرأ البيان الحقيقي — والبصمة المعلنة تتحقق
+    # داخل الجلب نفسه (فشل مغلق قبل أي فك أو تثبيت)
+    fetched, fp_state = _fetch_source(info['المصدر'], expected_name=name,
+                                      index_info=info)
     try:
         data = read_manifest(fetched)
         if data['الاسم'] != name:
@@ -547,15 +640,20 @@ def _install_one(request, constraint, project_dir, index_source, _stack):
                 f"نسخة '{data['الاسم']}' الفعلية {data['النسخة']} لا تلبي "
                 f"القيد '{constraint}'")
         messages.extend(_commit_package(
-            fetched, data, constraint, project_dir, index_source, _stack))
+            fetched, data, constraint, project_dir, index_source, _stack,
+            fp_state=fp_state))
     finally:
         shutil.rmtree(fetched, ignore_errors=True)
     return messages
 
 
 def _commit_package(fetched, data, constraint, project_dir, index_source,
-                    _stack):
-    """يثبت حزمة مجلبة: فحص الكود ثم تبعياتها ثم انسخها واكتب القفل."""
+                    _stack, fp_state=None):
+    """يثبت حزمة مجلبة: فحص الكود ثم تبعياتها ثم انسخها واكتب القفل.
+
+    fp_state: حالة تحقق البصمة من _fetch_source — True يعني أن الفهرس
+    أعلن بصمة وتطابقت، فتُذكر في رسالة التثبيت (شفافية سلسلة التوريد).
+    """
     name = data['الاسم']
     messages = []
 
@@ -574,8 +672,9 @@ def _commit_package(fetched, data, constraint, project_dir, index_source,
         shutil.rmtree(dest)
     shutil.copytree(fetched, dest)
     _write_lock(project_dir)
+    note = ' (بصمة الفهرس مطابقة)' if fp_state else ''
     messages.append((f"{name} v{data['النسخة']} — ثُبتت في "
-                     f"{PACKAGES_DIR}/{name}", 'ثُبتت'))
+                     f"{PACKAGES_DIR}/{name}{note}", 'ثُبتت'))
     return messages
 
 
@@ -978,6 +1077,25 @@ def verify(project_dir=None):
             issues.append(
                 'بيان المشروع غير صالح: '
                 + (getattr(exc, 'message', None) or str(exc)))
+    # بصمات الشجرة (ق٢٣): القفل يذكر بصمة كل حزمة عند تثبيتها —
+    # إعادة الحساب تكشف أي تعديل بالملفات بعد التثبيت. أقفال
+    # البروتوكول الأقدم من 1.29 بلا حقول بصمة فتُفحص بلا هذا البند.
+    for name in sorted(set(lock) & set(installed)):
+        declared = lock[name].get('بصمة_الشجرة')
+        if not declared:
+            continue
+        pkg_path = _pkg_dir(project_dir, name)
+        if not os.path.isdir(pkg_path):
+            single = os.path.join(root, name + '.عربي')
+            pkg_path = single if os.path.isfile(single) else None
+        if pkg_path is None:
+            continue              # الغياب نفسه كُشف أعلاه (قفل مقابل حزم/)
+        actual = _tree_fingerprint(pkg_path)
+        if not hmac.compare_digest(actual, declared):
+            issues.append(
+                f"'{name}' ملفاتها في {PACKAGES_DIR}/ تعدلت بعد "
+                f'التثبيت — بصمة القفل لا تطابق المحتوى؛ أعد تثبيتها '
+                'إن لم تكن أنت من عدّلها')
     return issues
 
 
@@ -985,6 +1103,10 @@ def verify(project_dir=None):
 
 # ترويسة توقيع النشر — نفس ترويسة الخادم في registry.py
 PUBLISH_AUTH_HEADER = 'X-Arabi-Signature'
+# ترويسة بصمة الناشر (ق٢١): sha256 ستر للأرشيف قبل الإرسال — الخادم
+# يتحقق من مطابقتها للمحتوى ويخزنها، فتكون البصمة موثقة من الناشر
+# لا مولدة من الخادم بعد الوصول
+PUBLISH_FINGERPRINT_HEADER = 'X-Arabi-Fingerprint'
 PUBLISH_TIMEOUT = 60                  # مهلة طلب النشر (ثوانٍ)
 
 
@@ -1062,15 +1184,19 @@ def publish(source, registry, auth_key=None, version=None):
     مفرد (وإذاها تحتاج --نسخة صريحة). عنوان السجل يقبل الجذر أو رابط
     الفهرس كله. المفتاح الاختياري يوقّع الحزمة HMAC-SHA256 كما يتوقع
     الخادم المفتاحي — أنشئه بتشفير.مفتاح_آمن() وشاركه مع مشغّل السجل.
+    بصمة sha256 تُحسب قبل الإرسال وتُرسل بترويسة X-Arabi-Fingerprint —
+    الخادم يرفض النشر عند عدم المطابقة ويخزن البصمة الموثقة منك (ق٢١).
     النسخ غير قابلة للتعديل: إعادة نشر نفس النسخة تُرفض من الخادم.
     """
     base = _registry_base(registry)
     blob, name, version, description = _build_package_zip(
         source, version_override=version)
+    fingerprint = hashlib.sha256(blob).hexdigest()
     # سطر طلب HTTP لا يقبل إلا آسكي — المسار العربي كله بترميز النسبة
     path = urllib.parse.quote(f'/نشر/{name}/{version}', safe='/.')
     url = base + path
-    headers = {'Content-Type': 'application/zip'}
+    headers = {'Content-Type': 'application/zip',
+               PUBLISH_FINGERPRINT_HEADER: fingerprint}
     if auth_key:
         if not isinstance(auth_key, str) or not auth_key:
             raise ArabiError('مفتاح النشر نص غير فارغ — أو احذف '
@@ -1106,4 +1232,5 @@ def publish(source, registry, auth_key=None, version=None):
             f"رد غير متوقع من السجل: {payload} — لم تُنشر الحزمة")
     note = f' — {description}' if description else ''
     return (f"نُشرت '{name}' v{version} إلى السجل {base}{note} — "
+            f'بصمة المحتوى الموثقة منك: {fingerprint} — '
             'النسخ غير قابلة للتعديل، ونسخة أحدث تُنشر حرة')

@@ -48,7 +48,8 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .errors import ArabiError
-from .packages import MANIFEST_NAME, _validate_source, read_manifest
+from .packages import (MANIFEST_NAME, _validate_source, read_manifest,
+                        PUBLISH_FINGERPRINT_HEADER, FP_RE)
 
 # هوية السجل ومساراته
 REGISTRY_NAME = 'سجل عربي المجتمعي'
@@ -184,11 +185,16 @@ def _scan_index(store_dir):
         # روابط تنزيل بترميز النسبة — سطر طلب HTTP آسكي فقط
         link = urllib.parse.quote(
             f'/تحميل/{name}/{latest["النسخة"]}', safe='/.')
-        index[name] = {
+        entry = {
             'المصدر': link,
             'النسخة': latest['النسخة'],
             'الوصف': latest.get('الوصف', ''),
         }
+        if latest.get('البصمة'):
+            # بروتوكول 1.29: الفهرس يعلن بصمة sha256 لأرشيف النسخة
+            # الأحدث — العميل يرفض التنزيل الذي لا يطابقها (ق٢٢)
+            entry['البصمة'] = latest['البصمة']
+        index[name] = entry
     return index
 
 
@@ -543,11 +549,16 @@ class RegistryServer:
 
     # ---------- النشر ----------
 
-    def publish_bytes(self, blob, expected_name, expected_version):
-        """ينشر أرشيف zip للحزمة بعد فحصه — ويعيد (الاسم، النسخة).
+    def publish_bytes(self, blob, expected_name, expected_version,
+                      declared_fingerprint=None):
+        """ينشر أرشيف zip للحزمة بعد فحصه — ويعيد (الاسم، النسخة، البصمة).
 
         الفحوص: أرشيف سليم يحمل بيانًا، اسم البيان ونسخته يطابقان
         عنوان النشر، الكود سليم نحويًا، والنسخة غير منشورة سلفًا.
+        بصمة الناشر (ق٢١): إن أُرسلت ترويسة X-Arabi-Fingerprint
+        تحققت من مطابقتها للمحتوى (رفض 400 عند الخلاف) وخزنت هي —
+        فالبصمة موثقة من الناشر لا مولدة من الخادم بعد الوصول؛
+        وبلا ترويسة (عميل قديم) تُحسب من المحتوى كما كان.
         """
         if not blob:
             raise ArabiError('محتوى النشر فارغ — أرسل أرشيف الحزمة')
@@ -559,6 +570,20 @@ class RegistryServer:
             raise ArabiError('عنوان النشر يفتقد اسم الحزمة')
         if not (isinstance(expected_version, str) and expected_version):
             raise ArabiError('عنوان النشر يفتقد نسخة الحزمة')
+        actual_fp = hashlib.sha256(blob).hexdigest()
+        if declared_fingerprint is not None:
+            if not isinstance(declared_fingerprint, str) or \
+                    not FP_RE.match(declared_fingerprint.strip().lower()):
+                raise ArabiError(
+                    'ترويسة البصمة ليست ستر sha256 ساريًا (64 محرفًا '
+                    'سداسيًا) — أرسلها بأمر "حزمة نشر" الحالي أو '
+                    'احذفها لتحسبها الخادم')
+            declared_fingerprint = declared_fingerprint.strip().lower()
+            if not hmac.compare_digest(declared_fingerprint, actual_fp):
+                raise ArabiError(
+                    'بصمة الناشر لا تطابق المحتوى المرسل — النشر مرفوض '
+                    '(تلف نقل أو رأس غير متسق): المعلن '
+                    f'{declared_fingerprint}، الفعلي {actual_fp}')
         tmp = tempfile.mkdtemp(prefix='عربي-سجل-نشر-')
         try:
             archive = os.path.join(tmp, 'الحزمة.zip')
@@ -620,7 +645,7 @@ class RegistryServer:
                     'النسخة': expected_version,
                     'الوصف': data.get('الوصف', ''),
                     'الحجم': len(blob),
-                    'البصمة': hashlib.sha256(blob).hexdigest(),
+                    'البصمة': declared_fingerprint or actual_fp,
                 }
                 tmp_meta = _version_meta_path(
                     self._store, expected_name,
@@ -629,7 +654,8 @@ class RegistryServer:
                     json.dump(meta, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_meta, _version_meta_path(
                     self._store, expected_name, expected_version))
-            return expected_name, expected_version
+            return expected_name, expected_version, \
+                meta['البصمة']
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -659,7 +685,7 @@ class _RegistryHandler(BaseHTTPRequestHandler):
     """معالج طلبات السجل — كل المسارات عربية والردود utf-8."""
 
     registry = None                    # يضبط عند البناء (فئة مغلقة)
-    server_version = 'ArabiRegistry/1.22'
+    server_version = "ArabiRegistry/1.29"
     protocol_version = 'HTTP/1.1'
 
     # ---------- أدوات الرد ----------
@@ -874,10 +900,13 @@ class _RegistryHandler(BaseHTTPRequestHandler):
                             'HMAC-SHA256(المفتاح، محتوى الحزمة) ستر عشري '
                             '— أو استخدم "حزمة نشر --مفتاح" فيوقع لك')
                 return
-            name, version = reg.publish_bytes(body, segs[1], segs[2])
+            declared_fp = self.headers.get(PUBLISH_FINGERPRINT_HEADER)
+            name, version, fingerprint = reg.publish_bytes(
+                body, segs[1], segs[2], declared_fingerprint=declared_fp)
             self._send_json({'الحالة': 'نُشرت',
                              'الحزمة': name,
-                             'النسخة': version}, status=201)
+                             'النسخة': version,
+                             'البصمة': fingerprint}, status=201)
         except ArabiError as exc:
             message = getattr(exc, 'message', None) or str(exc)
             status = 409 if 'منشورة مسبقًا' in message else 400
