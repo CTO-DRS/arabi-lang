@@ -51,6 +51,7 @@ import os
 import secrets as _secrets
 import socket
 import struct
+import sys
 import threading
 import time
 from collections import deque
@@ -879,6 +880,17 @@ def _dist_create(interp, args, line):
             raise ArabiRuntimeError(
                 f"'موزع' تتوقع مفتاحًا نصيًا غير فارغ في المعامل الثالث "
                 f'— أنشئه بتشفير.مفتاح_آمن()', line)
+    # تحذير التعرض الخارجي (1.27): موزع بلا مفتاح على عنوان غير محلي
+    # يعني أن أي جهاز يصل إلى العنوان يمكنه تسجيل عمالة وتقديم مهمة
+    # وتلقي نتائجها بلا مصادقة ولا تشفير — لا نمنع (توافق كامل)،
+    # لكننا لا نسمح بالتجاهل الصامت.
+    if key is None and host not in ('127.0.0.1', 'localhost', '::1'):
+        print(
+            f"تحذير أمني: موزع على '{host}:{port}' بلا مفتاح — كل جهاز "
+            'يصل إلى هذا العنوان يستطيع تسجيل عمالة وتقديم مهام بلا '
+            'مصادقة ولا تشفير. مرر مفتاحًا ثالثًا (تشفير.مفتاح_آمن()) '
+            'لتشغيل المصادقة والتشفير، أو اربط 127.0.0.1 للاستخدام المحلي.',
+            file=sys.stderr)
     from .runtime import DispatcherValue
     return DispatcherValue(_Server(host, port, interp, key))
 
