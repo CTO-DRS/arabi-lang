@@ -39,6 +39,7 @@ class T(Enum):
     THIS = auto()      # هذا
     SUPER = auto()     # الأصل
     ARROW = auto()     # => (الدوال السهمية)
+    RARROW = auto()    # → أو -> (نوع الإرجاع — نظام الأنواع 1.26)
     SWITCH = auto()    # بدّل
     CASE = auto()      # حالة
     DEFAULT = auto()   # افتراض

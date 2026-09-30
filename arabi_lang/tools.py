@@ -371,12 +371,12 @@ class _Linter:
 
     def _walk_method(self, method, class_scope, outer_scope):
         """يمشي جسم طريقة صنف/واجهة بنطاقها الخاص."""
-        for name, default in method.params:
+        for name, default, _spec in method.params:
             if default is not None:
                 self._walk_expr(default, outer_scope)
         fn_scope = _Scope(parent=class_scope, kind='function')
         self.scopes.append(fn_scope)
-        for pname, _d in method.params:
+        for pname, _d, _s in method.params:
             fn_scope.define(pname, method.line, 'معامل')
         if method.rest is not None:
             fn_scope.define(method.rest, method.line, 'معامل')
@@ -414,7 +414,7 @@ class _Linter:
             self._walk_block(stmt.body, scope, in_function, loop_depth + 1)
         elif isinstance(stmt, N.FuncDef):
             seen_params = set()
-            for name, default in stmt.params:
+            for name, default, _spec in stmt.params:
                 if default is not None:
                     self._walk_expr(default, scope)
                 if name in seen_params:
@@ -426,7 +426,7 @@ class _Linter:
                             f"اسم المعامل المتغير '{stmt.rest}' مكرر مع معامل عادي")
             child = _Scope(parent=scope, kind='function')
             self.scopes.append(child)
-            for name, _default in stmt.params:
+            for name, _default, _s in stmt.params:
                 child.define(name, stmt.line, 'معامل')
             if stmt.rest is not None:
                 child.define(stmt.rest, stmt.line, 'معامل')
@@ -601,7 +601,7 @@ class _Linter:
         elif isinstance(expr, N.Lambda):
             child = _Scope(parent=scope, kind='function')
             self.scopes.append(child)
-            for name, default in expr.params:
+            for name, default, _spec in expr.params:
                 if default is not None:
                     self._walk_expr(default, scope)
                 child.define(name, expr.line, 'معامل')
@@ -687,10 +687,17 @@ def _render_literal(expr):
 
 
 def _render_params(params, rest=None):
-    """يعرض قائمة المعاملات للتوثيق، مع الافتراضيات والمعامل المتغير."""
+    """يعرض قائمة المعاملات للتوثيق، بالتوصيف والافتراضيات والمتغير (1.26)."""
     parts = []
-    for name, default in params:
-        if default is None:
+    for item in params:
+        name, default = item[0], item[1]
+        spec = item[2] if len(item) > 2 else None
+        if spec is not None:
+            if default is None:
+                parts.append(f'{name}: {spec.text}')
+            else:
+                parts.append(f'{name}: {spec.text} = {_render_literal(default)}')
+        elif default is None:
             parts.append(name)
         else:
             parts.append(f'{name} = {_render_literal(default)}')
@@ -777,7 +784,9 @@ def generate_docs(filename, source):
         out.append('')
         for fn in funcs:
             tags = _fn_tags(fn)
-            out.append(f'### {fn.name}({_render_params(fn.params, fn.rest)}){tags}')
+            ret = getattr(fn, 'ret', None)
+            ret_txt = f' → {ret.text}' if ret is not None else ''
+            out.append(f'### {fn.name}({_render_params(fn.params, fn.rest)}){ret_txt}{tags}')
             out.append('')
             doc = _docstring(fn.body)
             if doc:

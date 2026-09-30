@@ -21,6 +21,10 @@
   ٣٫٥ القسمة النظيفة (اختبار التدقيق)     → TestCleanDivision
   تدقيق ف9 تكافؤ الصحة عبر المسارين       → TestTruthyParityAcrossPaths
   تدقيق ف6 لا تسريب تمثيل خام            → TestSpecialValueDisplay
+
+المرحلة 4 (الإصدار 1.26.0) — الفصل ٦ من المواصفة:
+  ق١٣–ق١٦ نظام الأنواع التدريجي           → TestTypeSystem
+  إصلاح كاش الترجمة (هوية الجسم)          → TestVmCacheIdentity
 """
 
 import io
@@ -1055,6 +1059,324 @@ class TestVmCodeCache(unittest.TestCase):
 اطبع(ب()())
 '''
         self.assertEqual(run_code(src), '1\n2\n')
+
+
+
+
+# ======================= المرحلة 4 (1.26.0) — نظام الأنواع =======================
+
+class TestTypeSystem(unittest.TestCase):
+    """نظام الأنواع التدريجي — الفصل ٦ من المواصفة والقرارات ق١٣–ق١٦.
+
+    ق١٣ توصيف اختياري يفحص وقت التشغيل؛ العائلات تحسم فورًا في موضع
+    التوصيف (أسماؤها محجوزة أصلًا بدوال التحويل) والأصناف من نطاق التعريف.
+    ق١٤ التعمية لقائمة/قاموس بمستوى واحد. ق١٥ عقد الإرجاع كل المسارات.
+    ق١٦ الأصناف والواجهات أنواع بعقد سلسلة الوراثة (MRO).
+    """
+
+    # ---------- ق١٣: العائلات المدمجة ----------
+
+    def test_number_param_ok(self):
+        self.assertEqual(last('دالة جمع(س: عدد، ص: عدد):\n    أعد س + ص\nجمع(٣، ٤)'), 7)
+
+    def test_number_rejects_string(self):
+        expect_error('دالة جمع(س: عدد):\n    أعد س\nجمع("خمسة")',
+                     ArabiRuntimeError, "يتوقع 'عدد'")
+
+    def test_bool_is_not_number(self):
+        # ق١٥: المنطقي لا يُعد عددًا أبدًا (عكس isinstance في بايثون)
+        expect_error('دالة فحص(س: عدد):\n    أعد س\nفحص(صح)',
+                     ArabiRuntimeError, 'قيمة منطقية')
+        expect_error('دالة فحص(س: عدد):\n    أعد س\nفحص(خطأ)',
+                     ArabiRuntimeError, 'قيمة منطقية')
+
+    def test_numeric_tower_decimal_accepts_int(self):
+        # ق١٥: «عشري» يقبل الصحيح (برج عددي بأسلوب PEP 484)
+        self.assertEqual(last('دالة نصف(س: عشري):\n    أعد س / ٢\nنصف(٥)'), 2.5)
+
+    def test_int_rejects_float(self):
+        expect_error('دالة فحص(س: صحيح):\n    أعد س\nفحص(١.٥)',
+                     ArabiRuntimeError, 'عدد عشري')
+
+    def test_string_bool_list_dict_range_families(self):
+        self.assertEqual(last('دالة بو(ن: نص):\n    أعد طول(ن)\nبو("أب")'), 2)
+        self.assertEqual(last('دالة بو(م: منطقي):\n    أعد م\nبو(صح)'), True)
+        self.assertEqual(last('دالة بو(ل: قائمة):\n    أعد طول(ل)\nبو([١، ٢])'), 2)
+        self.assertEqual(last('دالة بو(د: قاموس):\n    أعد طول(د)\nبو({"أ": ١})'), 1)
+        self.assertEqual(last('دالة بو(م: مدى):\n    أعد طول(م)\nبو(مدى(٣))'), 3)
+
+    def test_any_accepts_all(self):
+        for v in ('٥', '"نص"', 'صح', 'ولا شيء', '[١]', '{"أ": ١}'):
+            self.assertIsNone(last(f'دالة بو(س: أي):\n    تجاهل\nبو({v})'))
+
+    def test_none_family(self):
+        self.assertIsNone(last('دالة بو(س: عدم):\n    تجاهل\nبو(ولا شيء)'))
+        expect_error('دالة بو(س: عدم):\n    تجاهل\nبو(١)',
+                     ArabiRuntimeError, 'عدد صحيح')
+
+    def test_function_family(self):
+        self.assertEqual(
+            last('دالة طبّق(د: دالة، س: عدد):\n    أعد د(س)\n'
+                 'طبّق(دالة(ن) => ن + ١، ٤)'), 5)
+        expect_error('دالة طبّق(د: دالة):\n    أعد د\nطبّق(٥)',
+                     ArabiRuntimeError, 'ورد عدد صحيح')
+
+    def test_tashkeel_in_family_name(self):
+        # ق٢: التشكيل يُمحى من أسماء العائلات كالمعرفات
+        self.assertEqual(last('دالة بو(س: عَدَد):\n    أعد س\nبو(٧)'), 7)
+
+    def test_literal_none_and_def_as_type(self):
+        self.assertIsNone(last('دالة صامت() -> ولا شيء:\n    تجاهل\nصامت()'))
+        self.assertEqual(
+            last('دالة طبّق(د: دالة):\n    أعد د(٥)\nطبّق(دالة(ن) => ن)'), 5)
+
+    # ---------- ق١٣: الحسم عند أول استدعاء والأخطاء ----------
+
+    def test_unknown_type_name(self):
+        exc = expect_error('دالة بو(س: غير_موجود):\n    أعد ٠\nبو(١)',
+                           ArabiRuntimeError, 'غير معروف')
+        self.assertIn('بو', str(exc))
+
+    def test_non_type_binding_rejected(self):
+        expect_error('س = ٥\nدالة بو(ن: س):\n    أعد ٠\nبو(١)',
+                     ArabiRuntimeError, 'ليس نوعًا')
+
+    def test_family_wins_over_user_class(self):
+        # اكتشاف المسبار: أسماء العائلات محجوزة بدوال التحويل المدمجة،
+        # فالعائلة تحسم فورًا في موضع التوصيف (ق١٣)
+        src = '''صنف عدد:
+    تجاهل
+
+دالة بو(س: عدد):
+    أعد س
+
+اطبع(بو(٥))
+'''
+        self.assertEqual(run_code(src), '5\n')
+        expect_error('صنف عدد:\n    تجاهل\n'
+                     'دالة بو(س: عدد):\n    أعد س\nبو(عدد())',
+                     ArabiRuntimeError, 'ورد كائن')
+
+    def test_resolution_frozen_after_first_call(self):
+        # ق١٣: الحسم عند أول استدعاء ويُجمّد — إعادة تعريف الصنف تصنع
+        # هوية ClassValue جديدة يرفضها العقد المجمد على القديمة
+        ok = '''صنف حيوان:
+    تجاهل
+
+دالة صوت(ح: حيوان):
+    أعد "تم"
+
+اطبع(صوت(حيوان()))
+'''
+        self.assertEqual(run_code(ok), 'تم\n')
+        frozen = ok + '''صنف حيوان:
+    تجاهل
+
+صوت(حيوان())
+'''
+        expect_error(frozen, ArabiRuntimeError,
+                     "والمطلوب كائن من صنف 'حيوان'")
+
+    # ---------- ق١٣: مواضع الفحص ----------
+
+    def test_kwargs_checked(self):
+        expect_error('دالة بو(س: نص):\n    أعد س\nبو(س=٥)',
+                     ArabiRuntimeError, "يتوقع 'نص'")
+
+    def test_default_violation_checked_at_call(self):
+        expect_error('دالة بو(س: عدد = "خمسة"):\n    أعد س\nبو()',
+                     ArabiRuntimeError, "يتوقع 'عدد'")
+
+    def test_rest_annotation(self):
+        self.assertEqual(
+            last('دالة بو(...الوسائط: قائمة[عدد]):\n    أعد طول(الوسائط)\nبو(١، ٢، ٣)'), 3)
+        expect_error('دالة بو(...الوسائط: قائمة[عدد]):\n    أعد ٠\nبو(١، "اثنان")',
+                     ArabiRuntimeError, 'العنصر رقم')
+
+    def test_async_param_checked_before_thread(self):
+        expect_error('غير متزامنة دالة شغل(س: نص):\n    أعد س\nشغل(٥)',
+                     ArabiRuntimeError, "يتوقع 'نص'")
+
+    def test_class_method_annotations(self):
+        src = '''صنف حساب:
+    الرقم = ١٠
+    دالة جمع(س: عدد):
+        أعد هذا.الرقم + س
+
+ح = حساب()
+اطبع(ح.جمع(٤))
+'''
+        self.assertEqual(run_code(src), '14\n')
+        expect_error('صنف حساب:\n    دالة جمع(س: عدد):\n        أعد س\n'
+                     'ح = حساب()\nح.جمع("أربعة")',
+                     ArabiRuntimeError, "يتوقع 'عدد'")
+
+    def test_lambda_param_annotations(self):
+        self.assertEqual(last('ض = دالة(س: عدد) => س * ٢\nض(٥)'), 10)
+        expect_error('ض = دالة(س: عدد) => س * ٢\nض("خمسة")',
+                     ArabiRuntimeError, "يتوقع 'عدد'")
+
+    # ---------- ق١٥: عقد الإرجاع ----------
+
+    def test_return_ok_and_violation(self):
+        self.assertEqual(last('دالة اسمي() -> نص:\n    أعد "سالم"\nاسمي()'), 'سالم')
+        expect_error('دالة اسمي() -> نص:\n    أعد ٥\nاسمي()',
+                     ArabiRuntimeError, "تعلن إرجاع 'نص'")
+
+    def test_return_arrow_unicode_and_ascii(self):
+        self.assertEqual(last('دالة ضعف(س: عدد) → عدد:\n    أعد س * ٢\nضعف(٥)'), 10)
+        self.assertEqual(last('دالة ضعف(س: عدد) -> عدد:\n    أعد س * ٢\nضعف(٥)'), 10)
+
+    def test_implicit_fallthrough_violation(self):
+        # السقوط الضمني يعيد ولا شيء — يخالف عقد عدد
+        expect_error('دالة وض() -> عدد:\n    لو خطأ:\n        أعد ١\nوض()',
+                     ArabiRuntimeError, 'تعلن إرجاع')
+
+    def test_none_contract(self):
+        self.assertIsNone(last('دالة صامت() -> ولا شيء:\n    تجاهل\nصامت()'))
+        expect_error('دالة صامت() -> ولا شيء:\n    أعد ٥\nصامت()',
+                     ArabiRuntimeError, 'ورد عدد صحيح')
+
+    def test_generator_rejects_return_annotation(self):
+        expect_error('دالة مولّد() -> عدد:\n    أنتج ١',
+                     ParseError, 'المولد')
+        expect_error('دالة مولّد() → عدد:\n    أنتج ١',
+                     ParseError, 'المولد')
+
+    def test_arrow_function_rejects_return_type(self):
+        expect_error('ض = دالة(س: عدد) -> عدد => س',
+                     ParseError, 'لا تقبل نوع إرجاع')
+
+    def test_return_checked_in_both_paths(self):
+        # تكافؤ المسارين: الممسح الشجري والدولاب
+        for run in (last, last_vm):
+            self.assertEqual(run('دالة اسمي() -> نص:\n    أعد "تم"\nاسمي()'), 'تم')
+            with self.assertRaises(ArabiRuntimeError):
+                run('دالة اسمي() -> نص:\n    أعد ٥\nاسمي()')
+
+    # ---------- ق١٤: التعمية ----------
+
+    def test_list_generic_ok_and_element_index(self):
+        self.assertEqual(
+            last('دالة مجموع(ل: قائمة[عدد]):\n    أعد ل[٠] + ل[١]\nمجموع([١، ٢، ٣])'), 3)
+        exc = expect_error('دالة مجموع(ل: قائمة[عدد]):\n    أعد ٠\nمجموع([١، "اثنان"])',
+                           ArabiRuntimeError, 'العنصر رقم 2')
+        self.assertIn('قائمة[عدد]', str(exc))
+
+    def test_dict_generic_keys_and_values(self):
+        self.assertEqual(
+            last('دالة بو(د: قاموس[نص: عدد]):\n    أعد د["أ"]\nبو({"أ": ١})'), 1)
+        expect_error('دالة بو(د: قاموس[نص: عدد]):\n    أعد ٠\nبو({١: ١})',
+                     ArabiRuntimeError, 'المفتاح 1')
+        expect_error('دالة بو(د: قاموس[نص: عدد]):\n    أعد ٠\nبو({"أ": "واحد"})',
+                     ArabiRuntimeError, 'قيمة المفتاح')
+
+    def test_empty_containers_pass(self):
+        self.assertEqual(last('دالة بو(ل: قائمة[عدد]):\n    أعد طول(ل)\nبو([])'), 0)
+        self.assertEqual(last('دالة بو(د: قاموس[نص: عدد]):\n    أعد طول(د)\nبو({})'), 0)
+
+    def test_nested_generic_rejected_at_parse(self):
+        expect_error('دالة بو(ل: قائمة[قاموس[نص: عدد]]):\n    أعد ٠',
+                     ParseError, 'التعمية المتداخلة')
+
+    def test_parameterizing_other_families_rejected(self):
+        expect_error('دالة بو(س: عدد[نص]):\n    أعد ٠',
+                     ParseError, 'فقط')
+        expect_error('دالة بو(س: نص[نص]):\n    أعد ٠',
+                     ParseError, 'فقط')
+
+    def test_generic_checked_in_both_paths(self):
+        for run in (last, last_vm):
+            self.assertEqual(run('دالة مجموع(ل: قائمة[عدد]):\n    أعد ل[٠]\nمجموع([٩])'), 9)
+            with self.assertRaises(ArabiRuntimeError):
+                run('دالة مجموع(ل: قائمة[عدد]):\n    أعد ل[٠]\nمجموع(["٩"])')
+
+    # ---------- ق١٦: الأصناف والواجهات ----------
+
+    def test_class_type_substitution_lsp(self):
+        src = '''صنف حيوان:
+    تجاهل
+
+صنف كلب من حيوان:
+    تجاهل
+
+دالة صوت(ح: حيوان):
+    أعد "صوت"
+
+اطبع(صوت(كلب()))
+'''
+        self.assertEqual(run_code(src), 'صوت\n')
+
+    def test_class_type_rejects_unrelated(self):
+        expect_error('صنف حيوان:\n    تجاهل\nصنف قط:\n    تجاهل\n'
+                     'دالة صوت(ح: حيوان):\n    أعد ٠\nصوت(قط())',
+                     ArabiRuntimeError, 'والمطلوب كائن من صنف')
+
+    def test_interface_type_conformance(self):
+        src = '''واجهة طائر:
+    دالة غرد()
+
+صنف عصفور من طائر:
+    دالة غرد():
+        أعد "زقزقة"
+
+دالة اسمع(ط: طائر):
+    أعد ط.غرد()
+
+اطبع(اسمع(عصفور()))
+'''
+        self.assertEqual(run_code(src), 'زقزقة\n')
+
+    def test_class_annotation_rejects_non_instance(self):
+        expect_error('صنف حيوان:\n    تجاهل\n'
+                     'دالة صوت(ح: حيوان):\n    أعد ٠\nصوت(٥)',
+                     ArabiRuntimeError, 'والمطلوب كائن من صنف')
+
+    def test_generic_on_user_class_rejected_at_parse(self):
+        # التعمية نحويًا لقائمة/قاموس فقط — قبل أي حسم وقت تشغيل
+        expect_error('صنف صندوق:\n    تجاهل\n'
+                     'دالة بو(س: صندوق[عدد]):\n    أعد ٠',
+                     ParseError, 'غير مدعومة')
+
+    def test_type_error_line_is_call_site(self):
+        exc = expect_error('دالة بو(س: عدد):\n    أعد س\nبو("خمسة")',
+                           ArabiRuntimeError, "يتوقع 'عدد'")
+        self.assertIn('السطر 3', str(exc))
+
+
+class TestVmCacheIdentity(unittest.TestCase):
+    """انحدار إصلاح 1.26: كاش ترجمة الدولاب كان بمفتاح id(الجسم) بلا
+    مرجع قوي — إعادة تعريف دالة قد تعيد استخدام العنوان فتُنفَّذ ترجمة
+    دالة أخرى. القيمة الآن (الجسم، الكود) تحبس الجسم حيًّا.
+    """
+
+    def test_redefinition_runs_new_body(self):
+        src = '''س = ٠
+لكل ن في مدى(٢٠٠):
+    لو ن ٪ ٢ == ٠:
+        دالة بو():
+            أعد ١
+    وإلا:
+        دالة بو():
+            أعد ٢
+    س += بو()
+س
+'''
+        self.assertEqual(last(src), 300)
+        self.assertEqual(last_vm(src), 300)
+
+    def test_redefinition_different_shapes(self):
+        src = '''دالة بو():
+    أعد ١
+
+اطبع(بو())
+
+دالة بو():
+    أعد "نص مختلف تمامًا في الطول"
+
+اطبع(بو())
+'''
+        self.assertEqual(run_code(src), '1\nنص مختلف تمامًا في الطول\n')
 
 
 if __name__ == '__main__':

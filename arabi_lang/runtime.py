@@ -42,6 +42,29 @@ class _NoDefault:
 
 NO_DEFAULT = _NoDefault()
 
+# شاهد البحث الهادئ في Env.find — يميز «غير موجود» عن القيمة ولا شيء (1.26)
+MISSING = object()
+
+# عائلات الأنواع المدمجة (نظام الأنواع التدريجي — 1.26، قرارات ق١٣–ق١٥).
+# المفاتيح مجرّدة من التشكيل (ق٢) والقيم مسندات قيمة خالصة:
+# ق١٥: عدد = صحيح+عشري، وبرج «عشري» يقبل الصحيح (بأسلوب PEP 484)،
+# والمنطقي لا يُعد عددًا أبدًا (مقارنة isinstance(True, int) في بايثون).
+TYPE_FAMILIES = {
+    'أي': lambda v: True,
+    'عدد': lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    'صحيح': lambda v: isinstance(v, int) and not isinstance(v, bool),
+    'عشري': lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    'نص': lambda v: isinstance(v, str),
+    'منطقي': lambda v: isinstance(v, bool),
+    'قائمة': lambda v: isinstance(v, list),
+    'قاموس': lambda v: isinstance(v, dict),
+    'مدى': lambda v: isinstance(v, range),
+    'دالة': lambda v: isinstance(v, (ArabiFunc, BuiltinFunc, BoundMethod,
+                                     NativeCtor)),
+    'عدم': lambda v: v is None,
+    'ولا شيء': lambda v: v is None,   # توصيف بالرمز الحرفي T.NONE (1.26)
+}
+
 
 def ar2en(text):
     return str(text).translate(AR2EN)
@@ -63,8 +86,9 @@ class ContinueSignal(Exception):
 class ReturnSignal(Exception):
     """إشارة داخلية لجملة أعد."""
 
-    def __init__(self, value):
+    def __init__(self, value, line=None):
         self.value = value
+        self.line = line          # سطر جملة أعد — لرسائل فحص الإرجاع (1.26)
 
 
 # حالات ترجمة الدولاب الافتراضي لدالة عربي:
@@ -95,6 +119,15 @@ class Env:
             env = env.parent
         raise ArabiRuntimeError(
             f"المتغير '{name}' غير معرّف — تأكد من تعريفه أولًا", line)
+
+    def find(self, name):
+        """بحث هادئ بلا رفع — يعيد القيمة أو MISSING (حسم الأنواع 1.26)."""
+        env = self
+        while env is not None:
+            if name in env.vars:
+                return env.vars[name]
+            env = env.parent
+        return MISSING
 
     def set(self, name, value):
         """يعدّل المتغير إن وُجد في أي نطاق، وإلا ينشئه في النطاق الحالي.
@@ -144,10 +177,12 @@ class ArabiFunc:
     """
 
     __slots__ = ('name', 'params', 'body', 'env', 'is_lambda',
-                 'is_generator', 'rest', 'is_async', 'vm_code')
+                 'is_generator', 'rest', 'is_async', 'vm_code',
+                 'anns', 'ret', '_ann_ready', '_ann_resolved', '_ret_resolved')
 
     def __init__(self, name, params, body, env, is_lambda=False,
-                 is_generator=False, rest=None, is_async=False):
+                 is_generator=False, rest=None, is_async=False,
+                 anns=None, ret=None):
         self.name = name
         self.params = params
         self.body = body
@@ -157,6 +192,13 @@ class ArabiFunc:
         self.rest = rest
         self.is_async = is_async
         self.vm_code = _VM_PENDING       # الدولاب الافتراضي: ترجمة عند الطلب
+        # نظام الأنواع التدريجي (1.26): توصيفات المعاملات والإرجاع،
+        # والحسم عند أول استدعاء (نمط كاش الترجمة نفسه)
+        self.anns = anns or {}           # {الاسم: TypeSpec}
+        self.ret = ret                   # TypeSpec أو None
+        self._ann_ready = False          # صح بعد حلّ الأسماء أول مرة
+        self._ann_resolved = {}          # {الاسم: وصف محسوم}
+        self._ret_resolved = None        # وصف الإرجاع المحسوم
 
 
 class BuiltinFunc:

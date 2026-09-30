@@ -67,9 +67,37 @@ class For(Node):
         self.body = body
 
 
+class TypeSpec(Node):
+    """توصيف نوع (نظام الأنواع التدريجي — الإصدار 1.26).
+
+    name اسم النوع كما كُتب (معرف، أو 'ولا شيء'، أو 'دالة').
+    element عنصر التعمية لقائمة[نوع]، أو (key, value) لقاموس[مفتاح: قيمة]
+    — كائنات TypeSpec بدورها، وكلها None إن كان النوع بلا تعمية.
+
+    الحسم ليس هنا: المفسر يحل الاسم عند أول استدعاء (قرار ق١٣).
+    """
+
+    def __init__(self, name, line=None, element=None, key=None, value=None):
+        super().__init__(line)
+        self.name = name
+        self.element = element     # TypeSpec لقائمة[...] أو None
+        self.key = key             # TypeSpec لقاموس[...:...] أو None
+        self.value = value         # TypeSpec لقاموس[...:...] أو None
+
+    @property
+    def text(self):
+        """الصيغة النصية للتوصيف كما تُعرض في رسائل الأخطاء."""
+        if self.element is not None:
+            return f'{self.name}[{self.element.text}]'
+        if self.key is not None:
+            return f'{self.name}[{self.key.text}: {self.value.text}]'
+        return self.name
+
+
 class FuncDef(Node):
     def __init__(self, name, params, body, line=None, decorators=None,
-                 is_generator=False, rest=None, is_async=False):
+                 is_generator=False, rest=None, is_async=False,
+                 anns=None, ret=None):
         super().__init__(line)
         self.name = name
         self.params = params      # [(الاسم، تعبير الافتراضي أو None)، ...]
@@ -78,6 +106,8 @@ class FuncDef(Node):
         self.is_generator = is_generator     # صح إذا يحوي 'أنتج'
         self.rest = rest          # اسم المعامل المتغير ... أو None
         self.is_async = is_async  # صح إذا سبقها 'غير متزامنة' (الإصدار 1.15)
+        self.anns = anns or {}    # {الاسم: TypeSpec} — توصيفات المعاملات (1.26)
+        self.ret = ret            # TypeSpec لنوع الإرجاع أو None (1.26)
 
 
 class Return(Node):
@@ -451,8 +481,9 @@ class Await(Node):
 class Lambda(Node):
     """دالة سهمية على سطر واحد: دالة(س، ص) => س + ص"""
 
-    def __init__(self, params, body, line=None, rest=None):
+    def __init__(self, params, body, line=None, rest=None, anns=None):
         super().__init__(line)
         self.params = params          # [(الاسم، تعبير الافتراضي أو None)، ...]
         self.body = body              # تعبير واحد
         self.rest = rest              # اسم المعامل المتغير ... أو None
+        self.anns = anns or {}        # توصيفات المعاملات (1.26) — بلا إرجاع

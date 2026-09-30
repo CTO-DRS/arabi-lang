@@ -25,6 +25,7 @@ from .runtime import (
     GeneratorValue, GeneratorClose, DBValue, SuperValue, _gen_tls,
     ThreadValue, LockValue, QueueValue, DateValue, TaskValue, PoolValue,
     typename, display, install_builtins, NO_DEFAULT,
+    TYPE_FAMILIES, MISSING,
     BreakSignal, ContinueSignal, ReturnSignal,
     _VM_PENDING, _VM_NO,
     LIST_METHODS, STR_METHODS, DICT_METHODS, OVERLOAD_METHODS,
@@ -111,8 +112,9 @@ class Interpreter:
         # كل تنفيذ لدالة داخل حلقة يبني ArabiFunc جديدًا (يلتقط البيئة
         # الحالية — دلالة أصيلة) وكان يعيد ترجمة الجسم كل مرة؛ الكود
         # نفسه ثابت لكل عقدة فتُترجم مرة واحدة وتشارَك بأمان (كائن
-        # VmCode لا يتغير بعد إغلاقه). المفتاح id(جسم الدالة) والعقد
-        # حية طوال تنفيذ الشجرة
+        # VmCode لا يتغير بعد إغلاقه). المفتاح id(جسم الدالة)، والقيمة
+        # (الجسم، الكود) — المرجع القوي للجسم يمنع إعادة استخدام عنوانه
+        # بعد جمعه (ثغرة أغلقها 1.26: كان قد يُنفَّذ كود دالة أخرى)
         self._vm_code_cache = {}
 
     # ================== التنفيذ ==================
@@ -394,10 +396,11 @@ class Interpreter:
 
     def exec_FuncDef(self, node, env):
         params = [(name, self._eval_default(default, env))
-                  for name, default in node.params]
+                  for name, default, _spec in node.params]
         value = ArabiFunc(node.name, params, node.body, env,
                           is_generator=node.is_generator, rest=node.rest,
-                          is_async=node.is_async)
+                          is_async=node.is_async,
+                          anns=node.anns, ret=node.ret)
         # تطبيق المزخرفات من الأسفل إلى الأعلى (كما في بايثون)
         for dec in reversed(node.decorators):
             func_value = self.evaluate(dec, env)
@@ -447,10 +450,11 @@ class Interpreter:
                         f"تكرار تعريف الطريقة '{stmt.name}' في الصنف '{node.name}'",
                         stmt.line)
                 params = [(name, self._eval_default(default, env))
-                          for name, default in stmt.params]
+                          for name, default, _spec in stmt.params]
                 method = ArabiFunc(stmt.name, params, stmt.body, class_env,
                                    is_generator=stmt.is_generator,
-                                   rest=stmt.rest, is_async=stmt.is_async)
+                                   rest=stmt.rest, is_async=stmt.is_async,
+                                   anns=stmt.anns, ret=stmt.ret)
                 # تطبيق مزخرفات الطرق إن وجدت
                 for dec in reversed(stmt.decorators):
                     func_value = self.evaluate(dec, env)
@@ -519,10 +523,11 @@ class Interpreter:
                 if stmt.body is None:
                     continue                   # طريقة مجردة — لا عضو
                 params = [(name, self._eval_default(default, env))
-                          for name, default in stmt.params]
+                          for name, default, _spec in stmt.params]
                 members[stmt.name] = ArabiFunc(
                     stmt.name, params, stmt.body, class_env,
-                    is_generator=stmt.is_generator, rest=stmt.rest)
+                    is_generator=stmt.is_generator, rest=stmt.rest,
+                    anns=stmt.anns, ret=stmt.ret)
             elif (isinstance(stmt, N.Assign) and len(stmt.targets) == 1
                     and isinstance(stmt.targets[0], N.Name)):
                 name = stmt.targets[0].name
@@ -586,7 +591,7 @@ class Interpreter:
 
     def exec_Return(self, node, env):
         value = None if node.value is None else self.evaluate(node.value, env)
-        raise ReturnSignal(value)
+        raise ReturnSignal(value, node.line)
 
     def exec_Break(self, node, env):
         raise BreakSignal()
@@ -1346,10 +1351,10 @@ class Interpreter:
     def eval_Lambda(self, node, env):
         """الدالة السهمية قيمة عند التقييم — تُنشئ ArabiFunc بجسم من سطر واحد."""
         params = [(name, self._eval_default(default, env))
-                  for name, default in node.params]
+                  for name, default, _spec in node.params]
         body = [N.Return(node.body, node.line)]
         return ArabiFunc('سهمية', params, body, env, is_lambda=True,
-                         rest=node.rest)
+                         rest=node.rest, anns=node.anns)
 
     def eval_Attribute(self, node, env):
         return self._get_attribute(self.evaluate(node.obj, env),
@@ -1536,7 +1541,7 @@ class Interpreter:
                 return self._spawn_task(func, local, None, line)
             if func.is_generator:
                 return GeneratorValue(self, func, local)
-            return self._run_func(func, local)
+            return self._run_func(func, local, line)
         if isinstance(func, BuiltinFunc):
             if kwargs:
                 names = '، '.join(kwargs)
@@ -1638,11 +1643,144 @@ class Interpreter:
                     'أرسلها موضعيًا أو بالاسم', line)
             bound[name] = default
 
+        if func.anns:
+            self._check_param_annotations(func, bound, rest_name,
+                                          rest_values, line)
         for name, _default in params:
             local.define(name, bound[name])
         if rest_name is not None:
             local.define(rest_name, rest_values)
         return local
+
+    # ---- نظام الأنواع التدريجي (1.26 — قرارات ق١٣–ق١٦) ----
+
+    def _ensure_annotations(self, func):
+        """يحل أسماء التوصيفات عند أول استدعاء ويجمّدها على الدالة (ق١٣).
+
+        الاسم يُحلّ من نطاق التعريف أولًا — صنف المستخدم يحجب العائلة
+        المدمجة (لا كلمات محجوزة جديدة) — ثم العائلات ثم خطأ واضح.
+        """
+        if func._ann_ready:
+            return
+        for name, spec in func.anns.items():
+            func._ann_resolved[name] = self._resolve_spec(func, spec)
+        if func.ret is not None:
+            func._ret_resolved = self._resolve_spec(func, func.ret)
+        func._ann_ready = True
+
+    def _resolve_spec(self, func, spec):
+        """يحوّل TypeSpec إلى وصف محسوم للفحص، أو يرفع برسالة موجّهة.
+
+        الوصف: ('family', اسم) | ('class', ClassValue)
+        | ('list', وصف العنصر) | ('dict', وصف المفتاح، وصف القيمة).
+
+        ترتيب الحسم (ق١٣): العائلات المدمجة أولًا — لأن أسماءها محجوزة
+        أصلًا بدوال التحويل المدمجة (عدد/نص/قائمة...) فلا يصح حجبها —
+        ثم ربط نطاق التعريف (صنف/واجهة المستخدم). العائلات كلمات محجوزة
+        في موضع التوصيف فقط، وخارجه تبقى المعرفات حرة تمامًا.
+        """
+        name = strip_tashkeel(spec.name)
+        if name in TYPE_FAMILIES:
+            if spec.element is not None:
+                return ('list', self._resolve_spec(func, spec.element))
+            if spec.key is not None:
+                kd = self._resolve_spec(func, spec.key)
+                vd = self._resolve_spec(func, spec.value)
+                return ('dict', kd, vd)
+            return ('family', name)
+        bound = func.env.find(name)
+        if bound is not MISSING:
+            if isinstance(bound, ClassValue):
+                if spec.element is not None or spec.key is not None:
+                    raise ArabiRuntimeError(
+                        f"التعمية '{spec.text}' لا تنطبق على '{name}' — "
+                        'الأصناف والواجهات توصّف بلا أقواس', spec.line)
+                return ('class', bound)
+            raise ArabiRuntimeError(
+                f"'{spec.name}' في التوصيف ليس نوعًا — إنه {typename(bound)}؛ "
+                'التوصيف يقبل صنفًا أو واجهة أو عائلة مدمجة', spec.line)
+        families = '، '.join(sorted(TYPE_FAMILIES))
+        raise ArabiRuntimeError(
+            f"اسم النوع '{spec.name}' غير معروف في '{func.name}' — "
+            f'ليس صنفًا مرئيًا من نطاق التعريف ولا عائلة مدمجة '
+            f'(العائلات: {families})', spec.line)
+
+    def _ann_reason(self, value, desc):
+        """يعيد None إذا طابق الوصف، وإلا سبب الرفض بالعربية (1.26)."""
+        kind = desc[0]
+        if kind == 'family':
+            if TYPE_FAMILIES[desc[1]](value):
+                return None
+            return f'ورد {typename(value)}'
+        if kind == 'class':
+            target = desc[1]
+            if isinstance(value, InstanceValue) and any(
+                    c is target for c in self._class_chain(value.cls)):
+                return None
+            noun = 'واجهة' if target.is_interface else 'صنف'
+            if isinstance(value, InstanceValue):
+                return (f'ورد كائنًا من {typename(value)} — والمطلوب '
+                        f"كائن من {noun} '{target.name}'")
+            return (f'ورد {typename(value)} — والمطلوب '
+                    f"كائن من {noun} '{target.name}'")
+        if kind == 'list':
+            if not isinstance(value, list):
+                return f'ورد {typename(value)}'
+            for i, item in enumerate(value):
+                r = self._ann_reason(item, desc[1])
+                if r:
+                    return f'العنصر رقم {i + 1} {r}'
+            return None
+        if kind == 'dict':
+            if not isinstance(value, dict):
+                return f'ورد {typename(value)}'
+            for k, v in value.items():
+                rk = self._ann_reason(k, desc[1])
+                if rk:
+                    return f'المفتاح {self._short(k)} {rk}'
+                rv = self._ann_reason(v, desc[2])
+                if rv:
+                    return f'قيمة المفتاح {self._short(k)} {rv}'
+            return None
+        return f'وصف نوع غير معروف ({kind})'
+
+    def _check_param_annotations(self, func, bound, rest_name,
+                                 rest_values, line):
+        """يفحص القيم المرتبطة ضد التوصيفات — يشمل الافتراضيات
+        والمعاملات بالاسم و...الوسائط الموصوفة (1.26)."""
+        self._ensure_annotations(func)
+        resolved = func._ann_resolved
+        if not resolved:
+            return
+        for name, value in bound.items():
+            desc = resolved.get(name)
+            if desc is None:
+                continue
+            reason = self._ann_reason(value, desc)
+            if reason:
+                spec_text = func.anns[name].text
+                raise ArabiRuntimeError(
+                    f"المعامل '{name}' في '{func.name}' يتوقع "
+                    f"'{spec_text}' لكن {reason} — "
+                    f'القيمة: {self._short(value)}', line)
+        if rest_name is not None and rest_name in resolved:
+            reason = self._ann_reason(rest_values, resolved[rest_name])
+            if reason:
+                spec_text = func.anns[rest_name].text
+                raise ArabiRuntimeError(
+                    f"المعامل '{rest_name}' في '{func.name}' يتوقع "
+                    f"'{spec_text}' لكن {reason} — "
+                    f'القيمة: {self._short(rest_values)}', line)
+
+    def _short(self, value, limit=40):
+        """عرض مختصر لقيمة في رسالة خطأ — يمنع إغراق السجل (1.26)."""
+        try:
+            s = display(value)
+        except Exception:
+            s = typename(value)
+        if len(s) > limit:
+            s = s[:limit] + '…'
+        return s
 
     def _arity_message(self, func, n_params, n_args, kwargs):
         if getattr(func, 'rest', None) is not None:
@@ -1693,7 +1831,7 @@ class Interpreter:
         try:
             if func.is_generator:
                 return GeneratorValue(self, func, local)
-            return self._run_func(func, local)
+            return self._run_func(func, local, line)
         finally:
             stack.pop()
 
@@ -1716,7 +1854,7 @@ class Interpreter:
                         interp._tls.this_stack = stack
                     stack.append(this_val)
                 try:
-                    result = interp._run_func(func, local)
+                    result = interp._run_func(func, local, line)
                 finally:
                     if stack is not None:
                         stack.pop()
@@ -1750,41 +1888,82 @@ class Interpreter:
             f"تجمع) أو خيطًا أو عملية لكن استلمت {typename(value)}",
             node.line)
 
-    def _run_func(self, func, env):
+    def _run_func(self, func, env, line=None):
         """ينفذ جسم دالة: عبر الدولاب الافتراضي إن ترجم، وإلا الممسح الشجري.
 
         الترجمة تتم عند أول استدعاء وتخزن على الدالة نفسها (vm_code)،
         وفشلها يعلّم الدالة بالممسح الشجري الدائم — الشفافية أولًا.
+        (1.26): كل مسار إرجاع يمر على فحص نوع الإرجاع المعلن.
         """
         if not self.use_vm:
             try:
                 self.exec_statements(func.body, env)
             except ReturnSignal as signal:
-                return signal.value
-            return None
+                return self._checked_return(func, signal.value,
+                                            signal.line or line)
+            return self._checked_return(func, None, line)
         code = func.vm_code
         if code is _VM_PENDING:
-            key = id(func.body)
-            code = self._vm_code_cache.get(key)
-            if code is None:
-                try:
-                    code = _vm.compile_function(func.body)
-                except Exception:        # أي عطل في الترجمة — أمان كامل
-                    code = _VM_NO
-                self._vm_code_cache[key] = code
+            code = self._vm_code_for(func)
             func.vm_code = code
         if code is _VM_NO:
             try:
                 self.exec_statements(func.body, env)
             except ReturnSignal as signal:
-                return signal.value
-            return None
+                return self._checked_return(func, signal.value,
+                                            signal.line or line)
+            return self._checked_return(func, None, line)
         try:
-            return _vm.vm_exec(self, code, env)
+            value = _vm.vm_exec(self, code, env)
         except ReturnSignal as signal:
             # أعد من جمل احتياطية (مثل أعد داخل جرب) — المسار الأصلي
-            return signal.value
-        return None
+            return self._checked_return(func, signal.value,
+                                        signal.line or line)
+        return self._checked_return(func, value, line)
+
+    def _checked_return(self, func, value, line):
+        """يفحص قيمة أعد ضد نوع الإرجاع المعلن (1.26) — بلا كلفة إن لم يوصف."""
+        if func.ret is None:
+            return value
+        self._ensure_annotations(func)
+        reason = self._ann_reason(value, func._ret_resolved)
+        if reason:
+            raise ArabiRuntimeError(
+                f"الدالة '{func.name}' تعلن إرجاع '{func.ret.text}' "
+                f'لكن {reason} — القيمة: {self._short(value)}', line)
+        return value
+
+    VM_CODE_CACHE_CAP = 512   # سقف كاش الترجمة — إخلاء الأقدم (LRU)
+
+    def _vm_code_for(self, func):
+        """كود جسم الدالة المترجم — كاش LRU بمفتاح id مع مرجع قوي للجسم.
+
+        (إصلاح 1.26 لثغرة 1.25): المفتاح id(الجسم) بلا مرجع كان يسمح
+        بإعادة استخدام العنوان بعد جمع جسم قديم — فتُنفَّذ ترجمة دالة
+        أخرى على الدالة الجديدة! القيمة (الجسم، الكود) تحبس الجسم حيًّا
+        ما دام مخزَّنًا، والسعة المحدودة تحدّ الذاكرة بإخلاء الأقدم.
+        """
+        key = id(func.body)
+        entry = self._vm_code_cache.get(key)
+        if entry is not None:
+            body, code = entry
+            if body is func.body:
+                try:                       # لمس LRU — بتحمّل سباق الخيوط
+                    del self._vm_code_cache[key]
+                    self._vm_code_cache[key] = entry
+                except KeyError:
+                    pass
+                return code
+            del self._vm_code_cache[key]   # تحفّظي — يستحيل مع المرجع القوي
+        try:
+            code = _vm.compile_function(func.body)
+        except Exception:        # أي عطل في الترجمة — أمان كامل
+            code = _VM_NO
+        self._vm_code_cache[key] = (func.body, code)
+        cache = self._vm_code_cache
+        if len(cache) > self.VM_CODE_CACHE_CAP:
+            cache.pop(next(iter(cache)))
+        return code
 
     def _call_class_method(self, cls, instance, name, args, kwargs, line):
         """يبحث عن الطريقة في سلسلة الصنف وينفذها مرتبطة بالكائن."""

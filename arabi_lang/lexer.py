@@ -106,6 +106,7 @@ TWO_CHAR_OPS = {
     '%=': T.PERCENT_ASSIGN,
     '٪=': T.PERCENT_ASSIGN,
     '=>': T.ARROW,
+    '->': T.RARROW,           # نوع الإرجاع ASCII (نظام الأنواع 1.26)
 }
 
 ONE_CHAR_OPS = {
@@ -117,6 +118,7 @@ ONE_CHAR_OPS = {
     '{': T.LBRACE, '}': T.RBRACE,
     ',': T.COMMA, ':': T.COLON, '.': T.DOT,
     '@': T.AT,
+    '→': T.RARROW,           # نوع الإرجاع (U+2192 — نظام الأنواع 1.26)
 }
 
 OPEN_BRACKETS = {'(': ')', '[': ']', '{': '}'}

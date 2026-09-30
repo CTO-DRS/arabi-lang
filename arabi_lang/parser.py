@@ -5,9 +5,10 @@
   أو < و < ليس < مقارنة < +/- < */٪ < سالب < ** < استدعاء/فهرسة/خاصية
 """
 
-from .tokens import T
+from .tokens import T, strip_tashkeel
 from .nodes import (
     Program, ExprStmt, Assign, AugAssign, If, While, For, FuncDef, Return,
+    TypeSpec,
     Break, Continue, Pass, Try, Raise, Import, ClassDef, InterfaceDef,
     Lambda, Switch, EnumDef, PropertyDef, Global, Assert, Delete, Yield,
     Match, PLiteral, PCapture, POr, PList, PDict,
@@ -34,6 +35,7 @@ TOKEN_DESC = {
     T.DEDENT: 'نهاية الكتلة',
     T.EOF: 'نهاية الملف',
     T.ARROW: "'=>'",
+    T.RARROW: "'→'",
 }
 
 STMT_KEYWORDS = {
@@ -271,7 +273,10 @@ class Parser:
         self.expect(T.DEF, "متوقع كلمة 'دالة'")
         name = self.expect_ident("متوقع اسم الدالة بعد 'دالة'"
                                  + (" (بعد 'غير متزامنة')" if is_async else ''))
-        params, rest = self.parse_params()
+        params, rest, anns = self.parse_params()
+        ret = None
+        if self.match(T.RARROW):               # نوع الإرجاع (1.26)
+            ret = self.parse_type()
         self._yield_scopes.append(False)
         try:
             body = self.block()
@@ -281,9 +286,14 @@ class Parser:
             raise ParseError(
                 f"الدالة '{name}' لا يمكن أن تكون غير متزامنة ومولدة معًا "
                 "— لا تدمج 'أنتج' مع 'غير متزامنة'", tok.line, tok.col)
+        if is_generator and ret is not None:
+            raise ParseError(
+                f"المولد '{name}' لا يقبل نوع إرجاع بعد '→' — "
+                "الاستدعاء يعيد مولدًا وقيمه تُنتج بـ'أنتج' "
+                'داخل الجسم (نظام الأنواع 1.26)', tok.line, tok.col)
         return FuncDef(name, params, body, tok.line,
                        is_generator=is_generator, rest=rest,
-                       is_async=is_async)
+                       is_async=is_async, anns=anns, ret=ret)
 
     def decorated_def(self):
         """مزخرفات فوق الدالة:
@@ -324,22 +334,27 @@ class Parser:
         return Yield(self.expression(), tok.line)
 
     def parse_params(self):
-        """يقرأ المعاملات مع الافتراضيات والمعامل المتغير: (أ، ب = ٥، ...البقية)
+        """يقرأ المعاملات مع التوصيف والافتراضيات والمتغير:
+        (أ، ب: عدد = ٥، ...البقية)
 
-        يعيد (قائمة المعاملات، اسم المعامل المتغير أو None).
+        يعيد (قائمة المعاملات، اسم المعامل المتغير أو None،
+        التوصيفات {الاسم: TypeSpec}) — نظام الأنواع 1.26.
         """
         self.expect(T.LPAREN, "متوقع '(' لفتح قائمة المعاملات")
         params = []
         rest = None
+        anns = {}
         if not self.check(T.RPAREN):
             if self.check(T.ELLIPSIS):             # البدء مباشرة بـ ...الاسم
                 self.advance()
                 rest = self.expect_ident(
                     "متوقع اسم المعامل المتغير بعد '...'")
+                if self.match(T.COLON):            # توصيف المتغير (1.26)
+                    anns[rest] = self.parse_type()
                 if self.match(T.COMMA) and not self.check(T.RPAREN):
                     self.error("المعامل المتغير '...' يجب أن يكون الأخير")
             else:
-                params.append(self.parse_param())
+                self._append_param(params, anns)
                 while self.match(T.COMMA):
                     if self.check(T.RPAREN):           # فاصلة أخيرة مسموحة
                         break
@@ -349,24 +364,73 @@ class Parser:
                         self.advance()
                         rest = self.expect_ident(
                             "متوقع اسم المعامل المتغير بعد '...'")
+                        if self.match(T.COLON):    # توصيف المتغير (1.26)
+                            anns[rest] = self.parse_type()
                         if self.match(T.COMMA) and not self.check(T.RPAREN):
                             self.error(
                                 "المعامل المتغير '...' يجب أن يكون الأخير")
                         continue
-                    params.append(self.parse_param())
+                    self._append_param(params, anns)
         self.expect(T.RPAREN, "متوقع ')' لإغلاق قائمة المعاملات")
         if rest is not None and any(p[0] == rest for p in params):
             self.error(
                 f"اسم المعامل المتغير '{rest}' مكرر مع معامل عادي")
-        return params, rest
+        return params, rest, anns
 
     def parse_param(self):
-        """معامل واحد: اسم أو اسم = قيمة افتراضية"""
+        """معامل واحد: اسم [: نوع] [= قيمة افتراضية] (1.26)"""
         name = self.expect_ident('متوقع اسم معامل')
+        spec = None
+        if self.match(T.COLON):                    # توصيف النوع (1.26)
+            spec = self.parse_type()
         default = None
         if self.match(T.ASSIGN):
             default = self.expression()
-        return (name, default)
+        return (name, default, spec)
+
+    def _append_param(self, params, anns):
+        """يقرأ معاملًا ويضيفه لقائمة المعاملات وتوصيفه لقاموس التوصيفات."""
+        p = self.parse_param()
+        params.append(p)
+        if p[2] is not None:
+            anns[p[0]] = p[2]
+
+    def parse_type(self, inside_generic=False):
+        """نوع في موضع توصيف (نظام الأنواع 1.26):
+
+        نوع      ← 'ولا شيء' | 'دالة' | اسم ('[' نوع (':' نوع)? ']')?
+        التعمية لقائمة/قاموس فقط وبمستوى واحد — والباقي خطأ نحوي إرشادي.
+        """
+        tok = self.cur()
+        if self.match(T.NONE):
+            return TypeSpec('ولا شيء', tok.line)
+        if self.match(T.DEF):                      # 'دالة' سياقيًا (ق١٣)
+            return TypeSpec('دالة', tok.line)
+        name = self.expect_ident(
+            'متوقع نوعًا (عائلة مدمجة أو صنفًا)')
+        stripped = strip_tashkeel(name)
+        element = key = value = None
+        if self.check(T.LBRACKET):
+            if stripped not in ('قائمة', 'قاموس'):
+                self.error(
+                    f"التعمية على '{name}' غير مدعومة — فقط 'قائمة' "
+                    "و'قاموس' تقبلان أقواس التعمية")
+            if inside_generic:
+                self.error(
+                    f"التعمية المتداخلة غير مدعومة — لا يوضع نوع معيّم "
+                    f"داخل '{name}[...]'")
+            self.advance()
+            if stripped == 'قائمة':
+                element = self.parse_type(inside_generic=True)
+            else:
+                key = self.parse_type(inside_generic=True)
+                self.expect(
+                    T.COLON,
+                    "متوقع ':' بين نوع المفتاح ونوع القيمة في قاموس[...]")
+                value = self.parse_type(inside_generic=True)
+            self.expect(T.RBRACKET, "متوقع ']' لإغلاق التعمية")
+        return TypeSpec(name, tok.line,
+                        element=element, key=key, value=value)
 
     def if_stmt(self):
         tok = self.advance()                       # لو
@@ -571,13 +635,18 @@ class Parser:
         """طريقة داخل واجهة: بجسم (تنفيذ افتراضي) أو بلا جسم (مجردة)."""
         tok = self.advance()                       # دالة
         name = self.expect_ident("متوقع اسم الطريقة بعد 'دالة'")
-        params, rest = self.parse_params()
+        params, rest, anns = self.parse_params()
+        ret = None
+        if self.match(T.RARROW):                   # توثيق النوع في الواجهة (1.26)
+            ret = self.parse_type()
         if self.check(T.NEWLINE) or self.check(T.EOF) or self.check(T.DEDENT):
             if self.check(T.NEWLINE):              # نهاية سطر الطريقة المجردة
                 self.advance()
-            return FuncDef(name, params, None, tok.line, rest=rest)
+            return FuncDef(name, params, None, tok.line, rest=rest,
+                           anns=anns, ret=ret)
         body = self.block()
-        return FuncDef(name, params, body, tok.line, rest=rest)
+        return FuncDef(name, params, body, tok.line, rest=rest,
+                       anns=anns, ret=ret)
 
     def switch_stmt(self):
         """بدّل التعبير — كتل حالة على أسطر تالية بنفس مستوى 'بدل':
@@ -1060,12 +1129,16 @@ class Parser:
     def lambda_expr(self):
         """دالة سهمية: دالة(س، ص) => س + ص"""
         tok = self.advance()                       # دالة
-        params, rest = self.parse_params()
+        params, rest, anns = self.parse_params()
+        if self.match(T.RARROW):
+            self.error(
+                "الدالة السهمية لا تقبل نوع إرجاع — التوصيف للمعاملات "
+                'فقط، ونوع الإرجاع للدالة الكتلية (نظام الأنواع 1.26)')
         self.expect(T.ARROW, "متوقع '=>' بعد معاملات الدالة السهمية")
         if self.check(T.NEWLINE) or self.check(T.EOF):
             self.error('جسم الدالة السهمية يجب أن يكون تعبيرًا واحدًا على نفس السطر')
         body = self.expression()
-        return Lambda(params, body, tok.line, rest=rest)
+        return Lambda(params, body, tok.line, rest=rest, anns=anns)
 
     def list_literal(self):
         tok = self.advance()                       # [

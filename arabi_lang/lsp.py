@@ -591,7 +591,9 @@ class ArabiLanguageServer:
             tags.append('مولد')
         if node.decorators:
             tags.append('مزخرف')
-        head = f'**{node.name}**({params})'
+        ret = getattr(node, 'ret', None)
+        ret_txt = f' → {ret.text}' if ret is not None else ''
+        head = f'**{node.name}**({params}){ret_txt}'
         if tags:
             head += '  \n' + '، '.join(tags)
         doc = tools._docstring(node.body)
