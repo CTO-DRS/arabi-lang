@@ -22,3 +22,7 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: الفحص الساكن على المثال الرسمي (1.36)
         run: python arabi.py --تحقق-ساكن examples/46_التوصيف_الساكن.عربي
+      - name: حارس التنسيق الحتمي (1.37) — فارق صفر على الأمثلة
+        run: |
+          python arabi.py --نسق examples/*.عربي
+          git diff --exit-code --stat -- examples/
