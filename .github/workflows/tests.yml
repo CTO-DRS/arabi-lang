@@ -20,3 +20,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: تشغيل الاختبارات
         run: python -m unittest discover -s tests -v
+      - name: الفحص الساكن على المثال الرسمي (1.36)
+        run: python arabi.py --تحقق-ساكن examples/46_التوصيف_الساكن.عربي

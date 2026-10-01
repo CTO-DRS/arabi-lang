@@ -52,6 +52,7 @@ from arabi_lang import tools
 from arabi_lang import bytecode
 from arabi_lang import lsp as lsp_module
 from arabi_lang import debugger as debugger_module
+from arabi_lang import checker as checker_module
 
 
 def version_text():
@@ -600,6 +601,44 @@ def run_file(path, use_bytecode=True, use_vm=True):
         sys.exit(1)
 
 
+def static_check_files(paths):
+    """الفحص الساكن v1 (1.36): يفحص عقود الدوال الموثقة قبل التشغيل.
+
+    رمز خروج 1 عند أي مخالفة — عقد خطوط الاستمرارية (ص٥).
+    """
+    failed = False
+    total_documented = 0
+    for path in paths:
+        try:
+            issues, stats = checker_module.check_path(path)
+        except FileNotFoundError:
+            print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
+            sys.exit(1)
+        except UnicodeDecodeError:
+            print('خطأ: الملف يجب أن يكون بترميز UTF-8', file=sys.stderr)
+            sys.exit(1)
+        except IsADirectoryError:
+            print(f"خطأ: '{path}' مجلد وليس ملفًا", file=sys.stderr)
+            sys.exit(1)
+        total_documented += stats.documented
+        if issues:
+            failed = True
+            print(f'✗ {path} — {len(issues)} مخالفة ساكنة:')
+            for issue in issues:
+                where = f' في {issue.func}' if issue.func else ''
+                line = f'سطر {issue.line}' if issue.line else 'سطر ?'
+                print(f'    {line}{where}: {issue.message}')
+        else:
+            print(f'✓ {path} — {stats.documented} دالة موثقة سليمة '
+                  f'({stats.evidenced} موضع أعد بدليل ساكن، '
+                  f'{stats.skipped} بلا دليل في v1)')
+    if failed:
+        sys.exit(1)
+    if not total_documented:
+        print('تنبيه: لا دوال موصّفة في الملفات المفحوصة — الفحص الساكن '
+              'يفحص عقود الدوال الموثقة حصرًا (الفصل ٦٫٨ من المواصفة)')
+
+
 def debug_file(path):
     """يفتح جلسة تنقيح تفاعلية عربية لملف (الإصدار 1.35 — أفق التمكين).
 
@@ -804,6 +843,7 @@ def show_help():
     {prog} --تحقق ملف      فحص الصياغة دون تنفيذ
     {prog} --نسق ملفات     تنسيق الملفات وإصلاح الإزاحة
     {prog} --افحص ملفات    فحص الملفات بحثًا عن المشكلات
+    {prog} --تحقق-ساكن ملفات  فحص عقود الدوال الموثقة قبل التشغيل (1.36)
     {prog} --وثق ملف [ناتج] توليد توثيق Markdown
     {prog} --ثبت مسار|رابط  تثبيت مكتبة في مجلد مكتبات/
     {prog} --حزم           عرض المكتبات المثبتة
@@ -859,6 +899,13 @@ def main():
             print("خطأ: الخيار '--تحقق' يحتاج مسار ملف بعده", file=sys.stderr)
             sys.exit(1)
         check_file(args[1])
+    elif first in ('--تحقق-ساكن', '--typecheck'):
+        # المدقق الساكن v1 (1.36): عقود الدوال الموثقة قبل التشغيل
+        if len(args) < 2:
+            print("خطأ: الخيار '--تحقق-ساكن' يحتاج مسار ملف واحد على الأقل "
+                  'بعده', file=sys.stderr)
+            sys.exit(1)
+        static_check_files(args[1:])
     elif first in ('--نسق', '--format'):
         if len(args) < 2:
             print("خطأ: الخيار '--نسق' يحتاج مسار ملف واحد على الأقل بعده",
