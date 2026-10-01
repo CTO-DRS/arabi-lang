@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """لغة عربي — لغة برمجة عربية بالكامل."""
 
-__version__ = '1.34.1'
+__version__ = '1.35.0'
 
 from .errors import ArabiError, LexerError, ParseError, ArabiRuntimeError
 from .lexer import Lexer

@@ -51,6 +51,7 @@ from arabi_lang.errors import ArabiError
 from arabi_lang import tools
 from arabi_lang import bytecode
 from arabi_lang import lsp as lsp_module
+from arabi_lang import debugger as debugger_module
 
 
 def version_text():
@@ -599,6 +600,54 @@ def run_file(path, use_bytecode=True, use_vm=True):
         sys.exit(1)
 
 
+def debug_file(path):
+    """يفتح جلسة تنقيح تفاعلية عربية لملف (الإصدار 1.35 — أفق التمكين).
+
+    التوقف على أول جملة، ثم أوامر المتابعة/الخطوة/التالية/نقاط التوقف
+    وفحص الأُطر — والمفسر يعمل بالممسح الشجري طوال الجلسة (قرار د٣:
+    أجسام الدولاب لا تمر بالخطاف فلا تُرى).
+    """
+    try:
+        with open(path, encoding='utf-8-sig') as f:
+            source = f.read()
+    except FileNotFoundError:
+        print(f"خطأ: الملف '{path}' غير موجود", file=sys.stderr)
+        sys.exit(1)
+    except UnicodeDecodeError:
+        print('خطأ: الملف يجب أن يكون بترميز UTF-8', file=sys.stderr)
+        sys.exit(1)
+    except IsADirectoryError:
+        print(f"خطأ: '{path}' مجلد وليس ملفًا", file=sys.stderr)
+        sys.exit(1)
+
+    lines = source.splitlines()
+    try:
+        tree = Parser(Lexer(source).tokenize()).parse()
+    except ArabiError as error:
+        print_error(error, lines)
+        sys.exit(1)
+
+    print(f"منقّح عربي — الإصدار {__version__}")
+    print(f"الملف: {path} — اكتب «مساعدة» لعرض الأوامر")
+    script_dir = os.path.dirname(os.path.abspath(path))
+    interpreter = Interpreter(script_dir=script_dir, use_bytecode=False)
+    frontend = debugger_module.CliFrontend()
+    try:
+        debugger_module.debug_program(interpreter, tree, source, path,
+                                      frontend)
+    except debugger_module.DebugQuit:
+        print('انتهت الجلسة بطلب المستخدم — لم يكتمل تنفيذ البرنامج')
+        return
+    except ArabiError as error:
+        print_error(error, lines)
+        sys.exit(1)
+    except RecursionError:
+        print('خطأ تشغيلي: تعاود عميق جدًا — تحقق من شرط التوقف في '
+              'دالتك أو زد الحد بثبات', file=sys.stderr)
+        sys.exit(1)
+    print('انتهى تنفيذ البرنامج — أُغلق المنقّح')
+
+
 def compile_files(paths):
     """يترجم الملفات إلى كود وسيط دون تنفيذ — يطبع مسار كل ذاكرة."""
     failed = False
@@ -772,6 +821,8 @@ def show_help():
     {prog} --بايت ملفات    ترجمة الملفات إلى كود وسيط (.بيت) دون تنفيذ
     {prog} --لا-بايت ملف   تشغيل معطّلًا الكود الوسيط (تجاهل الذاكرة)
     {prog} --لا-دولاب ملف  تشغيل معطّلًا الدولاب الافتراضي (ممسح شجري)
+    {prog} --نقح ملف      تنقيح تفاعلي: نقاط توقف وخطوة وفحص أُطر (1.35)
+    {prog} --منقح-بروتوكول  مهايئ بروتوكول DAP للمحررات (تلقائيًا من إضافتها)
     {prog} --عامل م:منفذ [--مفتاح سر]  تشغيل عامل موزع يخدم موزعًا على الشبكة (1.18) ويوقع التحدي بالمفتاح المشترك (1.19)
     {prog} --نسخة | -v     عرض الإصدار
     {prog} --مساعدة | -h   عرض هذه المساعدة
@@ -835,6 +886,19 @@ def main():
         list_packages()
     elif first in ('حزمة', 'packages-manage'):
         package_cli(args[1:])
+    elif first in ('--نقح', '--تنقيح', '--debug'):
+        # المنقّح التفاعلي (1.35): نقاط توقف وخطوة وفحص أُطر بواجهة عربية
+        if len(args) < 2:
+            print("خطأ: الخيار '--نقح' يحتاج مسار ملف بعده",
+                  file=sys.stderr)
+            sys.exit(1)
+        debug_file(args[1])
+    elif first in ('--منقح-بروتوكول', '--dap'):
+        # مهايئ بروتوكول محول التنقيح DAP للمحررات (1.35) — القنوات
+        # القياسية فقط، والبرنامج يأتي في طلب launch
+        debugger_module_dap = __import__('arabi_lang.debug_adapter',
+                                         fromlist=['DebugAdapter'])
+        debugger_module_dap.main()
     elif first in ('--لغة', '--lsp'):
         # خادم اللغة: يتواصل عبر القنوات القياسية بلا أي مخرجات أخرى
         lsp_module.main()

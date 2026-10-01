@@ -116,6 +116,11 @@ class Interpreter:
         # (الجسم، الكود) — المرجع القوي للجسم يمنع إعادة استخدام عنوانه
         # بعد جمعه (ثغرة أغلقها 1.26: كان قد يُنفَّذ كود دالة أخرى)
         self._vm_code_cache = {}
+        # خطاف المنقّح (1.35): None في التشغيل العادي — كلفة صفرية غير
+        # فحص «is not None». عند ركوبه: يُستدعى قبل كل جملة (execute
+        # وrun للتعبيرية العلوية — أثبتها المسبار)، ويفرض تعطيل الدولاب
+        # في _run_func لأن أجسامه لا تمر بـexecute أصلًا
+        self.debug_hook = None
 
     # ================== التنفيذ ==================
 
@@ -126,6 +131,10 @@ class Interpreter:
         try:
             for stmt in program.statements:
                 if isinstance(stmt, N.ExprStmt):
+                    # جملة التعبير العلوية تتجاوز execute بنيويًا —
+                    # الخطاف هنا لا في execute وإلا توقفت مرتين
+                    if self.debug_hook is not None:
+                        self.debug_hook.before_statement(stmt, env)
                     last_value = self.evaluate(stmt.expr, env)
                 else:
                     self.execute(stmt, env)
@@ -138,6 +147,8 @@ class Interpreter:
         return last_value
 
     def execute(self, node, env):
+        if self.debug_hook is not None:
+            self.debug_hook.before_statement(node, env)
         method = getattr(self, 'exec_' + type(node).__name__)
         return method(node, env)
 
@@ -1915,12 +1926,19 @@ class Interpreter:
         وفشلها يعلّم الدالة بالممسح الشجري الدائم — الشفافية أولًا.
         (1.26): كل مسار إرجاع يمر على فحص نوع الإرجاع المعلن.
         """
-        if not self.use_vm:
+        if not self.use_vm or self.debug_hook is not None:
+            # المنقّح يفرض الممسح الشجري (أجسام الدولاب لا تمر بـexecute)
+            hook = self.debug_hook
+            if hook is not None:
+                hook.enter_function(func, env, line)
             try:
                 self.exec_statements(func.body, env)
             except ReturnSignal as signal:
                 return self._checked_return(func, signal.value,
                                             signal.line or line)
+            finally:
+                if hook is not None:
+                    hook.exit_function(func)
             return self._checked_return(func, None, line)
         code = func.vm_code
         if code is _VM_PENDING:
