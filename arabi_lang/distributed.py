@@ -76,6 +76,11 @@ NONCE_BYTES = 32           # طول تحدي المصادقة العشوائي (
 POLL_INTERVAL = 0.01       # نبضة استطلاع حلقات الانتظار (ثوانٍ)
 MAX_FRAME = 256 * 1024 * 1024   # الحد الأعلى لحجم الإطار الواحد (256 م.ب)
 
+MAX_WORKERS = 128             # سقف اتصالات العمالة — حماية من إهاجاد
+                              # الخيط-لكل-اتصال (تدقيق الفصل 15 بند 4)
+MAX_TASK_ATTEMPTS = 3         # أقصى محاولات لمهمة قبل إلغائها نهائيًا
+                              # — عاملها سقط في كل مرة (تدقيق الفصل 15 بند 5)
+
 _HEAD = struct.Struct('>I')    # رأس الإطار: طول بياناته بأربعة بايتات
 _CHANNEL_OVERHEAD = (len(_CIPHER_MAGIC) + _CIPHER_NONCE_BYTES
                      + _TAG_BYTES)   # زيادة الإطار المشفر على الأصل
@@ -489,6 +494,7 @@ class _Server:
         self._total = 0
         self._queue = deque()          # (معرف المهمة، الحزمة) بانتظار عامل
         self._tasks = {}               # معرف المهمة ← قيمتها
+        self._attempts = {}            # معرف المهمة ← عدد المحاولات
         self._workers = {}             # معرف العامل ← اتصاله
         self._idle = deque()           # معرفات العمالة المستعدة (بترتيب)
         self._worker_seq = 0
@@ -540,6 +546,19 @@ class _Server:
             except OSError:
                 break                    # أُغلق المقبس — انتهى الخادم
             sock.settimeout(WORKER_TIMEOUT)
+            with self._lock:
+                over_cap = (len(self._workers) >= MAX_WORKERS)
+            if over_cap:
+                # سقف الاتصالات: رفض واضح بلا خيط جديد — الحد يحمي
+                # الموارد في الوضع الحر خصوصًا (الفصل 15 بند 4)
+                try:
+                    send_frame(sock, ('رفض',
+                                      f'بلغ الموزع سقف اتصالات العمالة '
+                                      f'({MAX_WORKERS}) — أُغلق الاتصال'))
+                except (OSError, ArabiRuntimeError):
+                    pass
+                self._close_quietly(sock)
+                continue
             threading.Thread(target=self._reader_loop, args=(sock, addr),
                              daemon=True,
                              name='موزع-عربي-عامل').start()
@@ -641,10 +660,25 @@ class _Server:
                 self._idle.remove(wid)
             except ValueError:
                 pass
+            cancelled = None
             if conn is not None and conn.inflight is not None:
                 job_id, blob = conn.inflight
-                self._queue.appendleft((job_id, blob))
+                attempts = self._attempts.get(job_id, 1) + 1
+                if attempts > MAX_TASK_ATTEMPTS:
+                    # سقط عاملوها كلهم في كل محاولة — الإلغاء أصدق من
+                    # الارتداد إلى الأبد (الفصل 15 بند 5)
+                    self._attempts.pop(job_id, None)
+                    task = self._tasks.pop(job_id, None)
+                    if task is not None:
+                        cancelled = task
+                else:
+                    self._attempts[job_id] = attempts
+                    self._queue.appendleft((job_id, blob))
                 conn.inflight = None
+        if cancelled is not None:
+            cancelled._finish(None, ArabiRuntimeError(
+                'أُلغيت المهمة الموزعة نهائيًا — سقط عاملها في كل '
+                f'{MAX_TASK_ATTEMPTS} محاولات'))
         if conn is not None:
             self._close_quietly(conn.sock)
         self._pump()
@@ -706,6 +740,7 @@ class _Server:
                     and conn.inflight[0] == job_id):
                 conn.inflight = None
                 task = self._tasks.pop(job_id, None)
+                self._attempts.pop(job_id, None)
                 if wid not in self._idle:
                     self._idle.append(wid)     # العامل حر من جديد
         if task is None:
@@ -811,6 +846,7 @@ class _Server:
         with self._lock:
             remaining = list(self._tasks.values())
             self._tasks.clear()
+            self._attempts.clear()
             self._queue.clear()
         for task in remaining:               # ما لم يُنفذ — رفض صريح
             task._finish(None, ArabiRuntimeError(

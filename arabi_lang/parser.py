@@ -11,7 +11,7 @@ from .nodes import (
     TypeSpec,
     Break, Continue, Pass, Try, Raise, Import, ClassDef, InterfaceDef,
     Lambda, Switch, EnumDef, PropertyDef, Global, Assert, Delete, Yield,
-    Match, PLiteral, PCapture, POr, PList, PDict,
+    Match, PLiteral, PCapture, POr, PList, PDict, With,
     Num, Str, FString, Bool, Null, Name, ListLit, DictLit, ListComp, DictComp,
     BinOp, UnaryOp, Call, Index, Slice, MethodCall, Attribute, This, Super,
     Ternary, SpreadArg, Await,
@@ -232,7 +232,28 @@ class Parser:
                 and self.peek(1).value in ('متزامنة', 'متزامن')
                 and self.peek(2).type is T.DEF):
             return self.func_def()
+        # «مع قفل:» — كلمة سياقية في بداية الجملة (1.32 — ق٢٤): تُعد
+        # سياقًا محميًا إذا جاء بعدها معرّف (قفل أو كائن يبدأ تعبيرًا
+        # بمعرّف)، وإلا تُعامل كاسم عادي فيعبّر — فلا يُكسر أي معرف
+        # يحمل الاسم نفسه
+        if (t is T.IDENT and self.cur().value == 'مع'
+                and self.peek(1).type is T.IDENT):
+            return self.with_stmt()
         return self.expr_stmt()
+
+    def with_stmt(self):
+        """السياق المحمي (المواصفة ق٢٤):
+
+        مع قفل
+            ...الجسم...
+
+        يفتح القفل عند الدخول ويغلقه مهما حدث داخل الكتلة — استثناء
+        أو كسر أو استمرار أو إرجاع — كضمانة لغة لا انضباط مبرمج.
+        """
+        tok = self.advance()                       # مع
+        ctx = self.expression()
+        body = self.block()                        # يستهلك ':' والكتلة
+        return With(ctx, body, tok.line)
 
     def block(self):
         self.expect(T.COLON, "متوقع ':' في نهاية السطر")

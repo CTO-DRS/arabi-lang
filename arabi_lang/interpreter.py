@@ -602,6 +602,26 @@ class Interpreter:
     def exec_Pass(self, node, env):
         return None
 
+    def exec_With(self, node, env):
+        """السياق المحمي (المواصفة ق٢٤): مع قفل: — الإغلاق مضمون مهما حدث.
+
+        يقيّم التعبير ويجب أن يعيد قفلًا من وحدة 'خيوط' — يُفتح عند
+        الدخول ويُغلق عند الخروج في كل الحالات: النهاية الطبيعية،
+        الاستثناء، الكسر، الاستمرار، والإرجاع.
+        """
+        from .runtime import LockValue
+        value = self.evaluate(node.expr, env)
+        if not isinstance(value, LockValue):
+            raise ArabiRuntimeError(
+                f"'مع' يقبل قفلًا من وحدة 'خيوط' فقط في هذا الإصدار "
+                f"(المواصفة ق٢٤) — لكنه استلم {typename(value)}",
+                node.line)
+        value.lock.acquire()
+        try:
+            self.exec_statements(node.body, env)
+        finally:
+            value.lock.release()
+
     def exec_Try(self, node, env):
         """جرب/باستثناء مع كتل متعددة وأول فلتر مطابق يفوز (المواصفة ق٦).
 

@@ -2,7 +2,7 @@
     "name": "arabi-lang",
     "displayName": "لغة عربي — Arabi Language",
     "description": "دعم لغة عربي البرمجية: تلوين بناء الجملة، مقتطفات كود، وخادم لغة (LSP) يوفر التشخيص اللحظي والإكمال الذكي والتلميحات والانتقال إلى التعريف للملفات ذات الامتداد .عربي",
-    "version": "1.31.0",
+    "version": "1.32.0",
     "publisher": "arabi-lang",
     "license": "MIT",
     "icon": null,

@@ -222,6 +222,19 @@ class Match(Node):
         self.default_body = default_body  # [stmt] أو None
 
 
+class With(Node):
+    """السياق المحمي: مع قفل: — يفتح عند الدخول ويغلق مهما حدث (ق٢٤).
+
+    في 1.32 يقبل قفلًا من وحدة 'خيوط' فقط — الإغلاق مضمون حتى مع
+    الاستثناء أو كسر أو إرجاع داخل الكتلة.
+    """
+
+    def __init__(self, expr, body, line=None):
+        super().__init__(line)
+        self.expr = expr
+        self.body = body  # [stmt]
+
+
 # ================== عقد أنماط المطابقة (الإصدار 1.9) ==================
 
 class PLiteral(Node):

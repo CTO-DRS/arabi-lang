@@ -298,6 +298,10 @@
           "match": "(?<![\\u0600-\\u06FF\\w])(عالمي|احذف)(?![\\u0600-\\u06FF\\w])"
         },
         {
+          "name": "keyword.control.with.arabi",
+          "match": "(?<![\\u0600-\\u06FF\\w])مع(?![\\u0600-\\u06FF\\w])"
+        },
+        {
           "name": "keyword.control.generator.arabi",
           "match": "(?<![\\u0600-\\u06FF\\w])أنتج(?![\\u0600-\\u06FF\\w])"
         },
