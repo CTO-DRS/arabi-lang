@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNNER = ROOT / 'benchmarks' / 'run.py'
@@ -23,79 +23,82 @@ def _run(args, timeout=300):
         capture_output=True, text=True, timeout=timeout, cwd=str(ROOT))
 
 
-class TestRunnerQuick:
+class TestRunnerQuick(unittest.TestCase):
     """الوضع السريع يعمل وينتج المعايير الخمسة كلها."""
 
     def test_quick_json_wellformed(self):
         r = _run(['--quick', '--json'])
-        assert r.returncode == 0, r.stderr[-500:]
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
         data = json.loads(r.stdout)
-        assert set(data.keys()) == {'بدء', 'حلقة_ساخنة', 'مولدات', 'بيئة_قدّم', 'تشفير'}
+        self.assertEqual(set(data.keys()), {'بدء', 'حلقة_ساخنة', 'مولدات', 'بيئة_قدّم', 'تشفير'})
 
     def test_quick_check_gates_pass(self):
         r = _run(['--quick', '--check'])
-        assert r.returncode == 0, r.stderr[-500:]
-        assert r.stdout.count('[سليم]') >= 8
-        assert '[فشل]' not in r.stdout
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertGreaterEqual(r.stdout.count('[سليم]'), 8)
+        self.assertNotIn('[فشل]', r.stdout)
 
     def test_quick_numbers_positive(self):
         r = _run(['--quick', '--json'])
         data = json.loads(r.stdout)
-        assert data['حلقة_ساخنة']['دولاب_ثانية'] > 0
-        assert data['حلقة_ساخنة']['شجري_ثانية'] > 0
-        assert data['تشفير']['شفّر_مبثث'] > 0
-        assert data['بدء']['ثانية'] > 0
+        self.assertGreater(data['حلقة_ساخنة']['دولاب_ثانية'], 0)
+        self.assertGreater(data['حلقة_ساخنة']['شجري_ثانية'], 0)
+        self.assertGreater(data['تشفير']['شفّر_مبثث'], 0)
+        self.assertGreater(data['بدء']['ثانية'], 0)
 
     def test_equivalence_holds(self):
         """تكافؤ الدولاب والشجري على نفس الحمل — الصحة قبل الزمن."""
         r = _run(['--quick', '--json'])
         data = json.loads(r.stdout)
         n = 1_000_000 // 10  # نفس تصغير الوضع السريع
-        assert data['حلقة_ساخنة']['دولاب_ثانية'] > 0
+        self.assertGreater(data['حلقة_ساخنة']['دولاب_ثانية'], 0)
         # النتائج نفسها مفحوصة داخل المعيار برفع خطأ عند أي انحراف —
         # وصولنا هنا يعني أن كل دورة كانت تساوي ن(ن-١)/٢ بالضبط
-        assert n * (n - 1) // 2 == 4_999_950_000
+        self.assertEqual(n * (n - 1) // 2, 4_999_950_000)
 
 
-class TestVMAccelerationGate:
+class TestVMAccelerationGate(unittest.TestCase):
     """بوابة النسبة: الدولاب ألا يكون أبطأ من الشجري ×1.5 — حد انحلال 50%."""
 
     def test_vm_not_slower_than_tree_times_1_5(self):
         r = _run(['--quick', '--json'])
         data = json.loads(r.stdout)
         hl = data['حلقة_ساخنة']
-        assert hl['شجري_ثانية'] / hl['دولاب_ثانية'] >= 1 / 1.5
+        self.assertGreaterEqual(hl['شجري_ثانية'] / hl['دولاب_ثانية'], 1 / 1.5)
 
 
-class TestBaseline:
+class TestBaseline(unittest.TestCase):
     """خط الأساس المرفق سليم، والمقارنة الصارمة تفشل مغلقًا عند العبث."""
 
     def test_baseline_file_valid(self):
-        assert BASELINE.exists()
+        self.assertTrue(BASELINE.exists())
         data = json.loads(BASELINE.read_text(encoding='utf-8'))
-        assert data['numbers'], 'خط الأساس بلا أرقام'
-        assert 'حلقة_ساخنة.دولاب_ثانية' in data['numbers']
-        assert data['python']
+        self.assertTrue(data['numbers'], 'خط الأساس بلا أرقام')
+        self.assertIn('حلقة_ساخنة.دولاب_ثانية', data['numbers'])
+        self.assertTrue(data['python'])
 
     def test_baseline_comparison_passes(self):
         r = _run(['--quick', '--baseline', str(BASELINE)])
-        assert r.returncode == 0, r.stdout[-500:]
-        assert 'بلا انحلال' in r.stdout
+        self.assertEqual(r.returncode, 0, r.stdout[-500:])
+        self.assertIn('بلا انحلال', r.stdout)
 
-    def test_tampered_baseline_fails_closed(self, tmp_path):
+    def test_tampered_baseline_fails_closed(self):
         """عبث بالخط الأساس (×10 أبطأ) → رمز خروج 1 — البوابة تغلق."""
         data = json.loads(BASELINE.read_text(encoding='utf-8'))
         key = 'حلقة_ساخنة.دولاب_ثانية'
         # المرجع يصغر ×100 فيصبح القياس الحقيقي «انحلالًا» عشرة أضعاف عنه
         # (×10 بالضبط تُمحّاها تصغير الوضع السريع نفسه)
         data['numbers'][key] = data['numbers'][key] / 100
-        tampered = tmp_path / 'baseline.json'
-        tampered.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
-        r = _run(['--quick', '--baseline', str(tampered)])
-        assert r.returncode == 1
-        assert key in r.stdout
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tampered = Path(td) / 'baseline.json'
+            tampered.write_text(json.dumps(data, ensure_ascii=False),
+                                encoding='utf-8')
+            r = _run(['--quick', '--baseline', str(tampered)])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(key, r.stdout)
 
-    def test_ceilings_fail_closed(self, tmp_path, monkeypatch):
+    def test_ceilings_fail_closed(self):
         """سقف كارثي مسحوب إلى ما دون الصفر → فشل البوابة (برهان الإغلاق)."""
         # نفحص منطق البوابات مباشرة — بلا تشغيل عملية جديدة
         sys.path.insert(0, str(ROOT / 'benchmarks'))
@@ -110,11 +113,11 @@ class TestBaseline:
                 'تشفير': {'شفّر_مبثث': 2.0, 'فكّ_مبثث': 2.0, 'سقف_ثانية_لكل_اتجاه': 30.0},
             }
             gates = dict((name, ok) for name, ok, _ in bench_run.check_gates(results, True))
-            assert all(gates.values())
+            self.assertTrue(all(gates.values()))
             # انحلال: الدولاب أبطأ من الشجري (نسبة 0.4 < 0.67)
             results['حلقة_ساخنة']['نسبة_التسريع'] = 0.4
             gates2 = dict((name, ok) for name, ok, _ in bench_run.check_gates(results, True))
-            assert gates2['دولاب_لا_أبطأ_من_الشجري×1.5'] is False
+            self.assertFalse(gates2['دولاب_لا_أبطأ_من_الشجري×1.5'])
         finally:
             sys.path.remove(str(ROOT / 'benchmarks'))
             sys.modules.pop('run', None)

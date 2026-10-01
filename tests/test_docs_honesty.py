@@ -84,6 +84,55 @@ class TestFormatterHonesty(unittest.TestCase):
         self.assertNotIn('\t', out)
 
 
+class TestUnittestNative(unittest.TestCase):
+    """حارس التوحيد: اختبارات المشروع تعمل بـ unittest discover (CI) —
+    فأي اعتماد على pytest أو فئة بلاTestCase يعني اختبارًا صامتًا
+    لا يرى CI. اكتشفه 1.34 متأخرًا — هذا الحارس يمنع تكراره."""
+
+    def test_no_pytest_dependency_in_test_files(self):
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        offenders = []
+        for fname in sorted(os.listdir(tests_dir)):
+            if not (fname.startswith('test_') and fname.endswith('.py')):
+                continue
+            with open(os.path.join(tests_dir, fname),
+                      encoding='utf-8') as f:
+                src = f.read()
+            if re.search(r'^\s*import pytest|^\s*from pytest', src,
+                         re.MULTILINE):
+                offenders.append(fname)
+        self.assertEqual(offenders, [],
+                         f'ملفات تعتمد pytest: {offenders} — CI يعمل unittest')
+
+    def test_every_test_class_subclasses_testcase(self):
+        import ast
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        offenders = []
+        for fname in sorted(os.listdir(tests_dir)):
+            if not (fname.startswith('test_') and fname.endswith('.py')):
+                continue
+            path = os.path.join(tests_dir, fname)
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=fname)
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.ClassDef)
+                        and node.name.startswith('Test')
+                        and not node.name.startswith('TestCase')):
+                    ok = False
+                    for b in node.bases:
+                        # unittest.TestCase اسم مؤهل (Attribute) أو مجرد (Name)
+                        if isinstance(b, ast.Name) and b.id == 'TestCase':
+                            ok = True
+                        elif isinstance(b, ast.Attribute) \
+                                and b.attr == 'TestCase':
+                            ok = True
+                    if not ok:
+                        offenders.append(f'{fname}:{node.name}')
+        self.assertEqual(offenders, [],
+                         f'فئات Test بلا TestCase (لا يراها unittest): '
+                         f'{offenders}')
+
+
 class TestCiClassifierConsistency(unittest.TestCase):
     """الفصل 17: 3.13 معلن في classifiers ومفحوص في CI معًا — لا ادعاء بلا فحص."""
 

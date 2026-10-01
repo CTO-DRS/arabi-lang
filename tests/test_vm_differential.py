@@ -223,12 +223,19 @@ class TestVmDifferential(unittest.TestCase):
                 with open(os.path.join(examples_dir, fname),
                           encoding='utf-8') as f:
                     src = f.read()
+                if 'إدخال(' in src:
+                    # مثال تفاعلي يقرأ الطرفية (لعبة التخمين) — لا يعمل بلا stdin:
+                    # تحت pytest يرفع OSError (الالتقاط) وتحت unittest يرفع EOFError
+                    continue
                 try:
                     out_t, err_t = _run(src, use_vm=False)
-                except OSError:
-                    # مثال يقرأ من الطرفية (مثل لعبة التخمين) — لا يعمل بلا stdin
+                except (OSError, EOFError):
                     continue
-                out_v, err_v = _run(src, use_vm=True)
+                try:
+                    out_v, err_v = _run(src, use_vm=True)
+                except (OSError, EOFError):
+                    self.fail(f'{fname}: الشجري يعمل والدولاب رفع EOF؟')
+
                 if err_t is not None or err_v is not None:
                     # مثال يرفع خطأً مقصودًا — يجب أن يكون هو نفسه في المسارين
                     self.assertEqual(str(err_t), str(err_v),
